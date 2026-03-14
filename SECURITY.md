@@ -15,15 +15,15 @@ This document explains the security architecture, threat model, known risks, and
 ### The 2-process architecture
 
 ```
-┌──────────────────────┐                    ┌───────────────────────┐
+┌───────────────────────┐                    ┌───────────────────────┐
 │  YOUR APPLICATION     │                    │   drmtap-helper       │
-│  (unprivileged)       │◄── socketpair ───►│   (CAP_SYS_ADMIN)     │
+│  (unprivileged)       │◄── socketpair ────►│   (CAP_SYS_ADMIN)     │
 │                       │                    │                       │
-│  - Uses libdrmtap API │◄── DMA-BUF fd ───│   - Opens /dev/dri/*  │
+│  - Uses libdrmtap API │◄── DMA-BUF fd ─────│   - Opens /dev/dri/*  │
 │  - Processes frames   │                    │   - Reads framebuffer │
 │  - Encodes video      │                    │   - Passes fd back    │
 │  - Network transport  │                    │   - Drops privileges  │
-└──────────────────────┘                    └───────────────────────┘
+└───────────────────────┘                    └───────────────────────┘
      No privileges                           CAP_SYS_ADMIN (dropped after init)
      No network access                       No network access
      Full application logic                  ~500 lines of C, statically linked
