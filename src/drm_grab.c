@@ -18,6 +18,13 @@
  *   5. drmPrimeHandleToFD() → DMA-BUF fd
  *   6. Optional: mmap for mapped path
  *   7. DMA_BUF_IOCTL_SYNC for read safety
+ *
+ * virtio_gpu special path:
+ *   Parallels/QEMU VMs with virtio 3D render framebuffers on the host GPU.
+ *   DMA-BUF mmap returns zeros. We detect this driver and use:
+ *     a. DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST to pull pixels from host
+ *     b. DRM_IOCTL_VIRTGPU_WAIT for transfer completion
+ *     c. DRM_IOCTL_MODE_MAP_DUMB to mmap via DRM fd (not prime fd)
  */
 
 #define _GNU_SOURCE
@@ -36,6 +43,17 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+/* virtio_gpu header for TRANSFER_FROM_HOST ioctl */
+#ifdef __has_include
+#  if __has_include(<virtgpu_drm.h>)
+#    include <virtgpu_drm.h>
+#    define HAVE_VIRTGPU 1
+#  endif
+#endif
+#ifndef HAVE_VIRTGPU
+#  define HAVE_VIRTGPU 0
+#endif
+
 #include "drmtap_internal.h"
 
 /* ========================================================================= */
@@ -47,6 +65,7 @@ typedef struct {
     void *mapped;           /* mmap'd pointer (or MAP_FAILED) */
     size_t mapped_size;     /* size of mapped region */
     uint32_t gem_handle;    /* GEM handle (needs close) */
+    int used_dumb_map;      /* 1 if mapped via dumb buffer (virtio_gpu) */
 } frame_priv_t;
 
 /* ========================================================================= */
@@ -178,6 +197,64 @@ static int dmabuf_sync_end(int fd) {
 }
 
 /* ========================================================================= */
+/* virtio_gpu transfer helpers                                               */
+/* ========================================================================= */
+
+// Check if the driver is virtio_gpu (needs special capture path)
+static int is_virtio_gpu(drmtap_ctx *ctx) {
+    const char *driver = drmtap_gpu_driver(ctx);
+    return (driver && strcmp(driver, "virtio_gpu") == 0);
+}
+
+// Pull framebuffer data from host GPU to guest memory
+// This is required for virtio_gpu 3D (virgl) where the compositor
+// renders on the host and DMA-BUF mmap returns zeros
+static int virtio_transfer_from_host(drmtap_ctx *ctx, uint32_t handle,
+                                     uint32_t width, uint32_t height) {
+#if HAVE_VIRTGPU
+    struct drm_virtgpu_3d_transfer_from_host xfer = {0};
+    xfer.bo_handle = handle;
+    xfer.box.w = width;
+    xfer.box.h = height;
+    xfer.box.d = 1;
+    int ret = drmIoctl(ctx->drm_fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST,
+                       &xfer);
+    if (ret != 0) {
+        drmtap_debug_log(ctx, "TRANSFER_FROM_HOST failed: %s",
+                         strerror(errno));
+        return -errno;
+    }
+
+    /* Wait for transfer completion */
+    struct drm_virtgpu_3d_wait wait_args = {0};
+    wait_args.handle = handle;
+    ret = drmIoctl(ctx->drm_fd, DRM_IOCTL_VIRTGPU_WAIT, &wait_args);
+    if (ret != 0) {
+        drmtap_debug_log(ctx, "VIRTGPU_WAIT failed: %s", strerror(errno));
+        return -errno;
+    }
+
+    drmtap_debug_log(ctx, "virtio: transferred %ux%u from host",
+                     width, height);
+    return 0;
+#else
+    (void)ctx; (void)handle; (void)width; (void)height;
+    return -ENOTSUP;
+#endif
+}
+
+// Map a GEM handle via the dumb buffer path (DRM fd, not prime fd)
+static void *virtio_dumb_mmap(drmtap_ctx *ctx, uint32_t handle, size_t size) {
+    struct drm_mode_map_dumb map = {0};
+    map.handle = handle;
+    if (drmIoctl(ctx->drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) != 0) {
+        drmtap_debug_log(ctx, "MODE_MAP_DUMB failed: %s", strerror(errno));
+        return MAP_FAILED;
+    }
+    return mmap(NULL, size, PROT_READ, MAP_SHARED, ctx->drm_fd, map.offset);
+}
+
+/* ========================================================================= */
 /* Core capture logic                                                        */
 /* ========================================================================= */
 
@@ -266,16 +343,35 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     /* Step 6: mmap if requested (mapped path) */
     if (do_mmap) {
         size_t size = (size_t)fb2->pitches[0] * fb2->height;
+        void *mapped = MAP_FAILED;
 
-        /* Sync before read */
-        dmabuf_sync_start(prime_fd);
+        /* virtio_gpu special path: transfer from host first, then dumb mmap */
+        if (is_virtio_gpu(ctx)) {
+            ret = virtio_transfer_from_host(ctx, fb2->handles[0],
+                                            fb2->width, fb2->height);
+            if (ret < 0) {
+                drmtap_debug_log(ctx,
+                    "virtio transfer failed, trying standard mmap");
+            } else {
+                mapped = virtio_dumb_mmap(ctx, fb2->handles[0], size);
+                if (mapped != MAP_FAILED) {
+                    priv->used_dumb_map = 1;
+                    drmtap_debug_log(ctx,
+                        "virtio: dumb-mapped %zu bytes at %p", size, mapped);
+                }
+            }
+        }
 
-        void *mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
-                            prime_fd, fb2->offsets[0]);
+        /* Standard DMA-BUF mmap path (non-virtio or virtio fallback) */
+        if (mapped == MAP_FAILED) {
+            dmabuf_sync_start(prime_fd);
+            mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
+                          prime_fd, fb2->offsets[0]);
+        }
+
         if (mapped == MAP_FAILED) {
             drmtap_set_error(ctx, "mmap failed (%zu bytes): %s",
                              size, strerror(errno));
-            /* Still return the DMA-BUF fd for zero-copy fallback */
             drmtap_debug_log(ctx, "mmap failed, falling back to zero-copy");
             frame->data = NULL;
         } else {
