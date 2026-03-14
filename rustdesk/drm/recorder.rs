@@ -17,6 +17,12 @@ use std::error::Error;
 pub struct DrmRecorder {
     tap: DrmTap,
     capture_cursor: bool,
+    /// Reusable buffer — allocated once, reused across frames
+    buffer: Vec<u8>,
+    /// Cached frame dimensions for PixelProvider
+    last_width: usize,
+    last_height: usize,
+    last_stride: usize,
 }
 
 impl DrmRecorder {
@@ -35,6 +41,10 @@ impl DrmRecorder {
         Ok(DrmRecorder {
             tap,
             capture_cursor,
+            buffer: Vec::new(),
+            last_width: 0,
+            last_height: 0,
+            last_stride: 0,
         })
     }
 }
@@ -53,28 +63,31 @@ impl Recorder for DrmRecorder {
         let width = frame.width() as usize;
         let height = frame.height() as usize;
         let stride = frame.stride() as usize;
+        let frame_size = stride * height;
+
+        // Reuse buffer — only reallocate if frame size changed
+        if self.buffer.len() != frame_size {
+            self.buffer.resize(frame_size, 0);
+        }
+
+        // Copy pixel data into our reusable buffer.
+        // We must copy because the Frame's mmap is released on drop.
+        self.buffer[..frame_size].copy_from_slice(&data[..frame_size]);
+        self.last_width = width;
+        self.last_height = height;
+        self.last_stride = stride;
 
         // DRM gives us XRGB8888 in little-endian = B, G, R, X per pixel
         // This maps to RustDesk's BGR0S (BGRA with stride)
         //
-        // IMPORTANT: We need to copy the data because the Frame borrows
-        // from the mmap'd region which is released on drop. We use
-        // BGR0S which includes stride information.
-        //
-        // TODO: For zero-copy, RustDesk would need to hold the Frame
-        //       alive across the capture boundary. This copy is the
-        //       safe path for now.
-        let owned_data: Vec<u8> = data[..stride * height].to_vec();
+        // Safety: We return a reference to self.buffer which lives as
+        // long as this DrmRecorder. RustDesk's capture pipeline copies
+        // the data into the encoder before the next capture() call.
+        let data_ref: &[u8] = unsafe {
+            std::slice::from_raw_parts(self.buffer.as_ptr(), frame_size)
+        };
 
-        // Safety: We're extending the lifetime by copying to owned data.
-        // The PixelProvider takes a reference, so we need to leak the Vec
-        // to get a 'static reference. This is reclaimed by RustDesk's
-        // frame processing pipeline which copies data into the encoder.
-        //
-        // Alternative: Use a thread-local buffer that's reused across frames.
-        let leaked: &'static [u8] = Box::leak(owned_data.into_boxed_slice());
-
-        Ok(PixelProvider::BGR0S(width, height, stride, leaked))
+        Ok(PixelProvider::BGR0S(width, height, stride, data_ref))
     }
 }
 
@@ -86,3 +99,4 @@ impl Recorder for DrmRecorder {
 //
 // A future enhancement could add a DrmCursorRecorder that provides
 // cursor data through RustDesk's cursor channel instead.
+
