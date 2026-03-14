@@ -273,7 +273,6 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         void *mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
                             prime_fd, fb2->offsets[0]);
         if (mapped == MAP_FAILED) {
-            ret = -errno;
             drmtap_set_error(ctx, "mmap failed (%zu bytes): %s",
                              size, strerror(errno));
             /* Still return the DMA-BUF fd for zero-copy fallback */
