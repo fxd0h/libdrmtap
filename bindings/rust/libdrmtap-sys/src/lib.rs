@@ -70,8 +70,8 @@ pub struct drmtap_cursor_info {
 pub struct drmtap_rect {
     pub x: u32,
     pub y: u32,
-    pub width: u32,
-    pub height: u32,
+    pub w: u32,
+    pub h: u32,
 }
 
 extern "C" {
@@ -88,7 +88,7 @@ extern "C" {
         displays: *mut drmtap_display,
         max_count: c_int,
     ) -> c_int;
-    pub fn drmtap_hotplug_changed(ctx: *mut drmtap_ctx) -> c_int;
+    pub fn drmtap_displays_changed(ctx: *mut drmtap_ctx) -> c_int;
 
     // Frame capture
     pub fn drmtap_grab(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info) -> c_int;
@@ -118,20 +118,22 @@ extern "C" {
         dst: *mut c_void,
         width: u32,
         height: u32,
+        src_stride: u32,
+        dst_stride: u32,
         src_format: u32,
         dst_format: u32,
     ) -> c_int;
 
     // Frame differencing
     pub fn drmtap_diff_frames(
-        old_frame: *const c_void,
-        new_frame: *const c_void,
+        frame_a: *const c_void,
+        frame_b: *const c_void,
         width: u32,
         height: u32,
         stride: u32,
-        tile_size: u32,
-        rects: *mut drmtap_rect,
-        max_rects: u32,
+        rects_out: *mut drmtap_rect,
+        max_rects: c_int,
+        tile_size: c_int,
     ) -> c_int;
 }
 

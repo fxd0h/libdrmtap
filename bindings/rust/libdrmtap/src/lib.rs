@@ -186,8 +186,8 @@ impl DrmTap {
     }
 
     /// Check if display configuration changed (hotplug).
-    pub fn hotplug_changed(&mut self) -> bool {
-        unsafe { ffi::drmtap_hotplug_changed(self.ctx) != 0 }
+    pub fn displays_changed(&mut self) -> bool {
+        unsafe { ffi::drmtap_displays_changed(self.ctx) != 0 }
     }
 
     /// Capture a frame (zero-copy — DMA-BUF fd only).
