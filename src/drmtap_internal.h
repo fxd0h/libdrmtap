@@ -64,4 +64,9 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
 // Debug log to stderr (only when ctx->debug is set)
 void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
 
+/* Helper lifecycle (privilege_helper.c) */
+int drmtap_helper_spawn(drmtap_ctx *ctx);
+void drmtap_helper_stop(drmtap_ctx *ctx);
+int drmtap_helper_grab_fd(drmtap_ctx *ctx);
+
 #endif /* DRMTAP_INTERNAL_H */

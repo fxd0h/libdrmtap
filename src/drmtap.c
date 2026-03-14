@@ -222,7 +222,8 @@ void drmtap_close(drmtap_ctx *ctx) {
 
     drmtap_debug_log(ctx, "closing context");
 
-    /* TODO: Phase 3 — kill helper process */
+    /* Stop helper if running */
+    drmtap_helper_stop(ctx);
 
     if (ctx->drm_fd >= 0) {
         close(ctx->drm_fd);
