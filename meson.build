@@ -167,3 +167,10 @@ executable('screenshot',
     include_directories: lib_include,
     install: false,
 )
+
+executable('stream',
+    'examples/stream.c',
+    dependencies: [libdrmtap_dep],
+    include_directories: lib_include,
+    install: false,
+)
