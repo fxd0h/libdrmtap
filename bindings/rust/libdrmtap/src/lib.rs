@@ -25,7 +25,7 @@
 //!
 //! // Capture a frame
 //! let frame = tap.grab_mapped().expect("Capture failed");
-//! println!("{}x{} stride={}", frame.width, frame.height, frame.stride);
+//! println!("{}x{} stride={}", frame.width(), frame.height(), frame.stride());
 //!
 //! // Access pixel data as a byte slice
 //! if let Some(pixels) = frame.data() {
