@@ -60,20 +60,70 @@ while (running) {
 
 | Feature | Status |
 |---|---|
-| Intel (i915/xe) via VAAPI | 🔜 Planned |
-| AMD (amdgpu) via VAAPI | 🔜 Planned |
-| Nvidia (nvidia-drm) deswizzle | 🔜 Planned |
-| VMs (virtio, vmwgfx, vbox) | 🔜 Planned |
-| Multi-monitor (per-CRTC) | 🔜 Planned |
-| Zero-copy DMA-BUF output | 🔜 Planned |
-| Mapped RGBA output | 🔜 Planned |
-| Continuous capture (polling loop) | 🔜 Planned |
-| Cursor capture | 🔜 Planned |
-| HDR / 10-bit support | 🔜 Planned |
-| Privileged helper binary | 🔜 Planned |
-| Thread-safe (`pthread_mutex`) | 🔜 Planned |
+| VMs (virtio_gpu, Parallels, QEMU) | ✅ Verified (57 FPS) |
+| Multi-monitor (per-CRTC) | ✅ Implemented |
+| Zero-copy DMA-BUF output | ✅ Implemented |
+| Mapped RGBA output | ✅ Verified |
+| Continuous capture (polling loop) | ✅ 57 FPS verified |
+| Cursor capture (position + pixels) | ✅ Verified |
+| Privileged helper (setcap, no root) | ✅ Verified |
+| Security hardening (cap drop + seccomp) | ✅ Implemented |
+| Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU path (VAAPI 🔜) |
+| AMD (amdgpu) deswizzle | ✅ CPU path (VAAPI 🔜) |
+| Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU path |
+| HDR / 10-bit (AR30/XR30 → XRGB) | ✅ Implemented |
+| Thread-safe (`pthread_mutex`) | ✅ Implemented |
 | Coexists with NoMachine/Sunshine | ✅ By design |
+| Rust bindings | 🔜 Planned |
 | MIT License | ✅ |
+
+## Quick Start
+
+### Build
+
+```bash
+# Dependencies: meson, gcc, libdrm-dev
+sudo apt install meson gcc libdrm-dev pkg-config
+
+# Build
+git clone https://github.com/fxd0h/libdrmtap.git
+cd libdrmtap
+meson setup build
+meson compile -C build
+```
+
+### Install
+
+```bash
+sudo meson install -C build
+```
+
+### Set up privileged helper (for capture without root)
+
+```bash
+# Install the helper with CAP_SYS_ADMIN
+sudo setcap cap_sys_admin+ep /usr/local/libexec/drmtap-helper
+```
+
+### Take a screenshot
+
+```bash
+# With sudo (direct capture):
+sudo ./build/screenshot > screenshot.ppm
+
+# Without sudo (via helper — after setcap above):
+./build/screenshot > screenshot.ppm
+```
+
+### Run tests
+
+```bash
+# Unit tests (no hardware needed)
+meson test -C build --suite unit
+
+# Integration tests (needs DRM device)
+sudo DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
+```
 
 ## Why Not Use Existing Tools?
 
@@ -178,10 +228,10 @@ We welcome contributions of all kinds! Whether you're fixing a bug, adding GPU s
 **See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines.**
 
 Areas where we especially need help:
-- 🐧 **Testing on real hardware** (Intel, AMD, Nvidia, Raspberry Pi)
-- 🔧 **GPU-specific backends** (tiling format expertise)
-- 📖 **Documentation and examples**
-- 🦀 **Rust bindings** (`libdrmtap-sys` crate)
+- 🐧 **Testing on real hardware** (Intel, AMD, Nvidia) — verifying deswizzle on tiled framebuffers
+- 🔧 **GPU-specific backends** — VAAPI hardware blit, CCS compressed framebuffers
+- 🦀 **Rust bindings** (`libdrmtap-sys` + `libdrmtap-rs` crates)
+- 📖 **Documentation and examples** — tutorials, man pages
 
 ## License
 
