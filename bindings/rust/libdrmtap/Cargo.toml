@@ -8,3 +8,7 @@ repository = "https://github.com/fxd0h/libdrmtap"
 
 [dependencies]
 libdrmtap-sys = { path = "../libdrmtap-sys" }
+
+[[example]]
+name = "capture_test"
+path = "../examples/capture_test.rs"
