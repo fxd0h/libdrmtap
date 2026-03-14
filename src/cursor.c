@@ -13,7 +13,7 @@
 
 #include <errno.h>
 
-#include "drmtap.h"
+#include "drmtap_internal.h"
 
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     if (!ctx || !cursor) {

@@ -11,6 +11,6 @@
  * @brief Generic/VM backend for linear framebuffers (virtio, vmwgfx, vbox, vkms)
  */
 
-#include "drmtap.h"
+#include "drmtap_internal.h"
 
 /* TODO: Phase 2 — linear mmap path (simplest backend, no deswizzle) */

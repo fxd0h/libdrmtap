@@ -11,6 +11,6 @@
  * @brief Nvidia GPU backend — dumb buffer export + CPU deswizzle
  */
 
-#include "drmtap.h"
+#include "drmtap_internal.h"
 
 /* TODO: Phase 5 — dumb buffer mmap + CPU tile decode for Nvidia block-linear */

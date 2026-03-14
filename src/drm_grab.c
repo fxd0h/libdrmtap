@@ -13,7 +13,7 @@
 
 #include <errno.h>
 
-#include "drmtap.h"
+#include "drmtap_internal.h"
 
 int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (!ctx || !frame) {

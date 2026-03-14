@@ -11,6 +11,6 @@
  * @brief Auto-spawn privileged helper and SCM_RIGHTS fd passing
  */
 
-#include "drmtap.h"
+#include "drmtap_internal.h"
 
 /* TODO: Phase 3 — socketpair, fork/exec, sendmsg/recvmsg with SCM_RIGHTS */

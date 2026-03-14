@@ -62,7 +62,7 @@ lib_sources += files('src/cursor.c')
 # Build the shared + static library
 # ============================================================================
 
-lib_include = include_directories('include')
+lib_include = include_directories('include', 'src')
 
 libdrmtap = library('drmtap',
     lib_sources,

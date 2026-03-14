@@ -11,6 +11,6 @@
  * @brief Intel GPU backend — VAAPI-accelerated deswizzle for CCS/Y-tiled FBs
  */
 
-#include "drmtap.h"
+#include "drmtap_internal.h"
 
 /* TODO: Phase 5 — VAAPI blit from tiled to linear surface */
