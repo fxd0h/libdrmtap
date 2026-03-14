@@ -134,11 +134,62 @@ static void test_grab_real_capture(void) {
     drmtap_close(ctx);
 }
 
+static void test_cursor_capture(void) {
+    drmtap_config cfg = {0};
+    cfg.debug = 1;
+    drmtap_ctx *ctx = drmtap_open(&cfg);
+    TEST_ASSERT(ctx != NULL);
+
+    /* NULL safety */
+    TEST_ASSERT(drmtap_get_cursor(NULL, NULL) == -EINVAL);
+
+    drmtap_cursor_info cursor = {0};
+    int ret = drmtap_get_cursor(ctx, &cursor);
+
+    if (ret == -ENOENT) {
+        printf("  SKIP: no cursor plane found\n");
+        drmtap_close(ctx);
+        return;
+    }
+
+    if (ret == -EACCES) {
+        printf("  SKIP: cursor capture needs CAP_SYS_ADMIN\n");
+        drmtap_close(ctx);
+        return;
+    }
+
+    TEST_ASSERT(ret == 0);
+    printf("  cursor: pos=(%d,%d) hot=(%d,%d) size=%ux%u visible=%d\n",
+           cursor.x, cursor.y, cursor.hot_x, cursor.hot_y,
+           cursor.width, cursor.height, cursor.visible);
+
+    TEST_ASSERT(cursor.width > 0);
+    TEST_ASSERT(cursor.height > 0);
+
+    if (cursor.pixels) {
+        /* Check that pixel data is not all zero */
+        int has_data = 0;
+        for (uint32_t i = 0; i < cursor.width * cursor.height; i++) {
+            if (cursor.pixels[i] != 0) {
+                has_data = 1;
+                break;
+            }
+        }
+        printf("  cursor pixels: %s\n", has_data ? "has data ✓" : "all zeros");
+    }
+
+    drmtap_cursor_release(ctx, &cursor);
+    printf("  PASS: cursor capture + release\n");
+
+    drmtap_close(ctx);
+}
+
 int main(void) {
     printf("Running capture tests...\n");
     test_grab_null_safety();
     test_frame_release_null_safety();
     test_grab_real_capture();
+    test_cursor_capture();
     printf("All capture tests passed!\n");
     return 0;
 }

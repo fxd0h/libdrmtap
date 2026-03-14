@@ -141,10 +141,16 @@ test_deswizzle = executable('test_deswizzle',
     dependencies: [libdrmtap_dep],
     include_directories: lib_include,
 )
+test_helper = executable('test_helper',
+    'tests/test_helper.c',
+    dependencies: [libdrmtap_dep],
+    include_directories: lib_include,
+)
 
 # Unit tests (no hardware needed)
 test('formats', test_formats, suite: 'unit')
 test('deswizzle', test_deswizzle, suite: 'unit')
+test('helper', test_helper, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
 test('enumerate', test_enumerate, suite: 'integration',
