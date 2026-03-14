@@ -12,8 +12,8 @@
  *        file descriptors to the unprivileged library via SCM_RIGHTS.
  *
  * Installation:
- *   sudo cp drmtap-helper /usr/libexec/drmtap-helper
- *   sudo setcap cap_sys_admin+ep /usr/libexec/drmtap-helper
+ *   sudo cp drmtap-helper /usr/local/bin/drmtap-helper
+ *   sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper
  *
  * Protocol:
  *   - Helper inherits a Unix socket on fd 3 (HELPER_SOCKET_FD)
@@ -46,6 +46,14 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#ifdef HAVE_LIBCAP
+#include <sys/capability.h>
+#endif
+
+#ifdef HAVE_SECCOMP
+#include <seccomp.h>
+#endif
+
 /* Socket fd inherited from parent (via socketpair) */
 #define HELPER_SOCKET_FD 3
 
@@ -56,6 +64,75 @@
 /* Response status */
 #define RESP_OK    0x00
 #define RESP_ERROR 0x01
+
+/* ========================================================================= */
+/* Security hardening                                                        */
+/* ========================================================================= */
+
+#ifdef HAVE_LIBCAP
+// Drop all capabilities except CAP_SYS_ADMIN
+static int drop_caps(void) {
+    cap_t caps = cap_init();
+    if (!caps) {
+        return -1;
+    }
+
+    cap_value_t keep[] = { CAP_SYS_ADMIN };
+    if (cap_set_flag(caps, CAP_PERMITTED, 1, keep, CAP_SET) != 0 ||
+        cap_set_flag(caps, CAP_EFFECTIVE, 1, keep, CAP_SET) != 0) {
+        cap_free(caps);
+        return -1;
+    }
+
+    int ret = cap_set_proc(caps);
+    cap_free(caps);
+
+    if (ret == 0) {
+        fprintf(stderr, "drmtap-helper: dropped caps, keeping CAP_SYS_ADMIN\n");
+    }
+    return ret;
+}
+#endif
+
+#ifdef HAVE_SECCOMP
+// Install seccomp filter allowing only needed syscalls
+static int install_seccomp(void) {
+    scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL_PROCESS);
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Allow only the syscalls we need */
+    int allowed[] = {
+        SCMP_SYS(read), SCMP_SYS(write), SCMP_SYS(close),
+        SCMP_SYS(openat), SCMP_SYS(open),
+        SCMP_SYS(ioctl),       /* DRM ioctls */
+        SCMP_SYS(sendmsg),     /* SCM_RIGHTS */
+        SCMP_SYS(recvmsg), SCMP_SYS(recv),
+        SCMP_SYS(mmap), SCMP_SYS(munmap),
+        SCMP_SYS(brk),         /* malloc */
+        SCMP_SYS(fstat), SCMP_SYS(newfstatat),
+        SCMP_SYS(fcntl),
+        SCMP_SYS(exit_group), SCMP_SYS(exit),
+        SCMP_SYS(rt_sigreturn),
+    };
+
+    for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, allowed[i], 0) != 0) {
+            seccomp_release(ctx);
+            return -1;
+        }
+    }
+
+    int ret = seccomp_load(ctx);
+    seccomp_release(ctx);
+
+    if (ret == 0) {
+        fprintf(stderr, "drmtap-helper: seccomp filter installed\n");
+    }
+    return ret;
+}
+#endif
 
 /* ========================================================================= */
 /* SCM_RIGHTS fd passing                                                     */
@@ -206,16 +283,19 @@ int main(int argc, char *argv[]) {
     }
 
 #ifdef HAVE_LIBCAP
-    /* TODO: Drop all capabilities except CAP_SYS_ADMIN */
-    /* cap_t caps = cap_get_proc();
-     * ...
-     * cap_set_proc(caps); */
+    /* Drop all capabilities except CAP_SYS_ADMIN */
+    if (drop_caps() != 0) {
+        fprintf(stderr, "drmtap-helper: warning: failed to drop caps\n");
+        /* Non-fatal — continue anyway */
+    }
 #endif
 
 #ifdef HAVE_SECCOMP
-    /* TODO: Install seccomp filter allowing only:
-     *   open, close, read, write, ioctl (DRM + DMA-BUF),
-     *   sendmsg, recvmsg, mmap, exit_group */
+    /* Install seccomp filter */
+    if (install_seccomp() != 0) {
+        fprintf(stderr, "drmtap-helper: warning: failed to install seccomp\n");
+        /* Non-fatal — continue anyway */
+    }
 #endif
 
     /* Event loop: receive commands, process, respond */
