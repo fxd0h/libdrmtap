@@ -11,6 +11,9 @@
  * @brief Context management, DRM device open, error handling, and debug logging
  */
 
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
