@@ -301,11 +301,66 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
     /* Step 4: Check handles[0] — if 0, we lack CAP_SYS_ADMIN */
     if (fb2->handles[0] == 0) {
-        drmtap_set_error(ctx,
-            "FB handles[0]==0: missing CAP_SYS_ADMIN. "
-            "Run with sudo or configure the drmtap-helper binary.");
+        drmtap_debug_log(ctx,
+            "handles[0]==0: no CAP_SYS_ADMIN, trying helper...");
+
+        /* Try the privileged helper */
+        int helper_fd = drmtap_helper_grab_fd(ctx);
+        if (helper_fd < 0) {
+            drmtap_set_error(ctx,
+                "No CAP_SYS_ADMIN and helper failed (ret=%d). "
+                "Install the helper: sudo cp drmtap-helper /usr/local/bin/ "
+                "&& sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper",
+                helper_fd);
+            drmModeFreeFB2(fb2);
+            return -EACCES;
+        }
+
+        drmtap_debug_log(ctx, "helper returned DMA-BUF fd=%d", helper_fd);
+
+        /* Use helper's DMA-BUF fd instead of PrimeHandleToFD */
+        prime_fd = helper_fd;
+
+        /* Allocate private state */
+        priv = calloc(1, sizeof(frame_priv_t));
+        if (!priv) {
+            close(prime_fd);
+            drmModeFreeFB2(fb2);
+            return -ENOMEM;
+        }
+        priv->prime_fd = prime_fd;
+        priv->gem_handle = 0;  /* No local GEM handle from helper path */
+        priv->mapped = MAP_FAILED;
+        priv->mapped_size = 0;
+
+        /* Fill frame info */
+        memset(frame, 0, sizeof(*frame));
+        frame->width = fb2->width;
+        frame->height = fb2->height;
+        frame->stride = fb2->pitches[0];
+        frame->format = fb2->pixel_format;
+        frame->modifier = fb2->modifier;
+        frame->dma_buf_fd = prime_fd;
+        frame->data = NULL;
+        frame->_priv = priv;
+
+        /* mmap if requested */
+        if (do_mmap) {
+            size_t size = (size_t)fb2->pitches[0] * fb2->height;
+            dmabuf_sync_start(prime_fd);
+            void *mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
+                                prime_fd, 0);
+            if (mapped != MAP_FAILED) {
+                priv->mapped = mapped;
+                priv->mapped_size = size;
+                frame->data = mapped;
+                drmtap_debug_log(ctx, "helper: mapped %zu bytes at %p",
+                                 size, mapped);
+            }
+        }
+
         drmModeFreeFB2(fb2);
-        return -EACCES;
+        return 0;
     }
 
     /* Step 5: Export as DMA-BUF fd */
