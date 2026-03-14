@@ -32,11 +32,13 @@ jobs:
             libdrm-dev \
             libva-dev libva-drm2 \
             libseccomp-dev libcap-dev
+          # Try to get vkms module (may not exist on Azure kernel)
+          sudo apt-get install -y linux-modules-extra-$(uname -r) 2>/dev/null || true
 
       - name: Load vkms (Virtual KMS)
+        continue-on-error: true
         run: |
-          sudo modprobe vkms
-          # vkms creates a virtual display at /dev/dri/card*
+          sudo modprobe vkms || { echo "⚠️ vkms not available on this kernel"; exit 0; }
           ls -la /dev/dri/
           # Find the vkms card
           for card in /dev/dri/card*; do
