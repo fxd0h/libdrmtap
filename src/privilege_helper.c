@@ -244,7 +244,7 @@ int drmtap_helper_grab_fd(drmtap_ctx *ctx) {
     }
 
     /* Receive response + fd */
-    uint8_t status;
+    uint8_t status = RESP_OK + 1;  /* force error if recv fails */
     int fd = recv_fd(ctx->helper_fd, &status);
 
     if (status != RESP_OK || fd < 0) {
