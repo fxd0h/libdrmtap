@@ -51,6 +51,8 @@ static const char *helper_search_paths[] = {
     NULL,  /* slot 0: ctx->helper_path (if set) */
     "/usr/libexec/drmtap-helper",
     "/usr/local/libexec/drmtap-helper",
+    "/usr/local/bin/drmtap-helper",
+    "/usr/bin/drmtap-helper",
     "/usr/lib/drmtap/drmtap-helper",
     NULL
 };
