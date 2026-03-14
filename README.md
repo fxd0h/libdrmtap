@@ -5,6 +5,7 @@
 **A zero-dependency C library for DRM/KMS framebuffer capture on Linux**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![crates.io](https://img.shields.io/crates/v/libdrmtap.svg)](https://crates.io/crates/libdrmtap)
 [![Built with AI](https://img.shields.io/badge/Built%20with-AI%20Agents-blueviolet)](docs/AI_DEVELOPMENT.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
@@ -20,6 +21,7 @@ Screen capture on modern Linux is a mess:
 
 - **Wayland prevents** unprivileged screen capture by design
 - **PipeWire/xdg-desktop-portal** require user interaction every time
+- **Login screens** (GDM, SDDM) can't be captured at all — no compositor running
 - **RustDesk, Sunshine, and others** have fought this for 4+ years with no clean solution
 - **No embeddable C library** exists for direct framebuffer capture
 
@@ -44,16 +46,19 @@ int main() {
 }
 ```
 
-Continuous capture for remote desktop / streaming:
+### Rust
 
-```c
-// 60fps capture loop — no special API needed
-while (running) {
-    drmtap_grab_mapped(ctx, &frame);
-    encode_and_send(frame.data, frame.width, frame.height);
-    drmtap_frame_release(ctx, &frame);
-    usleep(16666);  // ~60fps
-}
+```toml
+[dependencies]
+libdrmtap = "0.1"
+```
+
+```rust
+use libdrmtap::DrmTap;
+
+let mut tap = DrmTap::open(None)?;
+let frame = tap.grab_mapped()?;
+println!("{}x{} pixels captured", frame.width(), frame.height());
 ```
 
 ## Features
@@ -68,14 +73,20 @@ while (running) {
 | Cursor capture (position + pixels) | ✅ Verified |
 | Privileged helper (setcap, no root) | ✅ Verified |
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
-| Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU path (VAAPI 🔜) |
-| AMD (amdgpu) deswizzle | ✅ CPU path (VAAPI 🔜) |
-| Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU path |
+| EGL/GLES2 GPU-universal detiling | ✅ Implemented (all GPUs) |
+| Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU fallback |
+| AMD (amdgpu) deswizzle | ✅ CPU fallback |
+| Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU fallback |
 | HDR / 10-bit (AR30/XR30 → XRGB) | ✅ Implemented |
+| Frame differencing (dirty rects) | ✅ Implemented |
 | Thread-safe (`pthread_mutex`) | ✅ Implemented |
 | Coexists with NoMachine/Sunshine | ✅ By design |
-| Rust bindings | 🔜 Planned |
+| Rust bindings ([crates.io](https://crates.io/crates/libdrmtap)) | ✅ Published |
 | MIT License | ✅ |
+
+> ⚠️ **Testing status**: Capture pipeline verified on `virtio_gpu` (QEMU/Parallels VMs).
+> Intel, AMD, and Nvidia GPU backends are implemented but await real hardware testing.
+> If you test on real hardware, please [report results](https://github.com/fxd0h/libdrmtap/issues).
 
 ## Quick Start
 
@@ -84,6 +95,9 @@ while (running) {
 ```bash
 # Dependencies: meson, gcc, libdrm-dev
 sudo apt install meson gcc libdrm-dev pkg-config
+
+# Optional (for EGL GPU-universal detiling):
+sudo apt install libegl-dev libgles2-mesa-dev
 
 # Build
 git clone https://github.com/fxd0h/libdrmtap.git
@@ -136,9 +150,7 @@ Every existing project is either a complete application, a plugin, or PipeWire-b
 | kmsvnc | ❌ VNC server | ✅ | ❌ Needs root | ⚠️ Partial | ✅ |
 | obs-kmsgrab | ❌ OBS plugin | ✅ | ✅ pkexec | ❌ First GPU only | ❌ |
 | Sunshine | ❌ Built-in | ✅ | ❌ setcap on binary | ✅ | ✅ |
-| libscreencapture-wayland | ✅ C++ lib | ❌ PipeWire | ❌ N/A | ❌ | ⚠️ |
-| screenrec / drmcap | ❌ CLI tools | ✅ | ❌ Needs root | ❌ | ❌ |
-| NVIDIA Capture SDK | ❌ Proprietary | ❌ NVFBC | ❌ N/A | ❌ Nvidia only | ✅ |
+| ReFrame | ❌ VNC server | ✅ | ✅ Split process | ✅ | ✅ |
 | **libdrmtap** | **✅ C library** | **✅** | **✅ Hardened** | **✅** | **✅** |
 
 > **libdrmtap is the only project that is simultaneously**: an embeddable C library, uses DRM/KMS direct capture, includes a hardened privilege helper, supports multiple GPUs, and handles multiple monitors — all under the MIT license.
@@ -158,41 +170,51 @@ Every existing project is either a complete application, a plugin, or PipeWire-b
 │  │ enumerate  │  │  grab   │  │ pixel_convert│  │
 │  │ Planes     │  │ GetFB2  │  │ Deswizzle    │  │
 │  │ CRTCs      │  │ Prime   │  │ Format cvt   │  │
-│  │ Connectors │  │ DMA-BUF │  │ HDR tonemap  │  │
+│  │ Connectors │  │ DMA-BUF │  │ Diff frames  │  │
 │  └────────────┘  └─────────┘  └──────────────┘  │
 │                                                 │
 │  ┌────────────┐  ┌────────────────────────────┐ │
 │  │ gpu_backend│  │ privilege_helper           │ │
-│  │ Intel:VAAPI│  │ Auto-spawn drmtap-helper   │ │
-│  │ AMD: VAAPI │  │ SCM_RIGHTS fd passing      │ │
-│  │ NV:  CPU   │  │ Transparent to user        │ │
-│  │ VM: Direct │  │                            │ │
+│  │ EGL: All   │  │ Auto-spawn drmtap-helper   │ │
+│  │ Intel: CPU │  │ SCM_RIGHTS fd passing      │ │
+│  │ AMD:  CPU  │  │ cap_drop + seccomp         │ │
+│  │ NV:   CPU  │  │ Transparent to user        │ │
+│  │ VM: Linear │  │                            │ │
 │  └────────────┘  └────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
 │           libdrm / kernel DRM/KMS               │
 └─────────────────────────────────────────────────┘
 ```
 
+### GPU Detiling Strategy
+
+libdrmtap uses a **dual-path** approach for GPU-tiled framebuffers:
+
+1. **EGL path** (primary) — Imports DMA-BUF as EGLImage with modifier metadata, renders via `GL_TEXTURE_EXTERNAL_OES`. The GPU driver handles its own tiling transparently. One code path for ALL GPUs. Based on [ReFrame](https://github.com/AlynxZhou/reframe).
+2. **CPU path** (fallback) — Per-GPU deswizzle when EGL is unavailable (headless servers, no GPU rendering).
+3. **Linear path** — VMs and linear framebuffers need no conversion.
+
 ## Scope — What libdrmtap Does (and Doesn't)
 
 | ✅ We do | ❌ We don't |
 |---|---|
-| Capture framebuffer pixels (RGBA / DMA-BUF) | Detect changed regions (damage tracking) |
-| Handle GPU tiling → linear conversion | Encode or compress frames |
-| Manage permissions transparently | Transport frames over network |
-| Support Intel, AMD, Nvidia, VMs | Inject keyboard/mouse input |
-| Provide cursor position + shape | Replace Wayland's screen sharing protocols |
-| Enumerate displays and monitors | Implement a VNC/RDP server |
+| Capture framebuffer pixels (RGBA / DMA-BUF) | Encode or compress frames |
+| Handle GPU tiling → linear conversion | Transport frames over network |
+| Manage permissions transparently | Inject keyboard/mouse input |
+| Support Intel, AMD, Nvidia, VMs | Replace Wayland's screen sharing protocols |
+| Provide cursor position + shape | Implement a VNC/RDP server |
+| Enumerate displays and monitors | |
+| Detect changed regions (dirty rects) | |
 
-**Wayland positioning**: For interactive desktop sharing where user consent matters, use Wayland protocols (`ext-image-capture-source-v1`, PipeWire). For unattended system-level capture (servers, kiosks, CI, remote management), use libdrmtap. We complement Wayland — we don't compete with it.
+**Wayland positioning**: For interactive desktop sharing where user consent matters, use Wayland protocols (`ext-image-capture-source-v1`, PipeWire). For unattended system-level capture (servers, kiosks, CI, remote management, **login screens**), use libdrmtap. We complement Wayland — we don't compete with it.
 
 ## Why This Exists
 
 This project was born from a real frustration: trying to get remote desktop working on Ubuntu Wayland. After RustDesk broke packages, Sunshine failed on KMS, and every solution required "just switch to X11" — we decided to solve it at the root.
 
-We researched every existing project on GitHub, analyzed 25+ real-world issues, studied the source code of kmsvnc, gpu-screen-recorder, FFmpeg kmsgrab, and kms-screenshot. All findings are documented in [`docs/research/`](docs/research/).
+We researched every existing project on GitHub, analyzed 25+ real-world issues, studied the source code of kmsvnc, gpu-screen-recorder, FFmpeg kmsgrab, ReFrame, and kms-screenshot. All findings are documented in [`docs/research/`](docs/research/).
 
-> **Read the full research:** 8 documents covering the landscape, Wayland capture problems, DRM/KMS internals, permissions, GPU differences, API design, GitHub issues analysis, and potential adopters.
+> **Read the full research:** 9 documents covering the landscape, Wayland capture problems, DRM/KMS internals, permissions, GPU differences, API design, GitHub issues analysis, potential adopters, and the ReFrame EGL analysis.
 
 ## 🤖 Built with AI Agents
 
@@ -212,14 +234,15 @@ We believe AI agents are a force multiplier for open source. A single developer 
 
 | Document | Description |
 |---|---|
-| [`docs/research/00_landscape.md`](docs/research/00_landscape.md) | GitHub landscape — 11 projects analyzed |
-| [`docs/research/01_wayland_capture_problem.md`](docs/research/01_wayland_capture_problem.md) | Wayland capture problem — why every project struggles |
-| [`docs/research/02_drm_kms_mechanism.md`](docs/research/02_drm_kms_mechanism.md) | DRM/KMS capture mechanism deep dive |
-| [`docs/research/03_permissions.md`](docs/research/03_permissions.md) | Permissions model & helper binary |
-| [`docs/research/04_gpu_and_testing.md`](docs/research/04_gpu_and_testing.md) | GPU differences & vkms testing |
-| [`docs/research/05_api_and_architecture.md`](docs/research/05_api_and_architecture.md) | API design & architecture |
-| [`docs/research/06_github_issues_analysis.md`](docs/research/06_github_issues_analysis.md) | Analysis of 25+ real GitHub issues |
-| [`docs/research/07_potential_adopters.md`](docs/research/07_potential_adopters.md) | Integration targets — 243K+ ⭐ of potential adopters |
+| [`00_landscape.md`](docs/research/00_landscape.md) | GitHub landscape — 11 projects analyzed |
+| [`01_wayland_capture_problem.md`](docs/research/01_wayland_capture_problem.md) | Wayland capture problem — why every project struggles |
+| [`02_drm_kms_mechanism.md`](docs/research/02_drm_kms_mechanism.md) | DRM/KMS capture mechanism deep dive |
+| [`03_permissions.md`](docs/research/03_permissions.md) | Permissions model & helper binary |
+| [`04_gpu_and_testing.md`](docs/research/04_gpu_and_testing.md) | GPU differences & vkms testing |
+| [`05_api_and_architecture.md`](docs/research/05_api_and_architecture.md) | API design & architecture |
+| [`06_github_issues_analysis.md`](docs/research/06_github_issues_analysis.md) | Analysis of 25+ real GitHub issues |
+| [`07_potential_adopters.md`](docs/research/07_potential_adopters.md) | Integration targets — 243K+ ⭐ of potential adopters |
+| [`08_reframe_egl_analysis.md`](docs/research/08_reframe_egl_analysis.md) | ReFrame analysis — EGL GPU-universal detiling |
 
 ## Contributing
 
@@ -228,16 +251,16 @@ We welcome contributions of all kinds! Whether you're fixing a bug, adding GPU s
 **See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines.**
 
 Areas where we especially need help:
-- 🐧 **Testing on real hardware** (Intel, AMD, Nvidia) — verifying deswizzle on tiled framebuffers
-- 🔧 **GPU-specific backends** — VAAPI hardware blit, CCS compressed framebuffers
-- 🦀 **Rust bindings** (`libdrmtap-sys` + `libdrmtap-rs` crates)
+- 🐧 **Testing on real hardware** (Intel, AMD, Nvidia, Raspberry Pi) — validating EGL detiling and CPU fallback paths
+- 🔧 **Login screen capture testing** — GDM/SDDM/LightDM on various distros
 - 📖 **Documentation and examples** — tutorials, man pages
+- 🌐 **Integration patches** — RustDesk, Sunshine, and other remote desktop projects
 
 ## License
 
 [MIT License](LICENSE) — Use it anywhere, in anything.
 
-We chose MIT specifically so projects like RustDesk (Apache 2.0), Sunshine, and proprietary software can all integrate libdrmtap without license conflicts.
+We chose MIT specifically so projects like RustDesk (AGPLv3), Sunshine, and proprietary software can all integrate libdrmtap without license conflicts.
 
 ---
 
