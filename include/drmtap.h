@@ -233,6 +233,54 @@ const char *drmtap_error(drmtap_ctx *ctx);
 const char *drmtap_gpu_driver(drmtap_ctx *ctx);
 
 /* ========================================================================= */
+/* Pixel Conversion                                                          */
+/* ========================================================================= */
+
+/**
+ * @brief Deswizzle tiled framebuffer data to linear.
+ *
+ * Converts GPU-tiled pixel data (Intel X/Y-tiled, Nvidia blocklinear)
+ * to a linear row-by-row layout. The modifier tells which tiling format
+ * to decode. Linear data (modifier == 0) is copied row-by-row.
+ *
+ * @param src        Source (tiled) pixel data
+ * @param dst        Destination (linear) buffer (must be allocated by caller)
+ * @param width      Frame width in pixels
+ * @param height     Frame height in pixels
+ * @param src_stride Source stride (bytes per row in tiled data)
+ * @param dst_stride Destination stride (bytes per row)
+ * @param modifier   DRM format modifier (e.g., I915_FORMAT_MOD_X_TILED)
+ * @return 0 on success, negative errno on error
+ */
+int drmtap_deswizzle(const void *src, void *dst,
+                     uint32_t width, uint32_t height,
+                     uint32_t src_stride, uint32_t dst_stride,
+                     uint64_t modifier);
+
+/**
+ * @brief Convert between pixel formats.
+ *
+ * Supported conversions:
+ *   - XR30/AR30 (10-bit) → XRGB8888/ARGB8888
+ *   - ABGR8888 → ARGB8888/XRGB8888
+ *   - Same format → copy
+ *
+ * @param src        Source pixel data
+ * @param dst        Destination buffer
+ * @param width      Frame width in pixels
+ * @param height     Frame height in pixels
+ * @param src_stride Source stride (bytes per row)
+ * @param dst_stride Destination stride (bytes per row)
+ * @param src_format Source DRM fourcc (e.g., DRM_FORMAT_XRGB2101010)
+ * @param dst_format Destination DRM fourcc (e.g., DRM_FORMAT_XRGB8888)
+ * @return 0 on success, -ENOTSUP if conversion not supported
+ */
+int drmtap_convert_format(const void *src, void *dst,
+                          uint32_t width, uint32_t height,
+                          uint32_t src_stride, uint32_t dst_stride,
+                          uint32_t src_format, uint32_t dst_format);
+
+/* ========================================================================= */
 /* Frame Differencing (optional utility)                                     */
 /* ========================================================================= */
 
