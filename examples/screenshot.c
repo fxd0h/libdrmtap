@@ -8,22 +8,31 @@
 
 /**
  * @file screenshot.c
- * @brief Example — capture one frame and write raw RGBA to stdout
+ * @brief Example — capture one frame and write PPM to stdout
  *
  * Usage:
- *   ./screenshot > frame.rgba
- *   # Convert to PNG with ImageMagick:
- *   convert -size 1920x1080 -depth 8 rgba:frame.rgba frame.png
+ *   ./screenshot > screenshot.ppm
+ *   ./screenshot /dev/dri/card1 > screenshot.ppm
+ *
+ * Output is PPM P6 (binary RGB), viewable with any image viewer.
+ * Handles XRGB8888 and ARGB8888 pixel formats (most common).
  */
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 
 #include "drmtap.h"
 
-int main(void) {
+int main(int argc, char *argv[]) {
     drmtap_config cfg = {0};
     cfg.debug = 1;
+
+    /* Optional: specify device path */
+    if (argc > 1) {
+        cfg.device_path = argv[1];
+    }
 
     drmtap_ctx *ctx = drmtap_open(&cfg);
     if (!ctx) {
@@ -52,10 +61,46 @@ int main(void) {
         return 1;
     }
 
-    /* Write raw RGBA to stdout */
-    fwrite(frame.data, 1, frame.stride * frame.height, stdout);
+    if (!frame.data) {
+        fprintf(stderr, "No pixel data (mmap failed)\n");
+        drmtap_frame_release(ctx, &frame);
+        drmtap_close(ctx);
+        return 1;
+    }
 
-    fprintf(stderr, "Wrote %ux%u frame (%u bytes)\n",
+    /* Write PPM P6 header */
+    fprintf(stdout, "P6\n%u %u\n255\n", frame.width, frame.height);
+
+    /* Convert XRGB8888/ARGB8888 → RGB and write row by row
+     *
+     * XRGB8888 layout in memory (little-endian):
+     *   byte[0] = B, byte[1] = G, byte[2] = R, byte[3] = X/A
+     *
+     * PPM P6 needs: R, G, B per pixel
+     */
+    uint8_t *rgb_row = malloc(frame.width * 3);
+    if (!rgb_row) {
+        fprintf(stderr, "malloc failed\n");
+        drmtap_frame_release(ctx, &frame);
+        drmtap_close(ctx);
+        return 1;
+    }
+
+    const uint8_t *src = (const uint8_t *)frame.data;
+    for (uint32_t y = 0; y < frame.height; y++) {
+        const uint8_t *row = src + y * frame.stride;
+        for (uint32_t x = 0; x < frame.width; x++) {
+            /* XRGB8888 little-endian: B G R X */
+            rgb_row[x * 3 + 0] = row[x * 4 + 2];  /* R */
+            rgb_row[x * 3 + 1] = row[x * 4 + 1];  /* G */
+            rgb_row[x * 3 + 2] = row[x * 4 + 0];  /* B */
+        }
+        fwrite(rgb_row, 1, frame.width * 3, stdout);
+    }
+
+    free(rgb_row);
+
+    fprintf(stderr, "Wrote %ux%u PPM (%u bytes pixel data)\n",
             frame.width, frame.height, frame.stride * frame.height);
 
     drmtap_frame_release(ctx, &frame);
