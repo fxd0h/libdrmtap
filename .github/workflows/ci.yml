@@ -1,0 +1,100 @@
+# libdrmtap — CI Pipeline
+# https://github.com/fxd0h/libdrmtap
+#
+# Builds the library, runs unit tests, and integration tests with vkms.
+# Free and unlimited for public repositories.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build & Test (Ubuntu ${{ matrix.ubuntu }})
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    strategy:
+      matrix:
+        ubuntu: ['24.04']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build gcc \
+            libdrm-dev \
+            libva-dev libva-drm2 \
+            libseccomp-dev libcap-dev
+
+      - name: Load vkms (Virtual KMS)
+        run: |
+          sudo modprobe vkms
+          # vkms creates a virtual display at /dev/dri/card*
+          ls -la /dev/dri/
+          # Find the vkms card
+          for card in /dev/dri/card*; do
+            driver=$(basename $(readlink /sys/class/drm/$(basename $card)/device/driver 2>/dev/null) 2>/dev/null || true)
+            echo "$card → driver: $driver"
+            if [ "$driver" = "vkms" ]; then
+              echo "VKMS_DEVICE=$card" >> $GITHUB_ENV
+            fi
+          done
+
+      - name: Build (debug + sanitizers)
+        run: |
+          meson setup build \
+            -Dbuildtype=debug \
+            -Db_sanitize=address,undefined \
+            -Dwerror=true
+          meson compile -C build
+
+      - name: Run unit tests
+        run: meson test -C build --suite unit -v
+
+      - name: Run integration tests
+        if: env.VKMS_DEVICE != ''
+        run: |
+          DRM_DEVICE=${{ env.VKMS_DEVICE }} meson test -C build --suite integration -v
+
+      - name: Build (release, no sanitizers)
+        run: |
+          meson setup build-release \
+            -Dbuildtype=release \
+            -Dwerror=true
+          meson compile -C build-release
+
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build gcc \
+            libdrm-dev libva-dev libva-drm2 \
+            libseccomp-dev libcap-dev \
+            cppcheck
+
+      - name: Build
+        run: |
+          meson setup build -Dbuildtype=debug
+          meson compile -C build
+
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,style,performance \
+            --suppress=missingIncludeSystem \
+            --error-exitcode=1 \
+            --inline-suppr \
+            -I include/ \
+            src/ helper/

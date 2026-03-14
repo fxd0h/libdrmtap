@@ -1,0 +1,9 @@
+# CODEOWNERS — GitHub will require review from these users for matching paths
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default: project owner reviews everything
+*                       @fxd0h
+
+# Security-critical paths — always require owner review
+helper/                 @fxd0h
+SECURITY.md             @fxd0h

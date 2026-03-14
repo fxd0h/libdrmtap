@@ -1,0 +1,50 @@
+# .clang-format — enforces libdrmtap code style
+# See AGENTS.md for full style guide
+
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth: 4
+UseTab: Never
+TabWidth: 4
+ContinuationIndentWidth: 8
+
+# Braces
+BreakBeforeBraces: Attach
+
+# Line length
+ColumnLimit: 100
+
+# Includes
+SortIncludes: CaseInsensitive
+IncludeBlocks: Preserve
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+AlignOperands: Align
+AlignTrailingComments: true
+
+# Spacing
+SpaceAfterCStyleCast: true
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+
+# Blocks
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Pointers
+PointerAlignment: Right
+
+# switch/case
+IndentCaseLabels: false
+IndentCaseBlocks: false
+
+# Penalty settings (prefer not breaking strings and function names)
+PenaltyBreakString: 1000
+PenaltyReturnTypeOnItsOwnLine: 200

@@ -1,0 +1,24 @@
+# Build
+build/
+build-release/
+builddir/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled
+*.o
+*.so
+*.a
+*.dylib
+
+# Sandbox (development scratch area)
+sandbox/
+
+# OS
+.DS_Store
+Thumbs.db
