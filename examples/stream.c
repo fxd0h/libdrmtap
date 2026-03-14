@@ -20,6 +20,9 @@
  * (e.g., for a VNC/RDP server or screen recorder).
  */
 
+#define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE 199309L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
