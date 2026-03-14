@@ -69,4 +69,41 @@ int drmtap_helper_spawn(drmtap_ctx *ctx);
 void drmtap_helper_stop(drmtap_ctx *ctx);
 int drmtap_helper_grab_fd(drmtap_ctx *ctx);
 
+/* GPU backend: generic linear (gpu_generic.c) */
+int drmtap_gpu_generic_match(const char *driver);
+int drmtap_gpu_generic_process(drmtap_ctx *ctx, void *data,
+                               uint32_t width, uint32_t height,
+                               uint32_t stride, uint32_t format,
+                               uint64_t modifier);
+
+/* GPU backend: Intel i915/xe (gpu_intel.c) */
+int drmtap_gpu_intel_match(const char *driver);
+int drmtap_gpu_intel_process(drmtap_ctx *ctx, void *data,
+                             uint32_t width, uint32_t height,
+                             uint32_t stride, uint32_t format,
+                             uint64_t modifier);
+
+/* GPU backend: AMD amdgpu (gpu_amd.c) */
+int drmtap_gpu_amd_match(const char *driver);
+int drmtap_gpu_amd_process(drmtap_ctx *ctx, void *data,
+                           uint32_t width, uint32_t height,
+                           uint32_t stride, uint32_t format,
+                           uint64_t modifier);
+
+/* GPU backend: Nvidia (gpu_nvidia.c) */
+int drmtap_gpu_nvidia_match(const char *driver);
+int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
+                              uint32_t width, uint32_t height,
+                              uint32_t stride, uint32_t format,
+                              uint64_t modifier);
+
+/* GPU backend: EGL/GLES2 universal detiling (gpu_egl.c) */
+int drmtap_gpu_egl_available(drmtap_ctx *ctx);
+int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
+                            int dma_buf_fd,
+                            uint32_t width, uint32_t height,
+                            uint32_t stride, uint32_t fourcc,
+                            uint64_t modifier,
+                            void **out_data, size_t *out_size);
+
 #endif /* DRMTAP_INTERNAL_H */

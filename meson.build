@@ -22,6 +22,10 @@ threads_dep = dependency('threads')
 libva_dep = dependency('libva', required: false)
 libva_drm_dep = dependency('libva-drm', required: false)
 
+# Optional: EGL/GLES2 for GPU-universal detiling backend
+egl_dep = dependency('egl', required: false)
+glesv2_dep = dependency('glesv2', required: false)
+
 # Optional: libseccomp for the helper binary
 seccomp_dep = dependency('libseccomp', required: false)
 
@@ -54,6 +58,16 @@ endif
 
 # Nvidia backend (no extra deps — CPU deswizzle)
 lib_sources += files('src/gpu_nvidia.c')
+
+# EGL/GLES2 GPU-universal detiling backend
+lib_sources += files('src/gpu_egl.c')
+if egl_dep.found() and glesv2_dep.found()
+    lib_deps += [egl_dep, glesv2_dep]
+    add_project_arguments('-DHAVE_EGL=1', language: 'c')
+    message('EGL backend: enabled (GPU-universal detiling)')
+else
+    message('EGL backend: disabled (stub only)')
+endif
 
 # Cursor capture
 lib_sources += files('src/cursor.c')
