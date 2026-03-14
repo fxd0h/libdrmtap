@@ -27,6 +27,7 @@ pub struct drmtap_config {
 
 /// Information about a connected display
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct drmtap_display {
     pub crtc_id: u32,
     pub connector_id: u32,
