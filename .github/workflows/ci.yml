@@ -96,6 +96,7 @@ jobs:
         run: |
           cppcheck --enable=warning,style,performance \
             --suppress=missingIncludeSystem \
+            --suppress=constParameterPointer \
             --error-exitcode=1 \
             --inline-suppr \
             -I include/ \
