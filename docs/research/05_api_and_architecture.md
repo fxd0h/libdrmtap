@@ -1,7 +1,7 @@
 # API Comparison and Proposed libdrmtap Architecture
 
-> **Date**: 2026-03-14  
-> **Synthesis of**: 00_landscape, 01_wayland_capture_problem, 02_drm_kms_mechanism, 03_permissions, 04_gpu_and_testing
+> **Date**: 2026-03-14 (updated)  
+> **Synthesis of**: 00_landscape through 08_reframe_egl_analysis
 
 ---
 
@@ -14,15 +14,15 @@
 | Public API | FFmpeg options | main() | main() | **C functions** |
 | Embeddable | ❌ (needs FFmpeg) | ❌ (monolithic) | ❌ (monolithic) | **✅** |
 | Permissions | Direct CAP_SYS_ADMIN | — | Direct root | **Automatic helper** |
-| Intel/AMD | ✅ (via hwframes) | ✅ (VAAPI) | ✅ (AMDGPU SDMA) | **✅ (VAAPI + fallbacks)** |
-| Nvidia | ⚠️ (limited) | ⚠️ (x-tiled) | ❌ | **✅ (deswizzle)** |
+| Intel/AMD | ✅ (via hwframes) | ✅ (VAAPI) | ✅ (AMDGPU SDMA) | **✅ (EGL + CPU fallback)** |
+| Nvidia | ⚠️ (limited) | ⚠️ (x-tiled) | ❌ | **✅ (EGL + deswizzle)** |
 | VM | ✅ | ✅ | ❌ | **✅** |
 | Multi-monitor | ✅ (per CRTC) | ✅ (per CRTC) | ✅ | **✅** |
 | Cursor capture | ❌ | ✅ | ❌ | **✅** |
 | HDR | ❌ | ❌ | ✅ (tone-map) | **✅** |
 | Continuous capture | ✅ (frames/sec) | ✅ (VNC stream) | ❌ (1 shot) | **✅** |
 | Output formats | DRM_PRIME fd | RGBA buffer | PPM file | **DMA-BUF fd + mmap** |
-| Dependencies | libavutil,libdrm | libdrm,libva,libvncserver | libdrm,libamdgpu,vulkan | **libdrm, libva(opt)** |
+| Dependencies | libavutil,libdrm | libdrm,libva,libvncserver | libdrm,libamdgpu,vulkan | **libdrm, egl/glesv2(opt)** |
 
 ---
 
@@ -50,8 +50,9 @@
 │  ┌──────────────┐  ┌──────────────────────────────────┐  │
 │  │ gpu_backend  │  │ privilege_helper                 │  │
 │  │              │  │                                  │  │
-│  │ Intel: VAAPI │  │ Auto-spawn drmtap-helper         │  │
-│  │ AMD: VAAPI   │  │ SCM_RIGHTS fd passing            │  │
+│  │ EGL: All GPUs│  │ Auto-spawn drmtap-helper         │  │
+│  │ Intel: CPU   │  │ SCM_RIGHTS fd passing            │  │
+│  │ AMD:   CPU   │  │ cap_drop + seccomp               │  │
 │  │ Nvidia: CPU  │  │ Transparent fallback              │  │
 │  │ VM: Direct   │  │                                  │  │
 │  └──────────────┘  └──────────────────────────────────┘  │
@@ -280,9 +281,8 @@ This may be added in v2 as an optional `drmtap_wait_vblank(ctx)` that blocks unt
 │  ✅ Convert tiled → linear (if needed)       │
 │  ✅ Provide timestamp per frame              │
 │  ✅ Handle permissions transparently         │
+│  ✅ Detect changed regions (dirty rects)     │
 │                                              │
-│  ❌ NOT: detect changed regions              │
-│  ❌ NOT: diff frame N vs N-1                 │
 │  ❌ NOT: encode/compress                     │
 │  ❌ NOT: network transport                   │
 └─────────────────────────────────────────────┘
@@ -319,25 +319,24 @@ As a **reader** calling `drmModeGetFB2()`, we always get the current framebuffer
 
 **Conclusion**: Every project that needs damage tracking does it at the application layer, not the capture layer. This is the correct separation of concerns.
 
-### Optional Convenience API (v2)
+### Frame Differencing API (Implemented)
 
-For applications that want basic frame differencing without implementing their own, we may offer an optional utility function:
+For applications that want basic frame differencing without implementing their own, libdrmtap provides a utility function:
 
 ```c
-// OPTIONAL (v2) — convenience helper, not core API
 // Compare two frames and output changed rectangles
 typedef struct {
     uint32_t x, y, w, h;
 } drmtap_rect;
 
-int drmtap_diff_frames(const void *prev, const void *curr,
+int drmtap_diff_frames(const void *frame_a, const void *frame_b,
                        uint32_t width, uint32_t height, uint32_t stride,
                        drmtap_rect *rects_out, int max_rects,
                        int tile_size);  // comparison granularity (e.g., 64x64)
-// Returns: number of dirty rectangles found, or -1 on error
+// Returns: number of dirty rectangles found, or negative errno on error
 ```
 
-This is a pure CPU utility — it compares memory blocks. RustDesk and kmsvnc already have equivalent code, so this is a convenience, not a requirement.
+This is a pure CPU utility — it compares memory blocks at tile granularity. Useful for VNC/RDP servers that need dirty-rectangle encoding.
 
 ---
 
@@ -346,25 +345,32 @@ This is a pure CPU utility — it compares memory blocks. RustDesk and kmsvnc al
 ```
 libdrmtap/
 ├── include/
-│   └── drmtap.h                 # Public API (above)
+│   └── drmtap.h                 # Public API
 ├── src/
-│   ├── drmtap.c                 # Main implementation
+│   ├── drmtap.c                 # Main context management
 │   ├── drm_enumerate.c          # Plane/CRTC enumeration
 │   ├── drm_grab.c               # Framebuffer capture
 │   ├── pixel_convert.c          # Deswizzle + format conversion
-│   ├── gpu_intel.c              # Intel VAAPI backend
-│   ├── gpu_amd.c                # AMD VAAPI + SDMA backend
-│   ├── gpu_nvidia.c             # Dumb + deswizzle backend
-│   ├── gpu_generic.c            # Generic/VM backend
+│   ├── gpu_egl.c                # EGL/GLES2 universal detiling (all GPUs)
+│   ├── gpu_intel.c              # Intel CPU deswizzle fallback
+│   ├── gpu_amd.c                # AMD CPU deswizzle fallback
+│   ├── gpu_nvidia.c             # Nvidia CPU deswizzle fallback
+│   ├── gpu_generic.c            # Generic/VM backend (linear)
+│   ├── cursor.c                 # Hardware cursor capture
 │   └── privilege_helper.c       # Helper spawn + communication
 ├── helper/
 │   └── drmtap-helper.c          # Privileged binary (~500 lines)
 ├── tests/
 │   ├── test_enumerate.c         # Tests with vkms
-│   ├── test_capture.c
-│   └── test_formats.c
+│   ├── test_capture.c           # Frame capture integration tests
+│   ├── test_formats.c           # Pixel format conversion tests
+│   ├── test_helper.c            # Helper IPC tests
+│   └── test_deswizzle.c         # Tiling conversion unit tests
+├── bindings/rust/
+│   ├── libdrmtap-sys/           # Raw FFI bindings (crates.io)
+│   └── libdrmtap/               # Safe Rust wrapper (crates.io)
 ├── docs/
-│   └── research/                # (these documents)
+│   └── research/                # 9 technical research documents
 ├── meson.build
 └── README.md
 ```
@@ -382,31 +388,31 @@ libdrmtap is a C library because:
 4. **Rust's `drm-rs` bindings are incomplete** — no `GetFB2`, no modifier support, no `SCM_RIGHTS`
 5. **The privilege helper uses Linux-specific syscalls** — `seccomp_rule_add`, `cap_set_proc`, `prctl` — all C
 
-### Rust Integration Plan (for RustDesk)
+### Rust Bindings (Published)
 
-Three layers, released as separate crates:
+Three layers, published on crates.io:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Layer 3: libdrmtap-rs  (safe Rust wrapper)     │
-│  • Context::open(), Frame, Display structs      │
+│  Layer 3: libdrmtap  (safe Rust wrapper)        │
+│  • DrmTap::open(), Frame, Display structs       │
 │  • Drop trait auto-releases frames              │
-│  • Result<T, DrmtapError> for all functions     │
-│  • Iterator over displays                       │
-│  pub on crates.io                               │
+│  • Result<T, Error> for all functions            │
+│  ✅ Published: crates.io/crates/libdrmtap       │
 ├─────────────────────────────────────────────────┤
-│  Layer 2: libdrmtap-sys  (auto-generated FFI)   │
-│  • bindgen from drmtap.h                        │
+│  Layer 2: libdrmtap-sys  (hand-written FFI)     │
+│  • Matches drmtap.h declarations                │
 │  • build.rs links to libdrmtap via pkg-config   │
-│  • Zero manual code — 100% auto-generated       │
-│  pub on crates.io                               │
+│  ✅ Published: crates.io/crates/libdrmtap-sys   │
 ├─────────────────────────────────────────────────┤
 │  Layer 1: libdrmtap  (C library + .so/.a)       │
-│  • Installed via distro package or meson        │
-│  • Provides drmtap.h + libdrmtap.so + .pc      │
-│  pub on AUR, Debian, Fedora                     │
+│  • Installed via meson install                  │
+│  • Provides drmtap.h + libdrmtap.so + .pc       │
 └─────────────────────────────────────────────────┘
 ```
+
+> ⚠️ **Testing status**: Both crates are published and verified to build/test
+> on Ubuntu 24.04 (virtio_gpu). Real GPU hardware testing pending.
 
 ### Rust API Design
 
@@ -462,14 +468,16 @@ Adding `libdrmtap-sys` is standard practice for them. They `cargo add libdrmtap`
 | **Python** | ctypes or cffi | 🟡 Medium | Testing, scripts, CI |
 | **Go** | cgo | 🟢 Low | Custom tools |
 
-### Release Timeline
+### Release Status
 
-| Phase | What ships | When |
+| Phase | What shipped | Status |
 |---|---|---|
-| v0.1 | `libdrmtap.so` + `drmtap.h` + `pkg-config` | MVP |
-| v0.2 | `libdrmtap-sys` crate (auto-generated) | +1 week |
-| v0.3 | `libdrmtap-rs` crate (safe wrapper) | +2 weeks |
-| v0.4 | PR to RustDesk with working example | +3 weeks |
+| v0.1 | `libdrmtap.so` + `drmtap.h` + `pkg-config` | ✅ Done |
+| v0.1 | `libdrmtap-sys` crate (hand-written FFI) | ✅ Published on crates.io |
+| v0.1 | `libdrmtap` crate (safe wrapper) | ✅ Published on crates.io |
+| v0.1 | EGL/GLES2 GPU-universal detiling backend | ✅ Implemented |
+| Next | Hardware testing (Intel, AMD, Nvidia, RPi) | 🔜 Pending hardware access |
+| Next | PR to RustDesk with working example | 🔜 After hardware validation |
 
 ---
 
@@ -615,3 +623,5 @@ If someone stops the compositor and starts another one, folibdrmtap will detect 
 5. **RustDesk** → Market validation. 4 years of PipeWire problems. Single dev maintaining Wayland. They need exactly what we're building.
 
 6. **VKMS** → Can test without real hardware in CI. Supports common formats. Limitation: linear only (no tiling).
+
+7. **ReFrame** → GPU-universal detiling via EGL/OpenGL ES. Imports DMA-BUF as `EGLImage` with modifier metadata, GPU handles tiling transparently via `GL_TEXTURE_EXTERNAL_OES`. One code path for ALL GPUs. See [`08_reframe_egl_analysis.md`](08_reframe_egl_analysis.md).

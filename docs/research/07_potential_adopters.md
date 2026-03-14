@@ -1,6 +1,6 @@
 # Potential Adopters and Integration Analysis
 
-> **Date**: 2026-03-14  
+> **Date**: 2026-03-14 (updated)  
 > **Sources**: GitHub repos, issue trackers, user reports, web research
 
 ---
@@ -16,7 +16,7 @@
 
 ### Integration path for each:
 
-**RustDesk**: Create `libdrmtap-sys` Rust crate (auto-generated bindings). RustDesk adds it as optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`.
+**RustDesk**: `cargo add libdrmtap` — both crates published on crates.io (`libdrmtap-sys` + `libdrmtap`). RustDesk adds it as optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`. Integration module already written in `contrib/integrations/rustdesk/`.
 
 **Sunshine**: Replace internal KMS code with `#include <drmtap.h>`. They already use DMA-BUF → VAAPI pipeline, so `drmtap_grab()` (zero-copy) slots in directly.
 
@@ -83,14 +83,17 @@ Projects with capture problems that libdrmtap solves:
 | HDR metadata | ❌ | ✅ | ❌ | ✅ | ✅ |
 | pkg-config integration | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Rust `-sys` crate | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Rust safe wrapper | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Frame timestamps | ❌ | ✅ | ❌ | ✅ | ✅ |
 
 ---
 
-## Outreach Strategy (Post v0.1)
+## Outreach Strategy
 
-1. **Before release**: Register `libdrmtap` on crates.io (placeholder), AUR, GitHub org
-2. **v0.1 release**: Post to r/linux, r/rustdesk, r/selfhosted, Hacker News
-3. **v0.1 + 1 week**: Open issues on RustDesk and Sunshine repos proposing integration
-4. **v0.2**: Publish `libdrmtap-sys` Rust crate with working example
-5. **v0.3**: Create OBS plugin as proof of concept
+| Step | Action | Status |
+|---|---|---|
+| 1 | Publish `libdrmtap-sys` + `libdrmtap` on crates.io | ✅ Done |
+| 2 | Test on real hardware (Intel, AMD, Nvidia, RPi) | 🔜 Pending hardware access |
+| 3 | Post to r/linux, r/rustdesk, r/selfhosted, Hacker News | 🔜 After hardware validation |
+| 4 | Open issues on RustDesk and Sunshine repos proposing integration | 🔜 After validation |
+| 5 | Create OBS plugin as proof of concept | 🔜 Future |
