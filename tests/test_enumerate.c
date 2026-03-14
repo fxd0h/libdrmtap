@@ -14,21 +14,27 @@
  * Run with: DRM_DEVICE=/dev/dri/card1 ./test_enumerate
  */
 
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "drmtap.h"
 
+#define TEST_ASSERT(cond) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        exit(1); \
+    } \
+} while (0)
+
 static void test_version(void) {
     int v = drmtap_version();
-    assert(v == ((0 << 16) | (1 << 8) | 0));
+    TEST_ASSERT(v == ((0 << 16) | (1 << 8) | 0));
     printf("  PASS: version = 0x%06x\n", v);
 }
 
 static void test_open_close(void) {
     drmtap_ctx *ctx = drmtap_open(NULL);
-    assert(ctx != NULL);
+    TEST_ASSERT(ctx != NULL);
     drmtap_close(ctx);
     printf("  PASS: open/close with defaults\n");
 }
@@ -45,7 +51,7 @@ static void test_open_with_config(void) {
     cfg.debug = 1;
 
     drmtap_ctx *ctx = drmtap_open(&cfg);
-    assert(ctx != NULL);
+    TEST_ASSERT(ctx != NULL);
 
     const char *driver = drmtap_gpu_driver(ctx);
     if (driver) {
@@ -58,7 +64,7 @@ static void test_open_with_config(void) {
 
 static void test_list_displays(void) {
     drmtap_ctx *ctx = drmtap_open(NULL);
-    assert(ctx != NULL);
+    TEST_ASSERT(ctx != NULL);
 
     drmtap_display displays[8];
     int n = drmtap_list_displays(ctx, displays, 8);

@@ -13,23 +13,29 @@
  * No hardware needed — works with synthetic data.
  */
 
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "drmtap.h"
 
+#define TEST_ASSERT(cond) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        exit(1); \
+    } \
+} while (0)
+
 static void test_diff_identical_frames(void) {
     /* Two identical 64x64 frames → 0 dirty rects */
     uint32_t w = 64, h = 64, stride = w * 4;
     uint8_t *frame = calloc(1, stride * h);
-    assert(frame != NULL);
+    TEST_ASSERT(frame != NULL);
     memset(frame, 0xAB, stride * h);
 
     drmtap_rect rects[16];
     int n = drmtap_diff_frames(frame, frame, w, h, stride, rects, 16, 32);
-    assert(n == 0);
+    TEST_ASSERT(n == 0);
 
     free(frame);
     printf("  PASS: identical frames → 0 dirty rects\n");
@@ -40,7 +46,7 @@ static void test_diff_completely_different(void) {
     uint32_t w = 64, h = 64, stride = w * 4;
     uint8_t *frame_a = calloc(1, stride * h);
     uint8_t *frame_b = calloc(1, stride * h);
-    assert(frame_a && frame_b);
+    TEST_ASSERT(frame_a != NULL && frame_b != NULL);
 
     memset(frame_a, 0x00, stride * h);
     memset(frame_b, 0xFF, stride * h);
@@ -48,7 +54,7 @@ static void test_diff_completely_different(void) {
     drmtap_rect rects[16];
     int n = drmtap_diff_frames(frame_a, frame_b, w, h, stride, rects, 16, 32);
     /* 64/32 = 2 tiles per axis = 4 tiles total */
-    assert(n == 4);
+    TEST_ASSERT(n == 4);
 
     free(frame_a);
     free(frame_b);
@@ -60,16 +66,16 @@ static void test_diff_single_pixel_change(void) {
     uint32_t w = 128, h = 128, stride = w * 4;
     uint8_t *frame_a = calloc(1, stride * h);
     uint8_t *frame_b = calloc(1, stride * h);
-    assert(frame_a && frame_b);
+    TEST_ASSERT(frame_a != NULL && frame_b != NULL);
 
     memcpy(frame_b, frame_a, stride * h);
     frame_b[0] = 0xFF;  /* change pixel (0,0) */
 
     drmtap_rect rects[64];
     int n = drmtap_diff_frames(frame_a, frame_b, w, h, stride, rects, 64, 64);
-    assert(n == 1);
-    assert(rects[0].x == 0 && rects[0].y == 0);
-    assert(rects[0].w == 64 && rects[0].h == 64);
+    TEST_ASSERT(n == 1);
+    TEST_ASSERT(rects[0].x == 0 && rects[0].y == 0);
+    TEST_ASSERT(rects[0].w == 64 && rects[0].h == 64);
 
     free(frame_a);
     free(frame_b);
@@ -78,7 +84,8 @@ static void test_diff_single_pixel_change(void) {
 
 static void test_diff_null_safety(void) {
     drmtap_rect rects[4];
-    assert(drmtap_diff_frames(NULL, NULL, 64, 64, 256, rects, 4, 32) == -22);
+    int ret = drmtap_diff_frames(NULL, NULL, 64, 64, 256, rects, 4, 32);
+    TEST_ASSERT(ret == -22);
     printf("  PASS: diff_frames NULL safety\n");
 }
 
@@ -87,13 +94,13 @@ static void test_diff_overflow_rects(void) {
     uint32_t w = 128, h = 128, stride = w * 4;
     uint8_t *frame_a = calloc(1, stride * h);
     uint8_t *frame_b = calloc(1, stride * h);
-    assert(frame_a && frame_b);
+    TEST_ASSERT(frame_a != NULL && frame_b != NULL);
     memset(frame_b, 0xFF, stride * h);
 
     drmtap_rect rects[2];  /* only space for 2 */
     int n = drmtap_diff_frames(frame_a, frame_b, w, h, stride, rects, 2, 32);
     /* 128/32 = 4 tiles per axis = 16 total, but only 2 fit */
-    assert(n == 16);
+    TEST_ASSERT(n == 16);
 
     free(frame_a);
     free(frame_b);

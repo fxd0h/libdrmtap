@@ -13,20 +13,27 @@
  * Requires: DRM_DEVICE env var and an active display/compositor
  */
 
-#include <assert.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdlib.h>
 
 #include "drmtap.h"
+
+#define TEST_ASSERT(cond) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        exit(1); \
+    } \
+} while (0)
 
 static void test_grab_returns_enosys_stub(void) {
     /* While grab is a stub, it should return -ENOSYS */
     drmtap_ctx *ctx = drmtap_open(NULL);
-    assert(ctx != NULL);
+    TEST_ASSERT(ctx != NULL);
 
     drmtap_frame_info frame = {0};
     int ret = drmtap_grab_mapped(ctx, &frame);
-    assert(ret == -ENOSYS);
+    TEST_ASSERT(ret == -ENOSYS);
 
     drmtap_close(ctx);
     printf("  PASS: grab_mapped returns -ENOSYS (stub)\n");
@@ -34,13 +41,13 @@ static void test_grab_returns_enosys_stub(void) {
 
 static void test_grab_null_safety(void) {
     drmtap_frame_info frame = {0};
-    assert(drmtap_grab(NULL, &frame) == -EINVAL);
-    assert(drmtap_grab_mapped(NULL, &frame) == -EINVAL);
+    TEST_ASSERT(drmtap_grab(NULL, &frame) == -EINVAL);
+    TEST_ASSERT(drmtap_grab_mapped(NULL, &frame) == -EINVAL);
 
     drmtap_ctx *ctx = drmtap_open(NULL);
-    assert(ctx != NULL);
-    assert(drmtap_grab(ctx, NULL) == -EINVAL);
-    assert(drmtap_grab_mapped(ctx, NULL) == -EINVAL);
+    TEST_ASSERT(ctx != NULL);
+    TEST_ASSERT(drmtap_grab(ctx, NULL) == -EINVAL);
+    TEST_ASSERT(drmtap_grab_mapped(ctx, NULL) == -EINVAL);
     drmtap_close(ctx);
 
     printf("  PASS: grab NULL safety\n");
