@@ -1,0 +1,10 @@
+[package]
+name = "libdrmtap"
+version = "0.1.0"
+edition = "2021"
+description = "Safe Rust wrapper for libdrmtap — DRM/KMS screen capture"
+license = "MIT"
+repository = "https://github.com/fxd0h/libdrmtap"
+
+[dependencies]
+libdrmtap-sys = { path = "../libdrmtap-sys" }

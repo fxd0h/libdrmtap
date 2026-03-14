@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "libdrmtap-sys",
+    "libdrmtap",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/fxd0h/libdrmtap"

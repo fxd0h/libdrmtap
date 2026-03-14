@@ -1,0 +1,11 @@
+[package]
+name = "libdrmtap-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings for libdrmtap — DRM/KMS screen capture"
+license = "MIT"
+repository = "https://github.com/fxd0h/libdrmtap"
+links = "drmtap"
+
+[build-dependencies]
+pkg-config = "0.3"
