@@ -119,7 +119,7 @@ static void test_grab_without_display(void) {
     printf("  PASS: grab without guaranteed display handled\n");
 }
 
-static void test_list_displays_overflow(void) {
+static void test_list_displays_edge_cases(void) {
     drmtap_config cfg = {0};
     drmtap_ctx *ctx = drmtap_open(&cfg);
     if (!ctx) {
@@ -127,15 +127,24 @@ static void test_list_displays_overflow(void) {
         return;
     }
 
-    /* Ask for zero displays — should still return count */
+    /* max_count=0 should return error or 0 */
     drmtap_display buf[1];
     int n = drmtap_list_displays(ctx, buf, 0);
-    printf("  list_displays(max=0): %d displays found\n", n);
-    /* n >= 0 is valid */
+    printf("  list_displays(max=0): %d\n", n);
+    /* Negative = error (EINVAL), 0 = no displays — both are valid */
+    TEST_ASSERT(n <= 0);
+
+    /* max_count=1 should work */
+    n = drmtap_list_displays(ctx, buf, 1);
+    printf("  list_displays(max=1): %d display(s)\n", n);
     TEST_ASSERT(n >= 0);
 
+    /* NULL buffer should be safe */
+    n = drmtap_list_displays(ctx, NULL, 0);
+    TEST_ASSERT(n <= 0);
+
     drmtap_close(ctx);
-    printf("  PASS: list_displays overflow safe\n");
+    printf("  PASS: list_displays edge cases\n");
 }
 
 /* ========================================================================= */
@@ -151,7 +160,7 @@ int main(void) {
     test_close_null();
     test_frame_release_zeroed();
     test_grab_without_display();
-    test_list_displays_overflow();
+    test_list_displays_edge_cases();
     printf("All helper/protocol tests passed!\n");
     return 0;
 }
