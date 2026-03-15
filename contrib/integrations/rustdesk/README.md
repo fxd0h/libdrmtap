@@ -1,81 +1,38 @@
-# RustDesk DRM/KMS Backend — Integration Guide
+# RustDesk Integration
 
-This directory contains a ready-to-use DRM/KMS capture backend for RustDesk's `scrap` crate, powered by **libdrmtap**.
+Drop-in DRM/KMS capture backend for [RustDesk](https://github.com/rustdesk/rustdesk).
 
-## What This Does
+## Status
 
-Adds a new capture path to RustDesk that bypasses the Wayland compositor entirely, capturing frames directly from the kernel DRM/KMS subsystem. This solves:
+**Tested and verified** on Ubuntu 24.04 VM (virtio_gpu):
+- RustDesk's `screenshot` example captured 1920×1017 desktop via DRM
+- Full `cargo build` passes (zero errors, ~50 crate dependencies)
+- Binary links `libdrmtap.so.0` successfully
 
-1. **No "Select the screen to be shared" prompt** — unattended remote access works
-2. **No PipeWire dependency** — works on minimal systems and VMs
-3. **Verified at 57 FPS** on Parallels VM with virtio_gpu
+## What It Does
+
+Replaces PipeWire/portal-based capture with direct DRM/KMS framebuffer
+capture. This means:
+
+- **No user consent popup** (no "Select the screen to be shared")
+- **Works everywhere**: login screen, headless, VMs, kiosks, Wayland
+- **No PipeWire dependency**
+- **Handles GPU tiling** automatically (Intel, AMD, Nvidia)
 
 ## Files
 
 | File | Purpose |
-|---|---|
-| `drm/mod.rs` | Module root |
-| `drm/recorder.rs` | `DrmRecorder` — implements `Recorder` trait, captures frames |
-| `drm/capturable.rs` | `DrmCapturable` — implements `Capturable` trait, per-display factory |
-| `drm/display.rs` | Display enumeration via `drmtap_list_displays` |
+|------|---------|
+| `drm/mod.rs` | Module entry point with integration instructions |
+| `drm/recorder.rs` | Complete capture backend (inline FFI, self-contained) |
 
-## Integration Steps
+## Quick Integration
 
-### 1. Install libdrmtap on the build machine
-
-```bash
-git clone https://github.com/fxd0h/libdrmtap.git
-cd libdrmtap
-meson setup build && meson compile -C build
-sudo meson install -C build
-```
-
-### 2. Copy the `drm/` directory
-
-```bash
-cp -r rustdesk/drm/ /path/to/rustdesk/libs/scrap/src/drm/
-```
-
-### 3. Add to `libs/scrap/src/lib.rs`
-
-```rust
-#[cfg(feature = "drm")]
-pub mod drm;
-```
-
-### 4. Add to `libs/scrap/Cargo.toml`
-
-```toml
-[dependencies]
-libdrmtap = { version = "0.1", optional = true }
-
-[features]
-drm = ["libdrmtap"]
-```
-
-### 5. Wire into capture selection
-
-In the main capture loop (e.g., `src/server/video_service.rs`), add DRM as a fallback:
-
-```rust
-#[cfg(feature = "drm")]
-{
-    if scrap::drm::display::is_drm_available() {
-        // Use DRM backend — no user prompt needed
-        let capturables = scrap::drm::capturable::get_drm_capturables();
-        // ...
-    }
-}
-```
-
-### 6. Set up the helper on the target machine
-
-```bash
-sudo setcap cap_sys_admin+ep /usr/local/libexec/drmtap-helper
-```
+Copy `drm/recorder.rs` to `libs/scrap/src/common/drm.rs` in the
+RustDesk tree. See `drm/mod.rs` for detailed step-by-step instructions.
 
 ## Requirements
 
-- libdrmtap ≥ 0.1.0 (installed via meson)
-- CAP_SYS_ADMIN (via helper binary or root)
-- Linux with DRM/KMS (any GPU: Intel, AMD, Nvidia, VMs)
+- `libdrmtap` installed (headers + shared library)
+- Linux with DRM/KMS (virtually all modern Linux systems)
+- `CAP_SYS_ADMIN` or the `drmtap-helper` setcap binary for GPU access

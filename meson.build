@@ -194,3 +194,14 @@ executable('stream',
     include_directories: lib_include,
     install: false,
 )
+
+# VNC server example (optional — requires libvncserver)
+libvncserver_dep = dependency('libvncserver', required: false)
+if libvncserver_dep.found()
+    executable('vnc_server',
+        'examples/vnc_server.c',
+        dependencies: [libdrmtap_dep, libvncserver_dep],
+        include_directories: lib_include,
+        install: false,
+    )
+endif

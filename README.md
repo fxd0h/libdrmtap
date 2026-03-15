@@ -129,6 +129,31 @@ sudo ./build/screenshot > screenshot.ppm
 ./build/screenshot > screenshot.ppm
 ```
 
+### VNC server demo (full remote desktop)
+
+The included VNC server example captures the screen and serves it over VNC
+with mouse and keyboard input:
+
+```bash
+# Build with libvncserver (optional dependency)
+meson setup build && meson compile -C build
+
+# Run (needs root for uinput access)
+sudo ./build/vnc_server
+
+# Connect from any VNC client:
+#   vnc://YOUR_IP:5900  (password: drmtap)
+```
+
+### RustDesk integration
+
+A drop-in capture backend for [RustDesk](https://github.com/rustdesk/rustdesk)
+is available in `contrib/integrations/rustdesk/`. **Tested and verified** on
+Ubuntu 24.04 with `cargo build` (zero errors, binary links `libdrmtap.so.0`).
+
+See [`contrib/integrations/rustdesk/README.md`](contrib/integrations/rustdesk/README.md)
+for integration instructions.
+
 ### Run tests
 
 ```bash
