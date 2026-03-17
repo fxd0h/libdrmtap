@@ -164,6 +164,23 @@ meson test -C build --suite unit
 sudo DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
 ```
 
+## Performance
+
+Benchmarks measured with `drmtap_grab_mapped_fast()` (persistent-mmap with always-transfer mode):
+
+| Environment | Resolution | Capture Time | FPS | Method |
+|---|---|---|---|---|
+| QEMU/Parallels virtio-gpu | 1920×1080 | **5–8 ms** | **30 fps** | TRANSFER_FROM_HOST + mmap cache |
+| Same-frame fast path | any | **< 0.1 ms** | N/A | Cached mmap, no ioctl |
+
+**How it works:**
+- **4-slot mmap cache** — GEM handles, prime fds, and mmap pointers persist across calls. No allocation per frame.
+- **Always-transfer mode** — Issues `VIRTGPU_TRANSFER_FROM_HOST` every call for guaranteed-fresh data (like X11's `XShmGetImage`).
+- **fb_id tracking** — Detects compositor page flips and reuses the correct cached slot.
+- **Zero-copy path** — When using DMA-BUF output, the application can import the buffer directly (e.g., as an EGLImage or Vulkan texture).
+
+> These numbers were measured during real RustDesk remote desktop sessions at 1920×1080 on Ubuntu 24.04 (GNOME/Wayland) inside a Parallels VM.
+
 ## Why Not Use Existing Tools?
 
 Every existing project is either a complete application, a plugin, or PipeWire-based. **None is an embeddable C library for DRM/KMS capture.**
