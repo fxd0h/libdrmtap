@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -190,6 +191,18 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
         }
     }
 
+    /* ── Protect fd from async runtime hijacking ──
+     * Async runtimes (tokio, etc.) can close/reuse low-numbered fds.
+     * Duplicate our DRM fd to a number >= 100 so it's safe. */
+    {
+        int high_fd = fcntl(ctx->drm_fd, F_DUPFD_CLOEXEC, 100);
+        if (high_fd >= 0) {
+            close(ctx->drm_fd);
+            ctx->drm_fd = high_fd;
+        }
+        /* If fcntl fails, keep the original fd (best effort) */
+    }
+
     /* Detect GPU driver */
     detect_driver(ctx);
 
@@ -221,6 +234,9 @@ void drmtap_close(drmtap_ctx *ctx) {
     }
 
     drmtap_debug_log(ctx, "closing context");
+
+    /* Clean up persistent fast-grab state */
+    drmtap_fast_cleanup(ctx);
 
     /* Stop helper if running */
     drmtap_helper_stop(ctx);
