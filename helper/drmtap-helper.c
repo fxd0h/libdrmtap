@@ -40,7 +40,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <sys/un.h>
 
 #include <xf86drm.h>
@@ -54,6 +56,37 @@
 #include <seccomp.h>
 #endif
 
+/* virtio-gpu transfer support — needed to pull pixels from host GPU to guest RAM */
+#ifdef __linux__
+#include <sys/ioctl.h>
+#include <linux/virtio_gpu.h>
+#ifndef DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST
+struct drm_virtgpu_3d_transfer_from_host {
+    __u32 bo_handle;
+    __u32 pad;
+    __u64 offset;
+    __u32 level;
+    __u32 stride;
+    __u32 layer_stride;
+    struct drm_virtgpu_3d_box {
+        __u32 x, y, z, w, h, d;
+    } box;
+};
+struct drm_virtgpu_3d_wait {
+    __u32 handle;
+    __u32 flags;
+};
+#define DRM_VIRTGPU_TRANSFER_FROM_HOST 0x07
+#define DRM_VIRTGPU_WAIT              0x08
+#define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_VIRTGPU_TRANSFER_FROM_HOST, \
+             struct drm_virtgpu_3d_transfer_from_host)
+#define DRM_IOCTL_VIRTGPU_WAIT \
+    DRM_IOW(DRM_COMMAND_BASE + DRM_VIRTGPU_WAIT, \
+            struct drm_virtgpu_3d_wait)
+#endif
+#endif
+
 /* Socket fd inherited from parent (via socketpair) */
 #define HELPER_SOCKET_FD 3
 
@@ -64,6 +97,19 @@
 /* Response status */
 #define RESP_OK    0x00
 #define RESP_ERROR 0x01
+
+/* Metadata sent before pixel data — must match helper_grab_result_t in library */
+struct grab_metadata {
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t format;
+    uint32_t fb_id;
+    uint32_t data_size;     /* size of pixel data following this struct (0 = error) */
+    uint64_t modifier;
+    uint32_t seq;           /* frame sequence number (for pipeline tracing) */
+    uint64_t timestamp_ms;  /* unix time in milliseconds when helper read the frame */
+};
 
 /* ========================================================================= */
 /* Security hardening                                                        */
@@ -102,13 +148,12 @@ static int install_seccomp(void) {
         return -1;
     }
 
-    /* Allow only the syscalls we need */
     int allowed[] = {
         SCMP_SYS(read), SCMP_SYS(write), SCMP_SYS(close),
         SCMP_SYS(openat), SCMP_SYS(open),
         SCMP_SYS(ioctl),       /* DRM ioctls */
-        SCMP_SYS(sendmsg),     /* SCM_RIGHTS */
-        SCMP_SYS(recvmsg), SCMP_SYS(recv),
+        SCMP_SYS(sendto),      /* send() */
+        SCMP_SYS(recvfrom),    /* recv() */
         SCMP_SYS(mmap), SCMP_SYS(munmap),
         SCMP_SYS(brk),         /* malloc */
         SCMP_SYS(fstat), SCMP_SYS(newfstatat),
@@ -135,68 +180,45 @@ static int install_seccomp(void) {
 #endif
 
 /* ========================================================================= */
-/* SCM_RIGHTS fd passing                                                     */
+/* Socket helpers                                                            */
 /* ========================================================================= */
 
-// Send a file descriptor over the Unix socket via SCM_RIGHTS
-static int send_fd(int socket, int fd_to_send, uint8_t status) {
-    struct msghdr msg = {0};
-    struct iovec iov;
-    char cmsg_buf[CMSG_SPACE(sizeof(int))];
-
-    iov.iov_base = &status;
-    iov.iov_len = sizeof(status);
-
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    if (fd_to_send >= 0) {
-        msg.msg_control = cmsg_buf;
-        msg.msg_controllen = sizeof(cmsg_buf);
-
-        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-        cmsg->cmsg_level = SOL_SOCKET;
-        cmsg->cmsg_type = SCM_RIGHTS;
-        cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-        memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
+// Send all bytes, handling partial writes
+static int send_all(int sock, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(sock, p + sent, len - sent, MSG_NOSIGNAL);
+        if (n <= 0) {
+            return -1;
+        }
+        sent += (size_t)n;
     }
-
-    ssize_t n = sendmsg(socket, &msg, 0);
-    return (n > 0) ? 0 : -1;
+    return 0;
 }
 
-// Send an error response (no fd)
-static int send_error(int socket, const char *reason) {
+// Send error: metadata with data_size=0
+static int send_error(int sock, const char *reason) {
     fprintf(stderr, "drmtap-helper: %s\n", reason);
-    uint8_t status = RESP_ERROR;
-    return send_fd(socket, -1, status);
+    struct grab_metadata meta = {0};  /* data_size=0 signals error */
+    send_all(sock, &meta, sizeof(meta));
+    return -1;
 }
 
 /* ========================================================================= */
-/* DRM capture (privileged)                                                  */
+/* DRM capture (privileged) — reads pixels, sends via socket                 */
 /* ========================================================================= */
 
-// Find primary plane and export its framebuffer as a DMA-BUF fd
-static int grab_and_send(int sock, const char *device_path) {
-    int drm_fd = -1;
-    int prime_fd = -1;
-    int ret = -1;
+// Grab current framebuffer. Helper reads pixels in its own process
+// (where dumb_mmap returns fresh data) and sends them via the socket.
+static int grab_and_send(int sock, int drm_fd, int is_virtio) {
+    void *mapped = MAP_FAILED;
+    size_t mapped_size = 0;
 
-    /* Open DRM device */
-    drm_fd = open(device_path, O_RDWR | O_CLOEXEC);
-    if (drm_fd < 0) {
-        send_error(sock, "failed to open DRM device");
-        return -1;
-    }
-
-    /* Enable universal planes */
-    drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
-
-    /* Find a plane with an active framebuffer */
+    /* Refresh plane state on persistent fd */
     drmModePlaneRes *planes = drmModeGetPlaneResources(drm_fd);
     if (!planes) {
-        send_error(sock, "drmModeGetPlaneResources failed");
-        goto cleanup;
+        return send_error(sock, "drmModeGetPlaneResources failed");
     }
 
     uint32_t fb_id = 0;
@@ -214,41 +236,105 @@ static int grab_and_send(int sock, const char *device_path) {
     drmModeFreePlaneResources(planes);
 
     if (fb_id == 0) {
-        send_error(sock, "no active framebuffer found");
-        goto cleanup;
+        return send_error(sock, "no active framebuffer found");
     }
 
-    /* GetFB2 — this is why we need CAP_SYS_ADMIN */
+    /* Use persistent DRM fd for ALL operations.
+     * On virtio-gpu 3D (virgl), fresh fds don't maintain the GPU context
+     * needed for transfer_from_host to actually refresh pixel data.
+     * The persistent fd keeps the context alive — same as VNC direct path. */
+
+    /* GetFB2 on persistent fd */
     drmModeFB2 *fb2 = drmModeGetFB2(drm_fd, fb_id);
     if (!fb2) {
-        send_error(sock, "drmModeGetFB2 failed");
-        goto cleanup;
+        return send_error(sock, "drmModeGetFB2 failed");
     }
 
     if (fb2->handles[0] == 0) {
-        send_error(sock, "handles[0]==0 even with helper (CAP_SYS_ADMIN not set?)");
         drmModeFreeFB2(fb2);
-        goto cleanup;
+        return send_error(sock, "handles[0]==0 (CAP_SYS_ADMIN not set?)");
     }
 
-    /* Export as DMA-BUF */
-    ret = drmPrimeHandleToFD(drm_fd, fb2->handles[0],
-                             O_RDONLY | O_CLOEXEC, &prime_fd);
+    uint32_t gem_handle = fb2->handles[0];
+
+    /* virtio_gpu: transfer pixels from host GPU to guest RAM */
+    if (is_virtio) {
+#ifdef __linux__
+        struct drm_virtgpu_3d_transfer_from_host xfer = {0};
+        xfer.bo_handle = gem_handle;
+        xfer.box.w = fb2->width;
+        xfer.box.h = fb2->height;
+        xfer.box.d = 1;
+        if (drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, &xfer) == 0) {
+            struct drm_virtgpu_3d_wait wait_args = {0};
+            wait_args.handle = gem_handle;
+            drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_WAIT, &wait_args);
+        }
+#endif
+    }
+
+    /* dumb_mmap — map the framebuffer in THIS process */
+    mapped_size = (size_t)fb2->pitches[0] * fb2->height;
+    struct drm_mode_map_dumb map = {0};
+    map.handle = gem_handle;
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
+        drmModeFreeFB2(fb2);
+        return send_error(sock, "MODE_MAP_DUMB failed");
+    }
+    mapped = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED,
+                  drm_fd, map.offset);
+    if (mapped == MAP_FAILED) {
+        drmModeFreeFB2(fb2);
+        return send_error(sock, "mmap failed");
+    }
+
+    /* Build metadata */
+    struct grab_metadata meta = {0};
+    meta.width = fb2->width;
+    meta.height = fb2->height;
+    meta.stride = fb2->pitches[0];
+    meta.format = fb2->pixel_format;
+    meta.fb_id = fb_id;
+    meta.data_size = (uint32_t)mapped_size;
+    meta.modifier = fb2->modifier;
+
     drmModeFreeFB2(fb2);
 
-    if (ret < 0 || prime_fd < 0) {
-        send_error(sock, "drmPrimeHandleToFD failed");
-        goto cleanup;
+    /* Stamp frame with sequence number and timestamp */
+    static uint32_t seq_counter = 0;
+    seq_counter++;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    meta.seq = seq_counter;
+    meta.timestamp_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+
+    /* Send metadata + pixel data through socket */
+    {
+        /* Debug: print pixel values to verify freshness */
+        static int frame_num = 0;
+        frame_num++;
+        uint32_t *pixels = (uint32_t *)mapped;
+        uint32_t stride_px = meta.stride / 4;
+        /* Sample: row 0 col 960 (center top), row 94 col 960 (clock area),
+         * row 500 col 960 (mid-screen) */
+        uint32_t p_top = pixels[960];
+        uint32_t p_clock = pixels[94 * stride_px + 960];
+        uint32_t p_mid = pixels[500 * stride_px + 960];
+        if (frame_num <= 5 || frame_num % 60 == 0) {
+            fprintf(stderr,
+                "drmtap-helper: frame=%d fb=%u top=%08x clock=%08x mid=%08x\n",
+                frame_num, meta.fb_id, p_top, p_clock, p_mid);
+        }
+    }
+    int ret = send_all(sock, &meta, sizeof(meta));
+    if (ret == 0) {
+        ret = send_all(sock, mapped, mapped_size);
     }
 
-    /* Send the DMA-BUF fd to the client */
-    ret = send_fd(sock, prime_fd, RESP_OK);
-    close(prime_fd);
+    /* Cleanup — munmap but DON'T close drm_fd (it's persistent).
+     * GEM handles accumulate but kernel cleans them on process exit. */
+    munmap(mapped, mapped_size);
 
-cleanup:
-    if (drm_fd >= 0) {
-        close(drm_fd);
-    }
     return ret;
 }
 
@@ -283,34 +369,55 @@ int main(int argc, char *argv[]) {
     }
 
 #ifdef HAVE_LIBCAP
-    /* Drop all capabilities except CAP_SYS_ADMIN */
     if (drop_caps() != 0) {
         fprintf(stderr, "drmtap-helper: warning: failed to drop caps\n");
-        /* Non-fatal — continue anyway */
     }
 #endif
 
 #ifdef HAVE_SECCOMP
-    /* Install seccomp filter */
     if (install_seccomp() != 0) {
         fprintf(stderr, "drmtap-helper: warning: failed to install seccomp\n");
-        /* Non-fatal — continue anyway */
     }
 #endif
 
-    /* Event loop: receive commands, process, respond */
+    /* ================================================================
+     * Persistent DRM fd — opened ONCE, reused for all frames.
+     * This is the key performance optimization: avoids the expensive
+     * open()/close() + drmSetClientCap() on every frame.
+     * ================================================================ */
+    int drm_fd = open(device, O_RDWR | O_CLOEXEC);
+    if (drm_fd < 0) {
+        fprintf(stderr, "drmtap-helper: failed to open %s: %s\n",
+                device, strerror(errno));
+        return 1;
+    }
+    drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+
+    /* Detect virtio_gpu once */
+    int is_virtio = 0;
+    drmVersion *ver = drmGetVersion(drm_fd);
+    if (ver) {
+        if (ver->name_len >= 9 &&
+            strncmp(ver->name, "virtio_gpu", ver->name_len) == 0) {
+            is_virtio = 1;
+        }
+        drmFreeVersion(ver);
+    }
+    fprintf(stderr, "drmtap-helper: persistent fd=%d device=%s virtio=%d\n",
+            drm_fd, device, is_virtio);
+
+    /* Event loop: receive commands, process with persistent fd */
     while (1) {
         uint8_t cmd;
         ssize_t n = recv(sock, &cmd, 1, 0);
 
         if (n <= 0) {
-            /* Parent closed the socket */
             break;
         }
 
         switch (cmd) {
             case CMD_GRAB:
-                grab_and_send(sock, device);
+                grab_and_send(sock, drm_fd, is_virtio);
                 break;
 
             case CMD_QUIT:
