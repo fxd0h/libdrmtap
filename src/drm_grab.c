@@ -62,10 +62,12 @@
 
 typedef struct {
     int prime_fd;           /* DMA-BUF fd from PrimeHandleToFD */
-    void *mapped;           /* mmap'd pointer (or MAP_FAILED) */
+    int helper_drm_fd;      /* DRM fd from helper (needs close on release) */
+    void *mapped;           /* mmap'd or malloc'd pixel buffer */
     size_t mapped_size;     /* size of mapped region */
     uint32_t gem_handle;    /* GEM handle (needs close) */
     int used_dumb_map;      /* 1 if mapped via dumb buffer (virtio_gpu) */
+    int is_heap_buf;        /* 1 if mapped is malloc'd (helper v2 pixel path) */
 } frame_priv_t;
 
 /* ========================================================================= */
@@ -304,60 +306,54 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         drmtap_debug_log(ctx,
             "handles[0]==0: no CAP_SYS_ADMIN, trying helper...");
 
-        /* Try the privileged helper */
-        int helper_fd = drmtap_helper_grab_fd(ctx);
-        if (helper_fd < 0) {
+        /* Allocate pixel buffer for helper to fill */
+        size_t buf_size = (size_t)fb2->pitches[0] * fb2->height;
+        void *pixel_buf = malloc(buf_size);
+        if (!pixel_buf) {
+            drmModeFreeFB2(fb2);
+            return -ENOMEM;
+        }
+
+        /* Helper reads pixels in its own process and sends via socket */
+        helper_grab_result_t hresult;
+        ret = drmtap_helper_grab(ctx, &hresult, pixel_buf, buf_size);
+        if (ret < 0) {
+            free(pixel_buf);
             drmtap_set_error(ctx,
                 "No CAP_SYS_ADMIN and helper failed (ret=%d). "
-                "Install the helper: sudo cp drmtap-helper /usr/local/bin/ "
-                "&& sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper",
-                helper_fd);
+                "Install the helper: sudo cp drmtap-helper /usr/local/libexec/ "
+                "&& sudo setcap cap_sys_admin+ep /usr/local/libexec/drmtap-helper",
+                ret);
             drmModeFreeFB2(fb2);
             return -EACCES;
         }
 
-        drmtap_debug_log(ctx, "helper returned DMA-BUF fd=%d", helper_fd);
-
-        /* Use helper's DMA-BUF fd instead of PrimeHandleToFD */
-        prime_fd = helper_fd;
-
         /* Allocate private state */
         priv = calloc(1, sizeof(frame_priv_t));
         if (!priv) {
-            close(prime_fd);
+            free(pixel_buf);
             drmModeFreeFB2(fb2);
             return -ENOMEM;
         }
-        priv->prime_fd = prime_fd;
-        priv->gem_handle = 0;  /* No local GEM handle from helper path */
-        priv->mapped = MAP_FAILED;
-        priv->mapped_size = 0;
+        priv->helper_drm_fd = -1;
+        priv->prime_fd = -1;
+        priv->gem_handle = 0;
+        priv->mapped = pixel_buf;       /* reuse mapped field for free() */
+        priv->mapped_size = buf_size;
+        priv->used_dumb_map = 1;        /* skip dmabuf_sync in release */
+        priv->is_heap_buf = 1;          /* free() instead of munmap() */
 
-        /* Fill frame info */
+        /* Fill frame info from helper metadata */
         memset(frame, 0, sizeof(*frame));
-        frame->width = fb2->width;
-        frame->height = fb2->height;
-        frame->stride = fb2->pitches[0];
-        frame->format = fb2->pixel_format;
-        frame->modifier = fb2->modifier;
-        frame->dma_buf_fd = prime_fd;
-        frame->data = NULL;
+        frame->width = hresult.width;
+        frame->height = hresult.height;
+        frame->stride = hresult.stride;
+        frame->format = hresult.format;
+        frame->modifier = hresult.modifier;
+        frame->fb_id = hresult.fb_id;
+        frame->dma_buf_fd = -1;
+        frame->data = pixel_buf;
         frame->_priv = priv;
-
-        /* mmap if requested */
-        if (do_mmap) {
-            size_t size = (size_t)fb2->pitches[0] * fb2->height;
-            dmabuf_sync_start(prime_fd);
-            void *mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
-                                prime_fd, 0);
-            if (mapped != MAP_FAILED) {
-                priv->mapped = mapped;
-                priv->mapped_size = size;
-                frame->data = mapped;
-                drmtap_debug_log(ctx, "helper: mapped %zu bytes at %p",
-                                 size, mapped);
-            }
-        }
 
         drmModeFreeFB2(fb2);
         return 0;
@@ -380,6 +376,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         goto cleanup;
     }
     priv->prime_fd = prime_fd;
+    priv->helper_drm_fd = -1;
     priv->gem_handle = fb2->handles[0];
     priv->mapped = MAP_FAILED;
     priv->mapped_size = 0;
@@ -391,6 +388,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     frame->stride = fb2->pitches[0];
     frame->format = fb2->pixel_format;
     frame->modifier = fb2->modifier;
+    frame->fb_id = fb_id;
     frame->dma_buf_fd = prime_fd;
     frame->data = NULL;
     frame->_priv = priv;
@@ -430,6 +428,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             drmtap_debug_log(ctx, "mmap failed, falling back to zero-copy");
             frame->data = NULL;
         } else {
+            /* Unconditionally invalidate CPU caches using SYNC_START */
+            /* Crucial for virtio_gpu where the transfer arrives in system RAM asynchronously */
+            dmabuf_sync_start(prime_fd);
+
             priv->mapped = mapped;
             priv->mapped_size = size;
             frame->data = mapped;
@@ -478,10 +480,16 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
 
     frame_priv_t *priv = (frame_priv_t *)frame->_priv;
     if (priv) {
-        /* Unmap if mapped */
-        if (priv->mapped != MAP_FAILED && priv->mapped_size > 0) {
-            dmabuf_sync_end(priv->prime_fd);
-            munmap(priv->mapped, priv->mapped_size);
+        /* Free or unmap pixel buffer */
+        if (priv->mapped && priv->mapped_size > 0) {
+            if (priv->is_heap_buf) {
+                free(priv->mapped);
+            } else if (priv->mapped != MAP_FAILED) {
+                if (!priv->used_dumb_map && priv->prime_fd >= 0) {
+                    dmabuf_sync_end(priv->prime_fd);
+                }
+                munmap(priv->mapped, priv->mapped_size);
+            }
         }
 
         /* Close DMA-BUF fd */
@@ -489,10 +497,10 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             close(priv->prime_fd);
         }
 
-        /* Close GEM handle to avoid leaks */
-        /* Note: GEM handles are per-process, closed via DRM ioctl */
-        /* The handle was from drmModeGetFB2, no explicit close needed
-         * as the fd close handles it */
+        /* Close helper DRM fd */
+        if (priv->helper_drm_fd >= 0) {
+            close(priv->helper_drm_fd);
+        }
 
         free(priv);
     }
@@ -500,4 +508,238 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     /* Zero out the frame to prevent double-free */
     memset(frame, 0, sizeof(*frame));
     frame->dma_buf_fd = -1;
+}
+
+/* ========================================================================= */
+/* Fast persistent-mmap capture (double-buffer cache)                         */
+/* ========================================================================= */
+
+// Clean up all cached buffer slots
+void drmtap_fast_cleanup(drmtap_ctx *ctx) {
+    for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+        if (ctx->fast_slots[i].mmap_ptr &&
+            ctx->fast_slots[i].mmap_ptr != MAP_FAILED) {
+            munmap(ctx->fast_slots[i].mmap_ptr, ctx->fast_slots[i].mmap_size);
+        }
+        if (ctx->fast_slots[i].prime_fd >= 0) {
+            close(ctx->fast_slots[i].prime_fd);
+        }
+        memset(&ctx->fast_slots[i], 0, sizeof(ctx->fast_slots[i]));
+        ctx->fast_slots[i].prime_fd = -1;
+    }
+    ctx->fast_plane_id = 0;
+    ctx->fast_last_fb_id = 0;
+    ctx->fast_initialized = 0;
+}
+
+// Find or allocate a slot for the given fb_id
+// Returns slot index, or -1 if cache is full (evicts LRU in that case)
+static int find_or_alloc_slot(drmtap_ctx *ctx, uint32_t fb_id) {
+    // Check if already cached
+    for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+        if (ctx->fast_slots[i].fb_id == fb_id) {
+            return i;
+        }
+    }
+    // Find empty slot
+    for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+        if (ctx->fast_slots[i].fb_id == 0) {
+            return i;
+        }
+    }
+    // Cache full — evict slot 0 (oldest)
+    if (ctx->fast_slots[0].mmap_ptr &&
+        ctx->fast_slots[0].mmap_ptr != MAP_FAILED) {
+        munmap(ctx->fast_slots[0].mmap_ptr, ctx->fast_slots[0].mmap_size);
+    }
+    if (ctx->fast_slots[0].prime_fd >= 0) {
+        close(ctx->fast_slots[0].prime_fd);
+    }
+    memset(&ctx->fast_slots[0], 0, sizeof(ctx->fast_slots[0]));
+    ctx->fast_slots[0].prime_fd = -1;
+    return 0;
+}
+
+int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
+    if (!ctx || !frame) {
+        return -EINVAL;
+    }
+
+    int ret;
+
+    /* Step 1: Find plane on first call only */
+    if (!ctx->fast_initialized) {
+        ctx->fast_plane_id = find_primary_plane(ctx);
+        if (ctx->fast_plane_id == 0) {
+            drmtap_set_error(ctx, "No active plane found for capture");
+            return -ENODEV;
+        }
+        for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+            memset(&ctx->fast_slots[i], 0, sizeof(ctx->fast_slots[i]));
+            ctx->fast_slots[i].prime_fd = -1;
+        }
+        ctx->fast_last_fb_id = 0;
+        ctx->fast_initialized = 1;
+        drmtap_debug_log(ctx, "fast2: initialized plane=%u", ctx->fast_plane_id);
+    }
+
+    /* Step 2: Refresh fb_id (cheap ioctl, ~0.05ms) */
+    drmModePlane *plane = drmModeGetPlane(ctx->drm_fd, ctx->fast_plane_id);
+    if (!plane || plane->fb_id == 0) {
+        if (plane) drmModeFreePlane(plane);
+        drmtap_fast_cleanup(ctx);
+        return -ENODEV;
+    }
+    uint32_t fb_id = plane->fb_id;
+    drmModeFreePlane(plane);
+
+    /* Step 3: If fb_id unchanged, use cached slot but ALWAYS re-transfer.
+     * This gives us X11-style "always current" pixels with only 1 ioctl
+     * instead of the 7 syscalls of grab_mapped. */
+    if (fb_id == ctx->fast_last_fb_id) {
+        for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+            if (ctx->fast_slots[i].fb_id == fb_id && ctx->fast_slots[i].mmap_ptr) {
+                /* Re-transfer to get current pixels */
+                if (is_virtio_gpu(ctx)) {
+                    ret = virtio_transfer_from_host(ctx,
+                            ctx->fast_slots[i].gem_handle,
+                            ctx->fast_slots[i].width,
+                            ctx->fast_slots[i].height);
+                    if (ret < 0) return ret;
+                } else {
+                    dmabuf_sync_start(ctx->fast_slots[i].prime_fd);
+                }
+                frame->data = ctx->fast_slots[i].mmap_ptr;
+                frame->dma_buf_fd = ctx->fast_slots[i].prime_fd;
+                frame->width = ctx->fast_slots[i].width;
+                frame->height = ctx->fast_slots[i].height;
+                frame->stride = ctx->fast_slots[i].stride;
+                frame->format = ctx->fast_slots[i].format;
+                frame->modifier = ctx->fast_slots[i].modifier;
+                frame->fb_id = fb_id;
+                frame->_priv = NULL;
+                return 0;   /* always return as new frame */
+            }
+        }
+        /* Slot not found — fall through to acquire */
+    }
+
+    /* Step 4: fb_id changed — check if we have this buffer cached */
+    int slot = find_or_alloc_slot(ctx, fb_id);
+
+    if (ctx->fast_slots[slot].fb_id == fb_id && ctx->fast_slots[slot].mmap_ptr) {
+        /* ═══ CACHE HIT ═══ Buffer already mapped from a previous flip!
+         * Skip: GetFB2, PrimeHandleToFD, mmap  (saves ~4ms)
+         * Only do: TRANSFER_FROM_HOST (the unavoidable part) */
+        drmtap_debug_log(ctx, "fast2: CACHE HIT fb=%u slot=%d gem=%u",
+                         fb_id, slot, ctx->fast_slots[slot].gem_handle);
+
+        if (is_virtio_gpu(ctx)) {
+            ret = virtio_transfer_from_host(ctx, ctx->fast_slots[slot].gem_handle,
+                                             ctx->fast_slots[slot].width,
+                                             ctx->fast_slots[slot].height);
+            if (ret < 0) {
+                drmtap_debug_log(ctx, "fast2: cached transfer failed: %d", ret);
+                return ret;
+            }
+        } else {
+            dmabuf_sync_start(ctx->fast_slots[slot].prime_fd);
+        }
+
+        ctx->fast_last_fb_id = fb_id;
+
+        frame->data = ctx->fast_slots[slot].mmap_ptr;
+        frame->dma_buf_fd = ctx->fast_slots[slot].prime_fd;
+        frame->width = ctx->fast_slots[slot].width;
+        frame->height = ctx->fast_slots[slot].height;
+        frame->stride = ctx->fast_slots[slot].stride;
+        frame->format = ctx->fast_slots[slot].format;
+        frame->modifier = ctx->fast_slots[slot].modifier;
+        frame->fb_id = fb_id;
+        frame->_priv = NULL;
+        return 0;   /* new frame */
+    }
+
+    /* ═══ CACHE MISS ═══ First time seeing this fb_id — full setup */
+    drmtap_debug_log(ctx, "fast2: CACHE MISS fb=%u slot=%d (cold start)",
+                     fb_id, slot);
+
+    drmModeFB2 *fb2 = drmModeGetFB2(ctx->drm_fd, fb_id);
+    if (!fb2) {
+        ret = -errno;
+        drmtap_set_error(ctx, "fast2: drmModeGetFB2(%u) failed: %s",
+                         fb_id, strerror(errno));
+        return ret;
+    }
+
+    if (fb2->handles[0] == 0) {
+        drmModeFreeFB2(fb2);
+        drmtap_set_error(ctx, "fast2: handles[0]==0, no CAP_SYS_ADMIN");
+        return -EACCES;
+    }
+
+    /* Export DMA-BUF */
+    int prime_fd = -1;
+    ret = drmPrimeHandleToFD(ctx->drm_fd, fb2->handles[0],
+                              O_RDONLY | O_CLOEXEC, &prime_fd);
+    if (ret < 0) {
+        ret = -errno;
+        drmModeFreeFB2(fb2);
+        return ret;
+    }
+
+    /* mmap */
+    size_t size = (size_t)fb2->pitches[0] * fb2->height;
+    void *mapped = MAP_FAILED;
+
+    if (is_virtio_gpu(ctx)) {
+        ret = virtio_transfer_from_host(ctx, fb2->handles[0],
+                                         fb2->width, fb2->height);
+        if (ret >= 0) {
+            mapped = virtio_dumb_mmap(ctx, fb2->handles[0], size);
+        }
+    }
+
+    if (mapped == MAP_FAILED) {
+        dmabuf_sync_start(prime_fd);
+        mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
+                      prime_fd, fb2->offsets[0]);
+    }
+
+    if (mapped == MAP_FAILED) {
+        close(prime_fd);
+        drmModeFreeFB2(fb2);
+        return -ENOMEM;
+    }
+
+    /* Store in slot */
+    ctx->fast_slots[slot].fb_id = fb_id;
+    ctx->fast_slots[slot].gem_handle = fb2->handles[0];
+    ctx->fast_slots[slot].prime_fd = prime_fd;
+    ctx->fast_slots[slot].mmap_ptr = mapped;
+    ctx->fast_slots[slot].mmap_size = size;
+    ctx->fast_slots[slot].width = fb2->width;
+    ctx->fast_slots[slot].height = fb2->height;
+    ctx->fast_slots[slot].stride = fb2->pitches[0];
+    ctx->fast_slots[slot].format = fb2->pixel_format;
+    ctx->fast_slots[slot].modifier = fb2->modifier;
+
+    drmtap_debug_log(ctx, "fast2: cached fb=%u slot=%d gem=%u %ux%u",
+                     fb_id, slot, fb2->handles[0], fb2->width, fb2->height);
+
+    drmModeFreeFB2(fb2);
+    ctx->fast_last_fb_id = fb_id;
+
+    /* Fill frame info */
+    frame->data = mapped;
+    frame->dma_buf_fd = prime_fd;
+    frame->width = ctx->fast_slots[slot].width;
+    frame->height = ctx->fast_slots[slot].height;
+    frame->stride = ctx->fast_slots[slot].stride;
+    frame->format = ctx->fast_slots[slot].format;
+    frame->modifier = ctx->fast_slots[slot].modifier;
+    frame->fb_id = fb_id;
+    frame->_priv = NULL;
+
+    return 0;   /* new frame */
 }

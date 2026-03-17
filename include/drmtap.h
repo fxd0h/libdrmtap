@@ -135,6 +135,7 @@ typedef struct {
     uint32_t stride;        /**< Bytes per row (may include padding) */
     uint32_t format;        /**< DRM fourcc (e.g., DRM_FORMAT_XRGB8888) */
     uint64_t modifier;      /**< Format modifier (e.g., DRM_FORMAT_MOD_LINEAR) */
+    uint32_t fb_id;         /**< KMS framebuffer id — changes on compositor page flip */
     void *_priv;            /**< Internal — do not touch */
 } drmtap_frame_info;
 
@@ -164,6 +165,24 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * @return 0 on success, negative errno on error
  */
 int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
+
+/**
+ * @brief Capture a frame — fast persistent-mmap path.
+ *
+ * Like drmtap_grab_mapped() but keeps the mmap/GEM handle/prime fd alive
+ * between calls. Uses fb_id to detect compositor page flips — if the
+ * framebuffer hasn't changed, returns 1 immediately (~0.1ms instead of ~18ms).
+ *
+ * The returned frame->data pointer is valid until the NEXT call to this
+ * function OR until drmtap_close(). Do NOT call drmtap_frame_release()
+ * on frames from this function — cleanup is automatic.
+ *
+ * @param ctx   Capture context
+ * @param frame Output frame info (caller-allocated, reused between calls)
+ * @return 0 = new frame captured, 1 = same as last call (unchanged),
+ *         negative errno on error
+ */
+int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame);
 
 /**
  * @brief Release a captured frame's resources.

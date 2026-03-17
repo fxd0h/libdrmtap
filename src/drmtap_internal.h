@@ -52,6 +52,26 @@ struct drmtap_ctx {
 
     /* Debug */
     int debug;
+
+    /* ── Persistent fast-grab state (double-buffer cache) ── */
+    /* Cache up to 4 buffer slots indexed by fb_id.
+     * Compositor typically uses 2-3 buffers (double/triple buffering).
+     * Each slot keeps its GEM handle + mmap alive across frames,
+     * eliminating GetFB2 + PrimeHandleToFD + mmap/munmap per frame. */
+    #define DRMTAP_FAST_SLOTS 4
+    struct {
+        uint32_t fb_id;         /* KMS framebuffer id (0 = slot unused) */
+        uint32_t gem_handle;    /* GEM handle from GetFB2 import */
+        int      prime_fd;      /* DMA-BUF fd */
+        void    *mmap_ptr;      /* persistent mmap */
+        size_t   mmap_size;     /* mapped region size */
+        uint32_t width, height, stride;
+        uint32_t format;
+        uint64_t modifier;
+    } fast_slots[4];
+    uint32_t fast_plane_id;         /* cached primary plane id */
+    uint32_t fast_last_fb_id;       /* fb_id from last capture (change detect) */
+    int      fast_initialized;      /* 1 = plane found, slots ready */
 };
 
 /* ========================================================================= */
@@ -64,10 +84,28 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
 // Debug log to stderr (only when ctx->debug is set)
 void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
 
+/* Result from helper v2 grab — helper reads pixels and sends via socket.
+ * Must match struct grab_metadata in drmtap-helper.c */
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t format;
+    uint32_t fb_id;
+    uint32_t data_size;     /* 0 = error, >0 = pixel data follows */
+    uint64_t modifier;
+    uint32_t seq;           /* frame sequence number from helper */
+    uint64_t timestamp_ms;  /* unix ms when helper read the frame */
+} helper_grab_result_t;
+
 /* Helper lifecycle (privilege_helper.c) */
 int drmtap_helper_spawn(drmtap_ctx *ctx);
 void drmtap_helper_stop(drmtap_ctx *ctx);
-int drmtap_helper_grab_fd(drmtap_ctx *ctx);
+/* Fast-grab persistent state cleanup (drm_grab.c) */
+void drmtap_fast_cleanup(drmtap_ctx *ctx);
+
+int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
+                        void *pixel_buf, size_t buf_size);
 
 /* GPU backend: generic linear (gpu_generic.c) */
 int drmtap_gpu_generic_match(const char *driver);
