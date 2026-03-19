@@ -79,7 +79,13 @@ static int open_drm_auto(drmtap_ctx *ctx) {
         drmtap_debug_log(ctx, "DRM_DEVICE open failed: %s", strerror(errno));
     }
 
-    /* Scan /dev/dri/card0 through card15 */
+    /* Two-pass scan of /dev/dri/card0..card15:
+     *   Pass 1: find a device with an ACTIVE CRTC (monitor connected)
+     *   Pass 2: fallback to any device with KMS resources
+     */
+    int fallback_fd = -1;
+    char fallback_path[64] = {0};
+
     for (int i = 0; i < 16; i++) {
         snprintf(path, sizeof(path), "/dev/dri/card%d", i);
         int fd = open(path, O_RDWR | O_CLOEXEC);
@@ -89,17 +95,51 @@ static int open_drm_auto(drmtap_ctx *ctx) {
 
         drmtap_debug_log(ctx, "probing %s", path);
 
-        /* Check if this device has DRM resources (is a KMS device) */
         drmModeRes *res = drmModeGetResources(fd);
         if (!res) {
             drmtap_debug_log(ctx, "  no KMS resources, skipping");
             close(fd);
             continue;
         }
+
+        /* Check for active CRTCs (monitor driving a display) */
+        int has_active = 0;
+        for (int j = 0; j < res->count_crtcs; j++) {
+            drmModeCrtc *crtc = drmModeGetCrtc(fd, res->crtcs[j]);
+            if (crtc) {
+                if (crtc->mode_valid && crtc->buffer_id > 0) {
+                    drmtap_debug_log(ctx, "  CRTC %u active (%dx%d)",
+                                     crtc->crtc_id, crtc->width, crtc->height);
+                    has_active = 1;
+                }
+                drmModeFreeCrtc(crtc);
+                if (has_active) break;
+            }
+        }
         drmModeFreeResources(res);
 
-        snprintf(ctx->device_path, sizeof(ctx->device_path), "%s", path);
-        return fd;
+        if (has_active) {
+            /* Found the GPU driving a monitor — use this one */
+            if (fallback_fd >= 0) close(fallback_fd);
+            snprintf(ctx->device_path, sizeof(ctx->device_path), "%s", path);
+            return fd;
+        }
+
+        /* Keep as fallback (first device with KMS but no active CRTC) */
+        if (fallback_fd < 0) {
+            fallback_fd = fd;
+            snprintf(fallback_path, sizeof(fallback_path), "%s", path);
+            drmtap_debug_log(ctx, "  no active CRTC, saved as fallback");
+        } else {
+            close(fd);
+        }
+    }
+
+    /* No device with active CRTC found — use fallback if available */
+    if (fallback_fd >= 0) {
+        snprintf(ctx->device_path, sizeof(ctx->device_path), "%s", fallback_path);
+        drmtap_debug_log(ctx, "using fallback device %s (no active CRTC found)", fallback_path);
+        return fallback_fd;
     }
 
     return -1;
