@@ -13,7 +13,7 @@ keywords = ["drm", "kms", "screen-capture", "wayland", "remote-desktop"]
 categories = ["multimedia::video", "os::linux-apis"]
 
 [dependencies]
-libdrmtap-sys = { version = "0.2.0", path = "../libdrmtap-sys" }
+libdrmtap-sys = { version = "0.2.1", path = "../libdrmtap-sys" }
 
 [[example]]
 name = "capture_test"
