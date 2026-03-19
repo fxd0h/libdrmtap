@@ -1,6 +1,6 @@
 [package]
 name = "libdrmtap"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Mariano Abad <weimaraner@gmail.com>"]
 description = "Safe Rust wrapper for libdrmtap — DRM/KMS screen capture for Linux (login screen, Wayland, headless)"
