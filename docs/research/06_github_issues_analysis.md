@@ -166,21 +166,48 @@ Variants: Intel X-TILED, Intel CCS, Nvidia BLOCK_LINEAR, AMD DCC, Broadcom T-TIL
 No universal solution: each GPU needs its own code path
 ```
 
-### 4. Multi-monitor and coordinate mapping
+### 4. CCS-compressed framebuffers crash CPU deswizzle (discovered 2026-03-18)
+```
+Affected projects: libdrmtap (our own!)
+Frequency: 100% on Intel Gen12+ with helper mode
+GPU: Intel UHD (TGL/ADL) with I915_FORMAT_MOD_Y_TILED_CCS
+Cause: dumb_mmap of CCS framebuffers returns compressed data that
+       cannot be CPU-deswizzled. Only EGL import via DMA-BUF fd works.
+Impact: Silent process crash (out-of-bounds read in deswizzle)
+```
+
+**Root cause chain:**
+1. Helper does `MODE_MAP_DUMB` + `mmap` → gets CCS-compressed pixels
+2. Sends raw CCS data over socket with `modifier = CCS`
+3. Parent has `dma_buf_fd = -1` (V2 protocol: no SCM_RIGHTS) → EGL skipped
+4. CPU `deswizzle_intel_y_tiled()` runs on CCS data → out-of-bounds → crash
+
+**Why it wasn't caught before:**
+- vkms (test VM): modifier = LINEAR → deswizzle skipped entirely → no crash
+- Standalone test (root): has `dma_buf_fd >= 0` → EGL GPU deswizzle → correct image
+- Only triggers when: Intel CCS + helper (non-root) + V2 protocol
+
+**Fix applied:** CCS modifiers (0x05-0x08) return `-ENOTSUP` from `drmtap_deswizzle()`.
+`gpu_auto_process()` handles this by setting modifier to LINEAR (raw pixels, garbled but no crash).
+
+**Proper fix needed:** V3 helper protocol must pass DMA-BUF fd via SCM_RIGHTS for
+non-linear modifiers, so the parent can use EGL GPU deswizzle.
+
+### 5. Multi-monitor and coordinate mapping
 ```
 Affected projects: kmsvnc, RustDesk
 Frequency: ~10% of issues
 Cause: cursor coordinate space vs CRTC vs plane
 ```
 
-### 5. Double-buffering / frame skip
+### 6. Double-buffering / frame skip
 ```
 Affected projects: kmsvnc
 Frequency: low but critical
 Cause: caching fb_id instead of refreshing it each frame
 ```
 
-### 6. Kernel/libdrm version compatibility
+### 7. Kernel/libdrm version compatibility
 ```
 Affected projects: kmsvnc, FFmpeg
 Frequency: ~10%
@@ -213,4 +240,6 @@ From reading all these issues, the library MUST:
 - [ ] Helper binary path must be configurable (compile-time + runtime) — distros use `/usr/libexec/`, not `/usr/local/bin/`
 - [ ] Set `FD_CLOEXEC` on received DMA-BUF fds to prevent leaking to child processes
 - [ ] Handle helper crash recovery — auto-restart if helper dies mid-capture
+- [x] **Never CPU-deswizzle CCS modifiers** — `dumb_mmap` returns compressed data, only EGL can deswizzle. Return `-ENOTSUP` and require DMA-BUF fd + EGL (commit 7c7ce27)
+- [ ] **V3 protocol: pass DMA-BUF fd via SCM_RIGHTS** for non-linear modifiers so parent can use EGL GPU deswizzle (needed for Intel CCS in unprivileged mode)
 
