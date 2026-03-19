@@ -1,9 +1,9 @@
 [package]
 name = "libdrmtap-sys"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Mariano Abad <weimaraner@gmail.com>"]
-description = "Raw FFI bindings for libdrmtap — DRM/KMS screen capture library for Linux"
+description = "Raw FFI bindings for libdrmtap — DRM/KMS screen capture library for Linux. Includes embedded C sources compiled statically."
 license = "MIT"
 repository = "https://github.com/fxd0h/libdrmtap"
 homepage = "https://github.com/fxd0h/libdrmtap"
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/libdrmtap-sys"
 readme = "README.md"
 keywords = ["drm", "kms", "screen-capture", "linux", "framebuffer"]
 categories = ["external-ffi-bindings", "os::linux-apis"]
-links = "drmtap"
+include = ["src/**", "csrc/**", "build.rs", "Cargo.toml", "README.md", "LICENSE"]
 
 [build-dependencies]
-pkg-config = "0.3"
+cc = "1"
