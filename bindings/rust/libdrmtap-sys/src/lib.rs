@@ -48,6 +48,7 @@ pub struct drmtap_frame_info {
     pub stride: u32,
     pub format: u32,
     pub modifier: u64,
+    pub fb_id: u32,
     pub _priv: *mut c_void,
 }
 
