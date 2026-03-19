@@ -1,0 +1,52 @@
+{
+  "defaultPattern": "fan-out",
+  "timeoutSeconds": 120,
+  "maxConcurrentAgents": 5,
+  "ragContext": {
+    "enabled": true,
+    "topK": 5,
+    "workspace": "auto"
+  },
+  "memory": {
+    "autoSaveResults": true,
+    "category": "agent_output"
+  },
+  "presets": {
+    "code-review": {
+      "pattern": "fan-out",
+      "agents": [
+        "reviewer",
+        "security",
+        "tester"
+      ],
+      "judge": "architect"
+    },
+    "architecture": {
+      "pattern": "fan-out",
+      "agents": [
+        "architect",
+        "researcher"
+      ]
+    },
+    "implement-feature": {
+      "pattern": "pipeline",
+      "agents": [
+        "architect",
+        "coder",
+        "reviewer",
+        "tester"
+      ]
+    },
+    "full-team": {
+      "pattern": "fan-out",
+      "agents": [
+        "coder",
+        "reviewer",
+        "tester",
+        "architect",
+        "security"
+      ],
+      "judge": "architect"
+    }
+  }
+}

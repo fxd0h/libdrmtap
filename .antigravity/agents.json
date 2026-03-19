@@ -1,0 +1,94 @@
+{
+  "agents": [
+    {
+      "name": "coder",
+      "model": "gemini-3.1-pro",
+      "description": "Code generation & implementation",
+      "temperature": 0.7,
+      "permissions": "standard",
+      "skills": [],
+      "mcpTools": [
+        "save_memory",
+        "search_memories"
+      ],
+      "persona_file": "./personas/coder.md"
+    },
+    {
+      "name": "reviewer",
+      "model": "claude-opus-4.6",
+      "description": "Code review & security analysis",
+      "temperature": 0.3,
+      "permissions": "readonly",
+      "skills": [],
+      "mcpTools": [
+        "search_memories",
+        "query_graph"
+      ],
+      "persona_file": "./personas/reviewer.md"
+    },
+    {
+      "name": "researcher",
+      "model": "gemini-3-flash",
+      "description": "Documentation & context research",
+      "temperature": 0.5,
+      "permissions": "readonly",
+      "skills": [
+        "rag_search"
+      ],
+      "mcpTools": [
+        "search_memories"
+      ],
+      "persona_file": "./personas/researcher.md"
+    },
+    {
+      "name": "architect",
+      "model": "gemini-3.1-pro",
+      "description": "System design & architecture",
+      "temperature": 0.5,
+      "permissions": "readonly",
+      "skills": [],
+      "mcpTools": [
+        "query_graph",
+        "get_neighbors"
+      ],
+      "persona_file": "./personas/architect.md"
+    },
+    {
+      "name": "tester",
+      "model": "gemini-3-flash",
+      "description": "Test writing & coverage analysis",
+      "temperature": 0.4,
+      "permissions": "standard",
+      "skills": [],
+      "mcpTools": [
+        "search_memories"
+      ],
+      "persona_file": "./personas/tester.md"
+    },
+    {
+      "name": "security",
+      "model": "claude-sonnet-4.6",
+      "description": "Vulnerability & threat analysis",
+      "temperature": 0.3,
+      "permissions": "readonly",
+      "skills": [],
+      "mcpTools": [
+        "search_memories",
+        "query_graph"
+      ],
+      "persona_file": "./personas/security.md"
+    },
+    {
+      "name": "devops",
+      "model": "gemini-3-flash",
+      "description": "CI/CD, packaging & deployment",
+      "temperature": 0.4,
+      "permissions": "readonly",
+      "skills": [],
+      "mcpTools": [
+        "search_memories"
+      ],
+      "persona_file": "./personas/devops.md"
+    }
+  ]
+}

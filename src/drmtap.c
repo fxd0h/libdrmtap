@@ -131,7 +131,6 @@ int drmtap_version(void) {
 }
 
 drmtap_ctx *drmtap_open(const drmtap_config *config) {
-    fprintf(stderr, "[DRMTAP] drmtap_open called, pid=%d uid=%d\n", getpid(), getuid());
     drmtap_ctx *ctx = calloc(1, sizeof(drmtap_ctx));
     if (!ctx) {
         drmtap_set_error(NULL, "Failed to allocate context: %s",
@@ -174,19 +173,19 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
         ctx->debug = 1;
     }
 
-    drmtap_debug_log(ctx, "drmtap v%d.%d.%d opening",
+    drmtap_debug_log(ctx, "drmtap v%d.%d.%d opening (pid=%d uid=%d)",
                      DRMTAP_VERSION_MAJOR, DRMTAP_VERSION_MINOR,
-                     DRMTAP_VERSION_PATCH);
+                     DRMTAP_VERSION_PATCH, getpid(), getuid());
 
     /* Open DRM device */
-    fprintf(stderr, "[DRMTAP] device_path=[%s] DRM_DEVICE=[%s]\n", ctx->device_path, getenv("DRM_DEVICE") ? getenv("DRM_DEVICE") : "(null)");
+    drmtap_debug_log(ctx, "device_path=[%s] DRM_DEVICE=[%s]", ctx->device_path, getenv("DRM_DEVICE") ? getenv("DRM_DEVICE") : "(null)");
     if (ctx->device_path[0]) {
         /* Explicit device path */
         ctx->drm_fd = open(ctx->device_path, O_RDWR | O_CLOEXEC);
         if (ctx->drm_fd < 0) {
             drmtap_set_error(NULL, "Failed to open %s: %s",
                              ctx->device_path, strerror(errno));
-            fprintf(stderr, "[DRMTAP] open(%s) FAILED: %s\n", ctx->device_path, strerror(errno));
+            drmtap_debug_log(ctx, "open(%s) FAILED: %s", ctx->device_path, strerror(errno));
         goto fail;
         }
     } else {

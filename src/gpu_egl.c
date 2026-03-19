@@ -235,7 +235,7 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
             return -EIO;
         }
         g_egl_display_initialized = 1;
-        fprintf(stderr, "[EGL] global display initialized: %p (%d.%d)\n",
+        drmtap_debug_log(NULL, "EGL: global display initialized: %p (%d.%d)",
                 (void*)g_egl_display, major, minor);
     }
     state->display = g_egl_display;
@@ -255,16 +255,16 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     /* Re-initialize for this thread (no-op if same thread, required if different) */
     EGLint reinit_maj, reinit_min;
     if (!eglInitialize(state->display, &reinit_maj, &reinit_min)) {
-        fprintf(stderr, "[EGL] eglInitialize for thread FAILED: 0x%x\n", eglGetError());
+        drmtap_debug_log(NULL, "EGL: eglInitialize for thread FAILED: 0x%x", eglGetError());
         return -EIO;
     }
-    fprintf(stderr, "[EGL] eglInitialize OK (%d.%d)\n", reinit_maj, reinit_min);
-    fprintf(stderr, "[EGL] eglChooseConfig...\n");
+    drmtap_debug_log(NULL, "EGL: eglInitialize OK (%d.%d)", reinit_maj, reinit_min);
+    drmtap_debug_log(NULL, "EGL: eglChooseConfig...");
     EGLConfig config;
     EGLint num_configs = 0;
     if (!eglChooseConfig(state->display, config_attribs, &config, 1,
                          &num_configs) || num_configs == 0) {
-        fprintf(stderr, "[EGL] eglChooseConfig FAILED num=%d err=0x%x\n", num_configs, eglGetError());
+        drmtap_debug_log(NULL, "EGL: eglChooseConfig FAILED num=%d err=0x%x", num_configs, eglGetError());
         drmtap_debug_log(ctx, "egl: eglChooseConfig failed or no configs");
         return -EIO;
     }
@@ -273,11 +273,11 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         EGL_CONTEXT_CLIENT_VERSION, 2,
         EGL_NONE
     };
-    fprintf(stderr, "[EGL] eglCreateContext(config=%p)...\n", (void*)config);
+    drmtap_debug_log(NULL, "EGL: eglCreateContext(config=%p)...", (void*)config);
     state->context = eglCreateContext(state->display, config,
                                       EGL_NO_CONTEXT, context_attribs);
     if (state->context == EGL_NO_CONTEXT) {
-        fprintf(stderr, "[EGL] eglCreateContext FAILED err=0x%x\n", eglGetError());
+        drmtap_debug_log(NULL, "EGL: eglCreateContext FAILED err=0x%x", eglGetError());
         drmtap_debug_log(ctx, "egl: eglCreateContext failed: 0x%x",
                          eglGetError());
         return -EIO;
@@ -289,7 +289,7 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     /* Create shader program */
     state->program = create_program();
     if (state->program == 0) {
-        fprintf(stderr, "[EGL] shader compilation FAILED\n");
+        drmtap_debug_log(NULL, "EGL: shader compilation FAILED");
         drmtap_debug_log(ctx, "egl: shader compilation failed");
         eglDestroyContext(state->display, state->context);
         return -EIO;
@@ -303,7 +303,7 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     state->tex_height = 0;
     state->initialized = 1;
     state->owner_thread = pthread_self();
-    fprintf(stderr, "[EGL] init OK: display=%p ctx=%p program=%u fbo=%u (tid=%ld)\n",
+    drmtap_debug_log(NULL, "EGL: init OK: display=%p ctx=%p program=%u fbo=%u (tid=%ld)",
             (void*)state->display, (void*)state->context, state->program, state->fbo, (long)(long)0);
 
     drmtap_debug_log(ctx, "egl: GPU-universal backend initialized");
@@ -403,9 +403,9 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     static egl_state_t state = {0};
     int ret;
 
-    fprintf(stderr, "[EGL] state.initialized=%d\n", state.initialized);
+    drmtap_debug_log(NULL, "EGL: state.initialized=%d", state.initialized);
     if (state.initialized && state.owner_thread != pthread_self()) {
-        fprintf(stderr, "[EGL] thread changed! old=%lu new=%lu, re-creating context\n",
+        drmtap_debug_log(NULL, "EGL: thread changed! old=%lu new=%lu, re-creating context",
                 (unsigned long)state.owner_thread, (unsigned long)pthread_self());
         /* Destroy old context — it belongs to a different thread */
         eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
@@ -423,7 +423,7 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     }
     if (!state.initialized) {
         ret = egl_init(ctx, &state);
-        fprintf(stderr, "[EGL] egl_init returned %d\n", ret);
+        drmtap_debug_log(NULL, "EGL: egl_init returned %d", ret);
         if (ret < 0) {
             return ret;
         }
@@ -437,7 +437,7 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     }
     if (!eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                         state.context)) {
-        fprintf(stderr, "[EGL] eglMakeCurrent in convert failed: 0x%x\n", eglGetError());
+        drmtap_debug_log(NULL, "EGL: eglMakeCurrent in convert failed: 0x%x", eglGetError());
     }
 
     /* Build EGLImage attributes with DMA-BUF import */
@@ -502,7 +502,7 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
 
     image_attribs[ai++] = EGL_NONE;
 
-    fprintf(stderr, "[EGL] tid=%lu creating EGLImage: fd=%d %ux%u stride=%u fourcc=0x%x mod=0x%lx ai=%d\n",
+    drmtap_debug_log(NULL, "EGL: tid=%lu creating EGLImage: fd=%d %ux%u stride=%u fourcc=0x%x mod=0x%lx ai=%d",
             (unsigned long)pthread_self(), dma_buf_fd, width, height, stride, fourcc, (unsigned long)modifier, ai);
 
     /* eglMakeCurrent already done at function entry */
@@ -513,7 +513,7 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
         EGL_LINUX_DMA_BUF_EXT, NULL, image_attribs);
     if (image == EGL_NO_IMAGE_KHR) {
         EGLint first_err = eglGetError();
-        fprintf(stderr, "[EGL] eglCreateImage FAILED: err=0x%x fourcc=0x%x mod=0x%lx\n",
+        drmtap_debug_log(NULL, "EGL: eglCreateImage FAILED: err=0x%x fourcc=0x%x mod=0x%lx",
                 first_err, fourcc, (unsigned long)modifier);
         drmtap_debug_log(ctx, "egl: eglCreateImage failed: 0x%x "
                          "(fourcc=%.4s modifier=0x%lx)",
@@ -574,12 +574,12 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
         }
 
         if (image == EGL_NO_IMAGE_KHR) {
-            fprintf(stderr, "[EGL] retry XRGB8888+nomod also FAILED: err=0x%x\n", eglGetError());
+            drmtap_debug_log(NULL, "EGL: retry XRGB8888+nomod also FAILED: err=0x%x", eglGetError());
             drmtap_debug_log(ctx, "egl: all retries failed: 0x%x",
                              eglGetError());
             return -EIO;
         }
-        fprintf(stderr, "[EGL] retry SUCCEEDED\n");
+        drmtap_debug_log(NULL, "EGL: retry SUCCEEDED");
         drmtap_debug_log(ctx, "egl: retry succeeded");
     }
 
@@ -597,7 +597,7 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     pfn_glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
 
     GLenum gl_err = glGetError();
-    fprintf(stderr, "[EGL] glEGLImageTargetTexture2DOES: gl_err=0x%x\n", gl_err);
+    drmtap_debug_log(NULL, "EGL: glEGLImageTargetTexture2DOES: gl_err=0x%x", gl_err);
     if (gl_err != GL_NO_ERROR) {
         drmtap_debug_log(ctx, "egl: glEGLImageTargetTexture2DOES failed: 0x%x",
                          gl_err);
@@ -652,7 +652,7 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
         goto cleanup;
     }
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    fprintf(stderr, "[EGL] glReadPixels done, gl_err=0x%x\n", glGetError());
+    drmtap_debug_log(NULL, "EGL: glReadPixels done, gl_err=0x%x", glGetError());
 
     /* NOTE: CPU horizontal flip removed. The EGL DMA-BUF import with
      * standard texcoords (no shader manipulation) produces correct
