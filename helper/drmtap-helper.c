@@ -99,17 +99,52 @@ struct drm_virtgpu_3d_wait {
 #define RESP_ERROR 0x01
 
 /* Metadata sent before pixel data — must match helper_grab_result_t in library */
+#define FLAG_HAS_DMABUF 0x01
+
 struct grab_metadata {
     uint32_t width;
     uint32_t height;
     uint32_t stride;
     uint32_t format;
     uint32_t fb_id;
-    uint32_t data_size;     /* size of pixel data following this struct (0 = error) */
+    uint32_t data_size;
     uint64_t modifier;
-    uint32_t seq;           /* frame sequence number (for pipeline tracing) */
-    uint64_t timestamp_ms;  /* unix time in milliseconds when helper read the frame */
+    uint32_t seq;
+    uint64_t timestamp_ms;
+    uint32_t flags;
+    uint32_t _pad;
 };
+
+/* Send a file descriptor via SCM_RIGHTS */
+static int send_fd(int sock, int fd, const void *meta, size_t meta_len) {
+    struct msghdr msg = {0};
+    struct iovec iov;
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } cmsg_buf;
+
+    iov.iov_base = (void *)meta;
+    iov.iov_len = meta_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    msg.msg_control = cmsg_buf.buf;
+    msg.msg_controllen = sizeof(cmsg_buf.buf);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
+
+    ssize_t n = sendmsg(sock, &msg, MSG_NOSIGNAL);
+    if (n < 0) {
+        perror("sendmsg SCM_RIGHTS");
+        return -1;
+    }
+    return 0;
+}
 
 /* ========================================================================= */
 /* Security hardening                                                        */
@@ -153,6 +188,7 @@ static int install_seccomp(void) {
         SCMP_SYS(openat), SCMP_SYS(open),
         SCMP_SYS(ioctl),       /* DRM ioctls */
         SCMP_SYS(sendto),      /* send() */
+        SCMP_SYS(sendmsg),     /* sendmsg() for SCM_RIGHTS */
         SCMP_SYS(recvfrom),    /* recv() */
         SCMP_SYS(mmap), SCMP_SYS(munmap),
         SCMP_SYS(brk),         /* malloc */
@@ -308,31 +344,56 @@ static int grab_and_send(int sock, int drm_fd, int is_virtio) {
     meta.seq = seq_counter;
     meta.timestamp_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 
-    /* Send metadata + pixel data through socket */
+    /* Debug: print pixel values to verify freshness */
     {
-        /* Debug: print pixel values to verify freshness */
         static int frame_num = 0;
         frame_num++;
         uint32_t *pixels = (uint32_t *)mapped;
         uint32_t stride_px = meta.stride / 4;
-        /* Sample: row 0 col 960 (center top), row 94 col 960 (clock area),
-         * row 500 col 960 (mid-screen) */
-        uint32_t p_top = pixels[960];
-        uint32_t p_clock = pixels[94 * stride_px + 960];
-        uint32_t p_mid = pixels[500 * stride_px + 960];
+        uint32_t p_top = pixels[960 < (meta.stride/4) ? 960 : 0];
+        uint32_t p_clock = (94 * stride_px + 960 < mapped_size/4) ?
+                           pixels[94 * stride_px + 960] : 0;
+        uint32_t p_mid = (500 * stride_px + 960 < mapped_size/4) ?
+                         pixels[500 * stride_px + 960] : 0;
         if (frame_num <= 5 || frame_num % 60 == 0) {
             fprintf(stderr,
-                "drmtap-helper: frame=%d fb=%u top=%08x clock=%08x mid=%08x\n",
-                frame_num, meta.fb_id, p_top, p_clock, p_mid);
+                "drmtap-helper: frame=%d fb=%u mod=0x%lx top=%08x clock=%08x mid=%08x\n",
+                frame_num, meta.fb_id, (unsigned long)meta.modifier,
+                p_top, p_clock, p_mid);
         }
     }
-    int ret = send_all(sock, &meta, sizeof(meta));
+
+    int ret;
+
+    /* Non-linear modifier: export DMA-BUF fd via drmPrimeHandleToFD
+     * and send it via SCM_RIGHTS — the parent can then EGL-import it
+     * for GPU deswizzle. We still send the mmap'd pixels as fallback data. */
+    if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio) {
+        int prime_fd = -1;
+        int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
+                                            DRM_CLOEXEC | DRM_RDWR, &prime_fd);
+        if (prime_ret == 0 && prime_fd >= 0) {
+            meta.flags = FLAG_HAS_DMABUF;
+            meta.data_size = 0;  /* no pixel data follows */
+            ret = send_fd(sock, prime_fd, &meta, sizeof(meta));
+            close(prime_fd);
+            munmap(mapped, mapped_size);
+            return ret;
+        }
+        /* drmPrimeHandleToFD failed — fall through to pixel data path */
+        fprintf(stderr,
+            "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
+            prime_ret);
+    }
+
+    /* Linear modifier (or Prime failed): send pixel data directly */
+    meta.flags = 0;
+    ret = send_all(sock, &meta, sizeof(meta));
     if (ret == 0) {
         ret = send_all(sock, mapped, mapped_size);
     }
 
-    /* Cleanup — munmap but DON'T close drm_fd (it's persistent).
-     * GEM handles accumulate but kernel cleans them on process exit. */
+    /* Cleanup — munmap but DON'T close drm_fd (it's persistent). */
     munmap(mapped, mapped_size);
 
     return ret;

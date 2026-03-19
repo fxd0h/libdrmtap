@@ -72,6 +72,15 @@ struct drmtap_ctx {
     uint32_t fast_plane_id;         /* cached primary plane id */
     uint32_t fast_last_fb_id;       /* fb_id from last capture (change detect) */
     int      fast_initialized;      /* 1 = plane found, slots ready */
+
+    /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs) */
+    void *deswizzle_buf;
+    size_t deswizzle_buf_size;
+
+    /* Cached FB2 multi-plane info (for EGL CCS import) */
+    uint32_t fb2_pitches[4];
+    uint32_t fb2_offsets[4];
+    int      fb2_num_planes;  /* number of active planes (1..4) */
 };
 
 /* ========================================================================= */
@@ -86,16 +95,26 @@ void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
 
 /* Result from helper v2 grab — helper reads pixels and sends via socket.
  * Must match struct grab_metadata in drmtap-helper.c */
+/* Flags for helper_grab_result_t.flags */
+#define HELPER_FLAG_HAS_DMABUF  0x01  /* DMA-BUF fd follows via SCM_RIGHTS */
+
 typedef struct {
     uint32_t width;
     uint32_t height;
     uint32_t stride;
     uint32_t format;
     uint32_t fb_id;
-    uint32_t data_size;     /* 0 = error, >0 = pixel data follows */
+    uint32_t data_size;     /* 0 = error, >0 = pixel data follows (unless FLAG_HAS_DMABUF) */
     uint64_t modifier;
     uint32_t seq;           /* frame sequence number from helper */
     uint64_t timestamp_ms;  /* unix ms when helper read the frame */
+    uint32_t flags;         /* HELPER_FLAG_* bits */
+    uint32_t _pad;          /* alignment padding */
+} helper_grab_wire_t;  /* wire-format: this is what goes over the socket */
+
+typedef struct {
+    helper_grab_wire_t wire;  /* wire-format fields */
+    int dmabuf_fd;            /* DMA-BUF fd received via SCM_RIGHTS (-1 if none) */
 } helper_grab_result_t;
 
 /* Helper lifecycle (privilege_helper.c) */

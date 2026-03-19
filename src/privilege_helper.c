@@ -174,18 +174,6 @@ void drmtap_helper_stop(drmtap_ctx *ctx) {
 /* SCM_RIGHTS fd receiving                                                   */
 /* ========================================================================= */
 
-/* recv_fd removed — V2 protocol sends pixel data directly via socket.
- *
- * NOTE: This means CCS-compressed framebuffers (Intel Gen12+) cannot be
- * deswizzled by the parent, since EGL requires a DMA-BUF fd. A future
- * V3 protocol should re-add SCM_RIGHTS fd passing for non-linear modifiers
- * so the parent can use EGL GPU deswizzle. See gpu_auto_process() in
- * drm_grab.c for the fallback behavior when dma_buf_fd == -1. */
-
-/* ========================================================================= */
-/* Public helper API (called from drm_grab.c)                                */
-/* ========================================================================= */
-
 // Receive exactly len bytes from socket, handling partial reads
 static int recv_all(int sock, void *buf, size_t len) {
     uint8_t *p = (uint8_t *)buf;
@@ -199,6 +187,57 @@ static int recv_all(int sock, void *buf, size_t len) {
     }
     return 0;
 }
+
+/* Receive metadata + optional DMA-BUF fd via SCM_RIGHTS (V3 protocol).
+ * When helper sends FLAG_HAS_DMABUF, the metadata arrives via sendmsg
+ * with the DMA-BUF fd attached as ancillary data. */
+static int recv_fd_and_meta(int sock, void *meta_buf, size_t meta_len, int *out_fd) {
+    struct msghdr msg = {0};
+    struct iovec iov;
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } cmsg_buf;
+
+    *out_fd = -1;
+
+    iov.iov_base = meta_buf;
+    iov.iov_len = meta_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.buf;
+    msg.msg_controllen = sizeof(cmsg_buf.buf);
+
+    ssize_t n = recvmsg(sock, &msg, 0);
+    if (n <= 0) {
+        return -1;
+    }
+
+    /* Extract fd from ancillary data if present */
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
+        cmsg->cmsg_type == SCM_RIGHTS &&
+        cmsg->cmsg_len == CMSG_LEN(sizeof(int))) {
+        memcpy(out_fd, CMSG_DATA(cmsg), sizeof(int));
+    }
+
+    /* We may have received less than meta_len in the first recvmsg.
+     * Read the rest with plain recv. */
+    if ((size_t)n < meta_len) {
+        if (recv_all(sock, (uint8_t *)meta_buf + n, meta_len - n) < 0) {
+            if (*out_fd >= 0) close(*out_fd);
+            *out_fd = -1;
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/* ========================================================================= */
+/* Public helper API (called from drm_grab.c)                                */
+/* ========================================================================= */
+
 
 // Request metadata + pixel data from the helper.
 // The helper reads the framebuffer in its own process (fresh data)
@@ -232,30 +271,52 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
         }
     }
 
-    /* Receive metadata */
+    /* Receive metadata (possibly with DMA-BUF fd via SCM_RIGHTS) */
     memset(result, 0, sizeof(*result));
-    if (recv_all(ctx->helper_fd, result, sizeof(*result)) < 0) {
+    result->dmabuf_fd = -1;
+    int dmabuf_fd = -1;
+    /* Recv into wire portion only — dmabuf_fd is local, not on the wire */
+    if (recv_fd_and_meta(ctx->helper_fd, &result->wire, sizeof(result->wire), &dmabuf_fd) < 0) {
         drmtap_set_error(ctx, "helper metadata recv failed");
         return -EIO;
     }
 
-    /* data_size == 0 means error */
-    if (result->data_size == 0) {
+    /* Check for DMA-BUF fd mode (V3 protocol) */
+    if (result->wire.flags & HELPER_FLAG_HAS_DMABUF) {
+        if (dmabuf_fd < 0) {
+            drmtap_set_error(ctx, "helper signaled DMA-BUF but no fd received");
+            return -EIO;
+        }
+        /* Store the fd in the result for the caller */
+        result->dmabuf_fd = dmabuf_fd;
+        drmtap_debug_log(ctx,
+            "helper: %ux%u fb=%u DMA-BUF fd=%d mod=0x%lx (V3 SCM_RIGHTS)",
+            result->wire.width, result->wire.height, result->wire.fb_id, dmabuf_fd,
+            (unsigned long)result->wire.modifier);
+        return 0;
+    }
+
+    /* Close any unexpected fd */
+    if (dmabuf_fd >= 0) {
+        close(dmabuf_fd);
+    }
+
+    /* V2 fallback: data_size == 0 means error */
+    if (result->wire.data_size == 0) {
         drmtap_set_error(ctx, "helper returned error");
         return -EIO;
     }
 
-    drmtap_debug_log(ctx, "helper: %ux%u fb=%u data_size=%u seq=%u ts=%llu",
-                     result->width, result->height,
-                     result->fb_id, result->data_size,
-                     result->seq, (unsigned long long)result->timestamp_ms);
+    result->dmabuf_fd = -1;
+    drmtap_debug_log(ctx, "helper: %ux%u fb=%u data_size=%u seq=%u (V2 pixels)",
+                     result->wire.width, result->wire.height,
+                     result->wire.fb_id, result->wire.data_size, result->wire.seq);
 
     /* Receive pixel data directly into caller's buffer */
-    if (result->data_size > buf_size) {
+    if (result->wire.data_size > buf_size) {
         drmtap_set_error(ctx, "helper data_size %u exceeds buffer %zu",
-                         result->data_size, buf_size);
-        /* Drain the socket to stay in sync */
-        size_t remaining = result->data_size;
+                         result->wire.data_size, buf_size);
+        size_t remaining = result->wire.data_size;
         char drain[4096];
         while (remaining > 0) {
             size_t chunk = remaining < sizeof(drain) ? remaining : sizeof(drain);
@@ -265,7 +326,7 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
         return -ENOSPC;
     }
 
-    if (recv_all(ctx->helper_fd, pixel_buf, result->data_size) < 0) {
+    if (recv_all(ctx->helper_fd, pixel_buf, result->wire.data_size) < 0) {
         drmtap_set_error(ctx, "helper pixel recv failed");
         return -EIO;
     }

@@ -377,12 +377,74 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
         /* Fill frame info from helper metadata */
         memset(frame, 0, sizeof(*frame));
-        frame->width = hresult.width;
-        frame->height = hresult.height;
-        frame->stride = hresult.stride;
-        frame->format = hresult.format;
-        frame->modifier = hresult.modifier;
-        frame->fb_id = hresult.fb_id;
+        frame->width = hresult.wire.width;
+        frame->height = hresult.wire.height;
+        frame->stride = hresult.wire.stride;
+        frame->format = hresult.wire.format;
+        frame->modifier = hresult.wire.modifier;
+        frame->fb_id = hresult.wire.fb_id;
+
+        /* V3: helper sent DMA-BUF fd via SCM_RIGHTS */
+        if (hresult.dmabuf_fd >= 0) {
+            free(pixel_buf);  /* Don't need pixel buffer */
+
+            int prime_fd = hresult.dmabuf_fd;
+            size_t mmap_size = (size_t)frame->stride * frame->height;
+
+            /* Clean up previous frame's DMA-BUF resources (they change every frame
+             * because the compositor flips between framebuffers) */
+            if (priv->mapped != MAP_FAILED && priv->mapped != NULL) {
+                munmap(priv->mapped, priv->mapped_size);
+                priv->mapped = MAP_FAILED;
+            }
+            if (priv->prime_fd >= 0 && priv->prime_fd != prime_fd) {
+                close(priv->prime_fd);
+            }
+
+            /* mmap the DMA-BUF in the parent */
+            void *mapped = mmap(NULL, mmap_size, PROT_READ, MAP_SHARED,
+                                prime_fd, 0);
+
+            priv->prime_fd = prime_fd;
+            priv->is_heap_buf = 0;
+
+            if (mapped != MAP_FAILED) {
+                priv->mapped = mapped;
+                priv->mapped_size = mmap_size;
+                frame->data = mapped;
+                frame->dma_buf_fd = prime_fd;
+                frame->_priv = priv;
+
+                drmtap_debug_log(ctx,
+                    "helper V3: mmap'd DMA-BUF fd=%d (%zu bytes), "
+                    "EGL deswizzle available",
+                    prime_fd, mmap_size);
+
+                if (do_mmap) {
+                    gpu_auto_process(ctx, mapped, frame);
+                }
+            } else {
+                /* mmap failed — still have the fd for EGL zero-copy */
+                priv->mapped = MAP_FAILED;
+                priv->mapped_size = 0;
+                frame->data = NULL;
+                frame->dma_buf_fd = prime_fd;
+                frame->_priv = priv;
+
+                drmtap_debug_log(ctx,
+                    "helper V3: mmap failed but DMA-BUF fd=%d available "
+                    "for EGL zero-copy", prime_fd);
+
+                if (do_mmap) {
+                    gpu_auto_process(ctx, NULL, frame);
+                }
+            }
+
+            drmModeFreeFB2(fb2);
+            return 0;
+        }
+
+        /* V2 fallback: pixel data received via socket */
         frame->dma_buf_fd = -1;
         frame->data = pixel_buf;
         frame->_priv = priv;
@@ -530,6 +592,9 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
      * framebuffers, this means we fall to the CPU path which returns
      * -ENOTSUP, and the raw data is returned as-is. */
 #ifdef HAVE_EGL
+    fprintf(stderr, "[DRMTAP] EGL check: fd=%d avail=%d mod=0x%lx\n",
+            frame->dma_buf_fd, drmtap_gpu_egl_available(ctx),
+            (unsigned long)modifier);
     if (frame->dma_buf_fd >= 0 && drmtap_gpu_egl_available(ctx)) {
         void *egl_data = NULL;
         size_t egl_size = 0;
@@ -539,6 +604,7 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                                           frame->width, frame->height,
                                           frame->stride, frame->format,
                                           modifier, &egl_data, &egl_size);
+        fprintf(stderr, "[DRMTAP] EGL convert: ret=%d data=%p\n", ret, egl_data);
         if (ret == 0 && egl_data) {
             /* Store in ctx for reuse / cleanup */
             free(ctx->deswizzle_buf);

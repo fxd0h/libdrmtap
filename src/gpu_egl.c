@@ -30,6 +30,10 @@
  */
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
@@ -48,8 +52,13 @@
 /* EGL context (lazily initialized per drmtap_ctx)                           */
 /* ========================================================================= */
 
+/* Global EGL display (one per process, shared across threads) */
+static EGLDisplay g_egl_display = EGL_NO_DISPLAY;
+static int g_egl_display_initialized = 0;
+
+/* Per-thread EGL context and GL resources */
 typedef struct {
-    EGLDisplay display;
+    EGLDisplay display;   /* cached copy of g_egl_display */
     EGLContext context;
     GLuint program;
     GLuint fbo;
@@ -57,6 +66,7 @@ typedef struct {
     uint32_t tex_width;
     uint32_t tex_height;
     int initialized;
+    pthread_t owner_thread;  /* thread that created this context */
 } egl_state_t;
 
 /* EGL function pointers (loaded dynamically) */
@@ -106,7 +116,8 @@ static const char *fragment_shader_src =
     "uniform samplerExternalOES image;\n"
     "varying vec2 v_texcoord;\n"
     "void main() {\n"
-    "    gl_FragColor = texture2D(image, v_texcoord);\n"
+    "    vec4 c = texture2D(image, v_texcoord);\n"
+    "    gl_FragColor = vec4(c.b, c.g, c.r, c.a);\n"
     "}\n";
 
 /* ========================================================================= */
@@ -209,19 +220,25 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         return -ENOTSUP;
     }
 
-    state->display = get_egl_display_for_card(ctx->device_path);
-    if (state->display == EGL_NO_DISPLAY) {
-        drmtap_debug_log(ctx, "egl: no EGL display available");
-        return -ENODEV;
+    /* Initialize global display once (thread-safe: eglInitialize is 
+     * idempotent per EGL spec — second call on same display is a no-op) */
+    if (!g_egl_display_initialized) {
+        g_egl_display = get_egl_display_for_card(ctx->device_path);
+        if (g_egl_display == EGL_NO_DISPLAY) {
+            drmtap_debug_log(ctx, "egl: no EGL display available");
+            return -ENODEV;
+        }
+        EGLint major, minor;
+        if (!eglInitialize(g_egl_display, &major, &minor)) {
+            drmtap_debug_log(ctx, "egl: eglInitialize failed: 0x%x",
+                             eglGetError());
+            return -EIO;
+        }
+        g_egl_display_initialized = 1;
+        fprintf(stderr, "[EGL] global display initialized: %p (%d.%d)\n",
+                (void*)g_egl_display, major, minor);
     }
-
-    EGLint major, minor;
-    if (!eglInitialize(state->display, &major, &minor)) {
-        drmtap_debug_log(ctx, "egl: eglInitialize failed: 0x%x",
-                         eglGetError());
-        return -EIO;
-    }
-    drmtap_debug_log(ctx, "egl: initialized %d.%d", major, minor);
+    state->display = g_egl_display;
 
     eglBindAPI(EGL_OPENGL_ES_API);
 
@@ -235,12 +252,20 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         EGL_ALPHA_SIZE, 8,
         EGL_NONE
     };
+    /* Re-initialize for this thread (no-op if same thread, required if different) */
+    EGLint reinit_maj, reinit_min;
+    if (!eglInitialize(state->display, &reinit_maj, &reinit_min)) {
+        fprintf(stderr, "[EGL] eglInitialize for thread FAILED: 0x%x\n", eglGetError());
+        return -EIO;
+    }
+    fprintf(stderr, "[EGL] eglInitialize OK (%d.%d)\n", reinit_maj, reinit_min);
+    fprintf(stderr, "[EGL] eglChooseConfig...\n");
     EGLConfig config;
     EGLint num_configs = 0;
     if (!eglChooseConfig(state->display, config_attribs, &config, 1,
                          &num_configs) || num_configs == 0) {
+        fprintf(stderr, "[EGL] eglChooseConfig FAILED num=%d err=0x%x\n", num_configs, eglGetError());
         drmtap_debug_log(ctx, "egl: eglChooseConfig failed or no configs");
-        eglTerminate(state->display);
         return -EIO;
     }
 
@@ -248,12 +273,13 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         EGL_CONTEXT_CLIENT_VERSION, 2,
         EGL_NONE
     };
+    fprintf(stderr, "[EGL] eglCreateContext(config=%p)...\n", (void*)config);
     state->context = eglCreateContext(state->display, config,
                                       EGL_NO_CONTEXT, context_attribs);
     if (state->context == EGL_NO_CONTEXT) {
+        fprintf(stderr, "[EGL] eglCreateContext FAILED err=0x%x\n", eglGetError());
         drmtap_debug_log(ctx, "egl: eglCreateContext failed: 0x%x",
                          eglGetError());
-        eglTerminate(state->display);
         return -EIO;
     }
 
@@ -263,9 +289,9 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     /* Create shader program */
     state->program = create_program();
     if (state->program == 0) {
+        fprintf(stderr, "[EGL] shader compilation FAILED\n");
         drmtap_debug_log(ctx, "egl: shader compilation failed");
         eglDestroyContext(state->display, state->context);
-        eglTerminate(state->display);
         return -EIO;
     }
 
@@ -276,6 +302,9 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     state->tex_width = 0;
     state->tex_height = 0;
     state->initialized = 1;
+    state->owner_thread = pthread_self();
+    fprintf(stderr, "[EGL] init OK: display=%p ctx=%p program=%u fbo=%u (tid=%ld)\n",
+            (void*)state->display, (void*)state->context, state->program, state->fbo, (long)(long)0);
 
     drmtap_debug_log(ctx, "egl: GPU-universal backend initialized");
     return 0;
@@ -371,21 +400,48 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     }
 
     /* Lazy-init EGL state (thread-local) */
-    static __thread egl_state_t state = {0};
+    static egl_state_t state = {0};
     int ret;
 
+    fprintf(stderr, "[EGL] state.initialized=%d\n", state.initialized);
+    if (state.initialized && state.owner_thread != pthread_self()) {
+        fprintf(stderr, "[EGL] thread changed! old=%lu new=%lu, re-creating context\n",
+                (unsigned long)state.owner_thread, (unsigned long)pthread_self());
+        /* Destroy old context — it belongs to a different thread */
+        eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
+        if (state.program) glDeleteProgram(state.program);
+        if (state.fbo) glDeleteFramebuffers(1, &state.fbo);
+        if (state.linear_texture) glDeleteTextures(1, &state.linear_texture);
+        eglDestroyContext(state.display, state.context);
+        state.initialized = 0;
+        state.program = 0;
+        state.fbo = 0;
+        state.linear_texture = 0;
+        state.tex_width = 0;
+        state.tex_height = 0;
+    }
     if (!state.initialized) {
         ret = egl_init(ctx, &state);
+        fprintf(stderr, "[EGL] egl_init returned %d\n", ret);
         if (ret < 0) {
             return ret;
         }
     }
 
-    eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                   state.context);
+    /* Ensure display is initialized for this thread and context is current */
+    eglBindAPI(EGL_OPENGL_ES_API);
+    {
+        EGLint _maj, _min;
+        eglInitialize(state.display, &_maj, &_min);  /* no-op if already init */
+    }
+    if (!eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        state.context)) {
+        fprintf(stderr, "[EGL] eglMakeCurrent in convert failed: 0x%x\n", eglGetError());
+    }
 
     /* Build EGLImage attributes with DMA-BUF import */
-    EGLint image_attribs[32];
+    EGLint image_attribs[64];
     int ai = 0;
     image_attribs[ai++] = EGL_WIDTH;
     image_attribs[ai++] = (EGLint)width;
@@ -393,10 +449,12 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     image_attribs[ai++] = (EGLint)height;
     image_attribs[ai++] = EGL_LINUX_DRM_FOURCC_EXT;
     image_attribs[ai++] = (EGLint)fourcc;
+
+    /* Plane 0: main surface */
     image_attribs[ai++] = EGL_DMA_BUF_PLANE0_FD_EXT;
     image_attribs[ai++] = dma_buf_fd;
     image_attribs[ai++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-    image_attribs[ai++] = 0;
+    image_attribs[ai++] = (EGLint)ctx->fb2_offsets[0];
     image_attribs[ai++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
     image_attribs[ai++] = (EGLint)stride;
 
@@ -407,18 +465,122 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
         image_attribs[ai++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
         image_attribs[ai++] = (EGLint)(modifier >> 32);
     }
+
+    /* Plane 1: CCS auxiliary surface (Gen12+ CCS) */
+    if (ctx->fb2_num_planes >= 2 && modifier != DRM_FORMAT_MOD_INVALID) {
+        drmtap_debug_log(ctx, "egl: adding CCS aux plane1 "
+            "(offset=%u pitch=%u)",
+            ctx->fb2_offsets[1], ctx->fb2_pitches[1]);
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE1_FD_EXT;
+        image_attribs[ai++] = dma_buf_fd;
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT;
+        image_attribs[ai++] = (EGLint)ctx->fb2_offsets[1];
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;
+        image_attribs[ai++] = (EGLint)ctx->fb2_pitches[1];
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT;
+        image_attribs[ai++] = (EGLint)(modifier & 0xFFFFFFFF);
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT;
+        image_attribs[ai++] = (EGLint)(modifier >> 32);
+    }
+
+    /* Plane 2: Clear Color metadata (Gen12+ CCS_CC) */
+    if (ctx->fb2_num_planes >= 3 && modifier != DRM_FORMAT_MOD_INVALID) {
+        drmtap_debug_log(ctx, "egl: adding CC plane2 "
+            "(offset=%u pitch=%u)",
+            ctx->fb2_offsets[2], ctx->fb2_pitches[2]);
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE2_FD_EXT;
+        image_attribs[ai++] = dma_buf_fd;
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE2_OFFSET_EXT;
+        image_attribs[ai++] = (EGLint)ctx->fb2_offsets[2];
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE2_PITCH_EXT;
+        image_attribs[ai++] = (EGLint)ctx->fb2_pitches[2];
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT;
+        image_attribs[ai++] = (EGLint)(modifier & 0xFFFFFFFF);
+        image_attribs[ai++] = EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT;
+        image_attribs[ai++] = (EGLint)(modifier >> 32);
+    }
+
     image_attribs[ai++] = EGL_NONE;
+
+    fprintf(stderr, "[EGL] tid=%lu creating EGLImage: fd=%d %ux%u stride=%u fourcc=0x%x mod=0x%lx ai=%d\n",
+            (unsigned long)pthread_self(), dma_buf_fd, width, height, stride, fourcc, (unsigned long)modifier, ai);
+
+    /* eglMakeCurrent already done at function entry */
 
     /* Import DMA-BUF as EGLImage */
     EGLImageKHR image = pfn_eglCreateImageKHR(
         state.display, EGL_NO_CONTEXT,
         EGL_LINUX_DMA_BUF_EXT, NULL, image_attribs);
     if (image == EGL_NO_IMAGE_KHR) {
+        EGLint first_err = eglGetError();
+        fprintf(stderr, "[EGL] eglCreateImage FAILED: err=0x%x fourcc=0x%x mod=0x%lx\n",
+                first_err, fourcc, (unsigned long)modifier);
         drmtap_debug_log(ctx, "egl: eglCreateImage failed: 0x%x "
                          "(fourcc=%.4s modifier=0x%lx)",
-                         eglGetError(), (const char *)&fourcc,
+                         first_err, (const char *)&fourcc,
                          (unsigned long)modifier);
-        return -EIO;
+
+        /* Retry with XRGB8888 but keep modifier — the driver needs
+         * the modifier for detiling but may support 8-bit import */
+        uint32_t xrgb8888 = DRM_FORMAT_XRGB8888;
+        EGLint retry_attribs[32];
+        int ri = 0;
+        retry_attribs[ri++] = EGL_WIDTH;
+        retry_attribs[ri++] = (EGLint)width;
+        retry_attribs[ri++] = EGL_HEIGHT;
+        retry_attribs[ri++] = (EGLint)height;
+        retry_attribs[ri++] = EGL_LINUX_DRM_FOURCC_EXT;
+        retry_attribs[ri++] = (EGLint)xrgb8888;
+        retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+        retry_attribs[ri++] = dma_buf_fd;
+        retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+        retry_attribs[ri++] = 0;
+        retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+        retry_attribs[ri++] = (EGLint)stride;
+        if (modifier != DRM_FORMAT_MOD_INVALID) {
+            retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+            retry_attribs[ri++] = (EGLint)(modifier & 0xFFFFFFFF);
+            retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+            retry_attribs[ri++] = (EGLint)(modifier >> 32);
+        }
+        retry_attribs[ri++] = EGL_NONE;
+
+        drmtap_debug_log(ctx, "egl: retrying with XRGB8888 + modifier");
+        image = pfn_eglCreateImageKHR(
+            state.display, EGL_NO_CONTEXT,
+            EGL_LINUX_DMA_BUF_EXT, NULL, retry_attribs);
+
+        if (image == EGL_NO_IMAGE_KHR) {
+            /* Last resort: try XRGB8888 without modifier */
+            ri = 0;
+            retry_attribs[ri++] = EGL_WIDTH;
+            retry_attribs[ri++] = (EGLint)width;
+            retry_attribs[ri++] = EGL_HEIGHT;
+            retry_attribs[ri++] = (EGLint)height;
+            retry_attribs[ri++] = EGL_LINUX_DRM_FOURCC_EXT;
+            retry_attribs[ri++] = (EGLint)xrgb8888;
+            retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+            retry_attribs[ri++] = dma_buf_fd;
+            retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+            retry_attribs[ri++] = 0;
+            retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+            retry_attribs[ri++] = (EGLint)stride;
+            retry_attribs[ri++] = EGL_NONE;
+
+            drmtap_debug_log(ctx, "egl: retrying XRGB8888 no-modifier");
+            image = pfn_eglCreateImageKHR(
+                state.display, EGL_NO_CONTEXT,
+                EGL_LINUX_DMA_BUF_EXT, NULL, retry_attribs);
+        }
+
+        if (image == EGL_NO_IMAGE_KHR) {
+            fprintf(stderr, "[EGL] retry XRGB8888+nomod also FAILED: err=0x%x\n", eglGetError());
+            drmtap_debug_log(ctx, "egl: all retries failed: 0x%x",
+                             eglGetError());
+            return -EIO;
+        }
+        fprintf(stderr, "[EGL] retry SUCCEEDED\n");
+        drmtap_debug_log(ctx, "egl: retry succeeded");
     }
 
     /* Bind as GL_TEXTURE_EXTERNAL_OES — GPU handles detiling */
@@ -435,6 +597,7 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     pfn_glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
 
     GLenum gl_err = glGetError();
+    fprintf(stderr, "[EGL] glEGLImageTargetTexture2DOES: gl_err=0x%x\n", gl_err);
     if (gl_err != GL_NO_ERROR) {
         drmtap_debug_log(ctx, "egl: glEGLImageTargetTexture2DOES failed: 0x%x",
                          gl_err);
@@ -457,15 +620,16 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     glUniform1i(glGetUniformLocation(state.program, "image"), 0);
 
     /* Fullscreen triangle strip.
-     * OpenGL has origin at bottom-left, but DRM/framebuffers have
-     * origin at top-left. Flip the V texcoords (1→0, 0→1) to
-     * produce correct top-down pixel order from glReadPixels. */
+     * Use standard unflipped coordinates. The EGL texture is natively
+     * horizontally mirrored on Gen12 CCS. We fix this by flipping the
+     * X coordinate in the fragment shader (1.0 - v_texcoord.x) to avoid
+     * any vertex winding or Culling anomalies. */
     static const float vertices[] = {
-        /* position    texcoord (V-flipped) */
-        -1.0f, -1.0f,  0.0f, 1.0f,
-         1.0f, -1.0f,  1.0f, 1.0f,
-        -1.0f,  1.0f,  0.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 0.0f,
+        /* position    texcoord (unflipped) */
+        -1.0f, -1.0f,  0.0f, 0.0f,
+         1.0f, -1.0f,  1.0f, 0.0f,
+        -1.0f,  1.0f,  0.0f, 1.0f,
+         1.0f,  1.0f,  1.0f, 1.0f,
     };
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
                           vertices);
@@ -488,6 +652,12 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
         goto cleanup;
     }
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    fprintf(stderr, "[EGL] glReadPixels done, gl_err=0x%x\n", glGetError());
+
+    /* NOTE: CPU horizontal flip removed. The EGL DMA-BUF import with
+     * standard texcoords (no shader manipulation) produces correct
+     * orientation. The previous CPU flip was compensating for a shader-
+     * based X flip (1.0 - v_texcoord.x) that has since been removed. */
 
     *out_data = pixels;
     *out_size = rgba_size;
@@ -502,6 +672,8 @@ cleanup:
     glDeleteTextures(1, &ext_texture);
     pfn_eglDestroyImageKHR(state.display, image);
 
+    /* Release EGL context from current thread so it can be
+     * claimed by a different thread on the next call */
     return ret;
 }
 

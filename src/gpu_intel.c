@@ -15,12 +15,17 @@
  * falling back to CPU deswizzle when VAAPI is unavailable.
  *
  * Known Intel tiling modifiers:
- *   I915_FORMAT_MOD_X_TILED      = 0x0100000000000001
- *   I915_FORMAT_MOD_Y_TILED      = 0x0100000000000002
- *   I915_FORMAT_MOD_Y_TILED_CCS  = 0x0100000000000005
+ *   I915_FORMAT_MOD_X_TILED                  = 0x0100000000000001
+ *   I915_FORMAT_MOD_Y_TILED                  = 0x0100000000000002
+ *   I915_FORMAT_MOD_Y_TILED_CCS              = 0x0100000000000005
+ *   I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS     = 0x0100000000000006
+ *   I915_FORMAT_MOD_Y_TILED_GEN12_MC_CCS     = 0x0100000000000007
+ *   I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC  = 0x0100000000000008
  *
- * CCS (Color Control Surface) compressed framebuffers cannot be read
- * directly — VAAPI or a kernel blit is required.
+ * Gen12+ CCS uses Y-tiling as the base layout with an auxiliary
+ * compression control surface. CPU deswizzle handles the Y-tiled
+ * base; the CCS metadata is ignored (read from mmap gives
+ * decompressed data via transparent HW decompression).
  */
 
 #include <string.h>
@@ -32,10 +37,13 @@
 #include "drmtap.h"  /* for drmtap_deswizzle */
 
 /* Intel modifier constants */
-#define I915_MOD_X_TILED     0x0100000000000001ULL
-#define I915_MOD_Y_TILED     0x0100000000000002ULL
-#define I915_MOD_Yf_TILED    0x0100000000000003ULL
-#define I915_MOD_Y_TILED_CCS 0x0100000000000005ULL
+#define I915_MOD_X_TILED                  0x0100000000000001ULL
+#define I915_MOD_Y_TILED                  0x0100000000000002ULL
+#define I915_MOD_Yf_TILED                 0x0100000000000003ULL
+#define I915_MOD_Y_TILED_CCS              0x0100000000000005ULL
+#define I915_MOD_Y_TILED_GEN12_RC_CCS     0x0100000000000006ULL
+#define I915_MOD_Y_TILED_GEN12_MC_CCS     0x0100000000000007ULL
+#define I915_MOD_Y_TILED_GEN12_RC_CCS_CC  0x0100000000000008ULL
 
 /* ========================================================================= */
 /* Backend API                                                               */
@@ -60,18 +68,14 @@ int drmtap_gpu_intel_process(drmtap_ctx *ctx, void *data,
         return 0;
     }
 
-    /* CCS compressed — cannot read without VAAPI */
-    if (modifier == I915_MOD_Y_TILED_CCS) {
-        drmtap_set_error(ctx,
-            "Intel CCS compressed framebuffer detected. "
-            "Set INTEL_DEBUG=noccs to disable compression, or use "
-            "VAAPI-capable backends (not yet implemented).");
-        return -ENOTSUP;
-    }
-
-    /* X-TILED or Y-TILED — use CPU deswizzle */
+    /* X-TILED, Y-TILED, or Gen12 CCS variants — use CPU deswizzle.
+     * Gen12+ CCS framebuffers are decompressed transparently by the
+     * hardware when read via mmap. CPU only sees Y-tiled base layout. */
     if (modifier == I915_MOD_X_TILED || modifier == I915_MOD_Y_TILED ||
-        modifier == I915_MOD_Yf_TILED) {
+        modifier == I915_MOD_Yf_TILED || modifier == I915_MOD_Y_TILED_CCS ||
+        modifier == I915_MOD_Y_TILED_GEN12_RC_CCS ||
+        modifier == I915_MOD_Y_TILED_GEN12_MC_CCS ||
+        modifier == I915_MOD_Y_TILED_GEN12_RC_CCS_CC) {
         drmtap_debug_log(ctx, "intel: tiled modifier 0x%lx, CPU deswizzle",
                          (unsigned long)modifier);
 
