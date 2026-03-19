@@ -278,10 +278,30 @@ int drmtap_deswizzle(const void *src, void *dst,
             /* I915_FORMAT_MOD_X_TILED */
             return deswizzle_intel_x_tiled(src, dst, width, height,
                                            src_stride, dst_stride);
-        } else if (mod_type == 0x02) {
-            /* I915_FORMAT_MOD_Y_TILED */
+        } else if (mod_type == 0x02 || mod_type == 0x03) {
+            /* I915_FORMAT_MOD_Y_TILED (0x02)
+             * I915_FORMAT_MOD_Yf_TILED (0x03)
+             *
+             * Pure Y-tiled without compression — CPU deswizzle works. */
             return deswizzle_intel_y_tiled(src, dst, width, height,
                                            src_stride, dst_stride);
+        } else if (mod_type == 0x05 || mod_type == 0x06 ||
+                   mod_type == 0x07 || mod_type == 0x08) {
+            /* I915_FORMAT_MOD_Y_TILED_CCS (0x05)
+             * I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS (0x06)
+             * I915_FORMAT_MOD_Y_TILED_GEN12_MC_CCS (0x07)
+             * I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC (0x08)
+             *
+             * CCS (Color Compression Surface) variants. The pixel data
+             * is GPU-compressed and CANNOT be CPU-deswizzled.
+             * A dumb_mmap of CCS-compressed buffers returns garbage —
+             * only EGL import (via DMA-BUF fd) can decompress correctly.
+             *
+             * In the helper path (dma_buf_fd == -1), pixels arrive via
+             * socket from a dumb_mmap, so they are still CCS-compressed.
+             * We return -ENOTSUP to signal that GPU deswizzle (EGL) or
+             * DMA-BUF fd passing (SCM_RIGHTS) is required. */
+            return -ENOTSUP;
         }
     }
 

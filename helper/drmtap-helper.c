@@ -120,14 +120,14 @@ struct grab_metadata {
 static int drop_caps(void) {
     cap_t caps = cap_init();
     if (!caps) {
-        return -1;
+        perror("cap_set_proc failed"); return -1;
     }
 
     cap_value_t keep[] = { CAP_SYS_ADMIN };
     if (cap_set_flag(caps, CAP_PERMITTED, 1, keep, CAP_SET) != 0 ||
         cap_set_flag(caps, CAP_EFFECTIVE, 1, keep, CAP_SET) != 0) {
         cap_free(caps);
-        return -1;
+        perror("cap_set_proc failed"); return -1;
     }
 
     int ret = cap_set_proc(caps);
@@ -145,7 +145,7 @@ static int drop_caps(void) {
 static int install_seccomp(void) {
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL_PROCESS);
     if (!ctx) {
-        return -1;
+        perror("cap_set_proc failed"); return -1;
     }
 
     int allowed[] = {
@@ -165,7 +165,7 @@ static int install_seccomp(void) {
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
         if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, allowed[i], 0) != 0) {
             seccomp_release(ctx);
-            return -1;
+            perror("cap_set_proc failed"); return -1;
         }
     }
 
@@ -190,7 +190,7 @@ static int send_all(int sock, const void *buf, size_t len) {
     while (sent < len) {
         ssize_t n = send(sock, p + sent, len - sent, MSG_NOSIGNAL);
         if (n <= 0) {
-            return -1;
+            perror("cap_set_proc failed"); return -1;
         }
         sent += (size_t)n;
     }
@@ -202,7 +202,7 @@ static int send_error(int sock, const char *reason) {
     fprintf(stderr, "drmtap-helper: %s\n", reason);
     struct grab_metadata meta = {0};  /* data_size=0 signals error */
     send_all(sock, &meta, sizeof(meta));
-    return -1;
+    perror("cap_set_proc failed"); return -1;
 }
 
 /* ========================================================================= */

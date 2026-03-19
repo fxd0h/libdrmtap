@@ -55,6 +55,11 @@
 #endif
 
 #include "drmtap_internal.h"
+#include <drm_fourcc.h>
+
+/* Forward declaration */
+static int gpu_auto_process(drmtap_ctx *ctx, void *data,
+                            drmtap_frame_info *frame);
 
 /* ========================================================================= */
 /* Internal state for a captured frame (stored in frame->_priv)              */
@@ -301,10 +306,37 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                      (const char *)&fb2->pixel_format,
                      (unsigned long)fb2->modifier);
 
-    /* Step 4: Check handles[0] — if 0, we lack CAP_SYS_ADMIN */
+    /* Cache multi-plane info for EGL CCS import */
+    ctx->fb2_num_planes = 0;
+    for (int p = 0; p < 4; p++) {
+        ctx->fb2_pitches[p] = fb2->pitches[p];
+        ctx->fb2_offsets[p] = fb2->offsets[p];
+        if (fb2->handles[p] || fb2->pitches[p]) {
+            ctx->fb2_num_planes = p + 1;
+        }
+    }
+
+    /* Step 4 & 5: Check handles[0] and attempt export to check CAP_SYS_ADMIN */
+    int needs_helper = 0;
+
     if (fb2->handles[0] == 0) {
+        needs_helper = 1;
+    } else {
+        /* Export DMA-BUF to test if we actually have permission */
+        ret = drmPrimeHandleToFD(ctx->drm_fd, fb2->handles[0],
+                                  O_RDONLY | O_CLOEXEC, &prime_fd);
+        if (ret < 0 && (errno == EACCES || errno == EPERM)) {
+            needs_helper = 1;
+        } else if (ret < 0) {
+            ret = -errno;
+            drmtap_set_error(ctx, "drmPrimeHandleToFD failed: %s", strerror(errno));
+            goto cleanup;
+        }
+    }
+
+    if (needs_helper) {
         drmtap_debug_log(ctx,
-            "handles[0]==0: no CAP_SYS_ADMIN, trying helper...");
+            "No CAP_SYS_ADMIN (needs helper), trying helper...");
 
         /* Allocate pixel buffer for helper to fill */
         size_t buf_size = (size_t)fb2->pitches[0] * fb2->height;
@@ -321,8 +353,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             free(pixel_buf);
             drmtap_set_error(ctx,
                 "No CAP_SYS_ADMIN and helper failed (ret=%d). "
-                "Install the helper: sudo cp drmtap-helper /usr/local/libexec/ "
-                "&& sudo setcap cap_sys_admin+ep /usr/local/libexec/drmtap-helper",
+                "Install the helper: sudo cp drmtap-helper /usr/local/bin/ "
+                "&& sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper",
                 ret);
             drmModeFreeFB2(fb2);
             return -EACCES;
@@ -355,18 +387,12 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         frame->data = pixel_buf;
         frame->_priv = priv;
 
+        if (do_mmap) {
+            gpu_auto_process(ctx, pixel_buf, frame);
+        }
+
         drmModeFreeFB2(fb2);
         return 0;
-    }
-
-    /* Step 5: Export as DMA-BUF fd */
-    ret = drmPrimeHandleToFD(ctx->drm_fd, fb2->handles[0],
-                             O_RDONLY | O_CLOEXEC, &prime_fd);
-    if (ret < 0) {
-        ret = -errno;
-        drmtap_set_error(ctx, "drmPrimeHandleToFD failed: %s",
-                         strerror(errno));
-        goto cleanup;
     }
 
     /* Allocate private state */
@@ -436,6 +462,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             priv->mapped_size = size;
             frame->data = mapped;
             drmtap_debug_log(ctx, "mapped %zu bytes at %p", size, mapped);
+
+            /* Auto-deswizzle tiled framebuffers + format convert */
+            gpu_auto_process(ctx, mapped, frame);
         }
     }
 
@@ -451,6 +480,128 @@ cleanup:
     }
     free(priv);
     return ret;
+}
+
+/* ========================================================================= */
+/* Auto-process: deswizzle + format convert based on GPU driver              */
+/* ========================================================================= */
+
+static int gpu_auto_process(drmtap_ctx *ctx, void *data,
+                            drmtap_frame_info *frame) {
+    if (!data) return 0;
+
+    uint64_t modifier = frame->modifier;
+
+    /* Linear framebuffer: no deswizzle needed */
+    if (modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0) {
+        return 0;
+    }
+
+    /*
+     * Non-linear (tiled) framebuffer detected.
+     *
+     * The mmap'd DMA-BUF is read-only (PROT_READ | MAP_SHARED), so we
+     * always deswizzle into a separate buffer (ctx->deswizzle_buf).
+     */
+
+    /* Format conversion constants */
+    #define DRM_FMT_XR30 0x30335258u  /* fourcc('X','R','3','0') */
+    #define DRM_FMT_AR30 0x30335241u  /* fourcc('A','R','3','0') */
+    #define DRM_FMT_XR24 0x34325258u  /* fourcc('X','R','2','4') */
+
+    /* Ensure shadow buffer is allocated */
+    size_t size = (size_t)frame->stride * frame->height;
+    if (ctx->deswizzle_buf_size < size) {
+        free(ctx->deswizzle_buf);
+        ctx->deswizzle_buf = malloc(size);
+        if (!ctx->deswizzle_buf) {
+            ctx->deswizzle_buf_size = 0;
+            return -ENOMEM;
+        }
+        ctx->deswizzle_buf_size = size;
+    }
+
+    /* --- EGL path: import DMA-BUF, GPU renders to linear RGBA ---
+     *
+     * This path requires a valid dma_buf_fd, which is only available when
+     * the process has CAP_SYS_ADMIN (direct DRM access). In helper mode,
+     * dma_buf_fd == -1 because the V2 protocol sends pixel data via socket
+     * instead of passing the fd via SCM_RIGHTS. For CCS-compressed
+     * framebuffers, this means we fall to the CPU path which returns
+     * -ENOTSUP, and the raw data is returned as-is. */
+#ifdef HAVE_EGL
+    if (frame->dma_buf_fd >= 0 && drmtap_gpu_egl_available(ctx)) {
+        void *egl_data = NULL;
+        size_t egl_size = 0;
+        drmtap_debug_log(ctx, "auto-process: EGL convert (mod=0x%lx)",
+                         (unsigned long)modifier);
+        int ret = drmtap_gpu_egl_convert(ctx, frame->dma_buf_fd,
+                                          frame->width, frame->height,
+                                          frame->stride, frame->format,
+                                          modifier, &egl_data, &egl_size);
+        if (ret == 0 && egl_data) {
+            /* Store in ctx for reuse / cleanup */
+            free(ctx->deswizzle_buf);
+            ctx->deswizzle_buf = egl_data;
+            ctx->deswizzle_buf_size = egl_size;
+            frame->data = ctx->deswizzle_buf;
+            /* EGL outputs RGBA/BGRA 8-bit */
+            frame->format = DRM_FORMAT_XRGB8888;
+            frame->stride = frame->width * 4;
+            drmtap_debug_log(ctx, "auto-process: EGL detiled to linear XRGB8888");
+            return 0;
+        }
+        drmtap_debug_log(ctx, "auto-process: EGL failed (%d), trying CPU", ret);
+    }
+#endif
+
+    /* --- CPU deswizzle for classic tiling (buffer already allocated above) --- */
+    const char *driver = ctx->driver_name;
+    if (drmtap_gpu_intel_match(driver) ||
+        drmtap_gpu_nvidia_match(driver) ||
+        drmtap_gpu_amd_match(driver)) {
+        drmtap_debug_log(ctx, "auto-process: %s CPU deswizzle (mod=0x%lx)",
+                         driver, (unsigned long)modifier);
+        int ret = drmtap_deswizzle(data, ctx->deswizzle_buf,
+                                   frame->width, frame->height,
+                                   frame->stride, frame->stride, modifier);
+        if (ret == -ENOTSUP) {
+            /* CCS-compressed modifier — CPU deswizzle impossible.
+             * This happens in helper mode where dma_buf_fd is unavailable
+             * and the pixel data came from dumb_mmap (still compressed).
+             * Fall through to return raw data as-is with LINEAR modifier
+             * so the caller doesn't crash trying to deswizzle. */
+            drmtap_debug_log(ctx,
+                "auto-process: CCS modifier 0x%lx needs GPU deswizzle "
+                "(EGL/DMA-BUF), CPU deswizzle not possible — "
+                "returning raw pixels",
+                (unsigned long)modifier);
+            frame->modifier = 0; /* DRM_FORMAT_MOD_LINEAR */
+            return 0;
+        }
+        if (ret == 0) {
+            frame->data = ctx->deswizzle_buf;
+            drmtap_debug_log(ctx, "auto-process: CPU deswizzled to linear");
+
+            /* Convert 10-bit XR30/AR30 → 8-bit XRGB8888 if needed */
+            if (frame->format == DRM_FMT_XR30 ||
+                frame->format == DRM_FMT_AR30) {
+                drmtap_debug_log(ctx,
+                    "auto-process: converting XR30 10-bit → XRGB8888 8-bit");
+                drmtap_convert_format(
+                    ctx->deswizzle_buf, ctx->deswizzle_buf,
+                    frame->width, frame->height,
+                    frame->stride, frame->stride,
+                    frame->format, DRM_FMT_XR24);
+                frame->format = DRM_FMT_XR24;
+            }
+        }
+        return ret;
+    }
+
+    drmtap_debug_log(ctx, "auto-process: unknown driver '%s' mod=0x%lx",
+                     driver, (unsigned long)modifier);
+    return 0;
 }
 
 /* ========================================================================= */
@@ -657,6 +808,10 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         frame->modifier = ctx->fast_slots[slot].modifier;
         frame->fb_id = fb_id;
         frame->_priv = NULL;
+
+        /* Auto-deswizzle tiled framebuffers + format convert */
+        gpu_auto_process(ctx, frame->data, frame);
+
         return 0;   /* new frame */
     }
 
@@ -740,6 +895,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     frame->modifier = ctx->fast_slots[slot].modifier;
     frame->fb_id = fb_id;
     frame->_priv = NULL;
+
+    /* Auto-deswizzle tiled framebuffers + format convert */
+    gpu_auto_process(ctx, frame->data, frame);
 
     return 0;   /* new frame */
 }

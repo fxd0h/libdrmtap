@@ -174,8 +174,13 @@ void drmtap_helper_stop(drmtap_ctx *ctx) {
 /* SCM_RIGHTS fd receiving                                                   */
 /* ========================================================================= */
 
-/* recv_fd removed — V2 protocol sends pixel data directly via socket,
- * no SCM_RIGHTS fd passing needed. */
+/* recv_fd removed — V2 protocol sends pixel data directly via socket.
+ *
+ * NOTE: This means CCS-compressed framebuffers (Intel Gen12+) cannot be
+ * deswizzled by the parent, since EGL requires a DMA-BUF fd. A future
+ * V3 protocol should re-add SCM_RIGHTS fd passing for non-linear modifiers
+ * so the parent can use EGL GPU deswizzle. See gpu_auto_process() in
+ * drm_grab.c for the fallback behavior when dma_buf_fd == -1. */
 
 /* ========================================================================= */
 /* Public helper API (called from drm_grab.c)                                */

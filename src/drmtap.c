@@ -141,6 +141,10 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
     ctx->drm_fd = -1;
     ctx->helper_pid = -1;
     ctx->helper_fd = -1;
+    
+    for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+        ctx->fast_slots[i].prime_fd = -1;
+    }
 
     if (pthread_mutex_init(&ctx->lock, NULL) != 0) {
         drmtap_set_error(NULL, "Failed to init mutex: %s", strerror(errno));
