@@ -207,38 +207,5 @@ fn main() {
         println!("cargo:rustc-cfg=x11");
     }
 
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    {
-        // Compile libdrmtap from embedded C sources
-        let drmtap_dir = std::path::Path::new("src/drmtap");
-        cc::Build::new()
-            .files(&[
-                drmtap_dir.join("drmtap.c"),
-                drmtap_dir.join("drm_enumerate.c"),
-                drmtap_dir.join("drm_grab.c"),
-                drmtap_dir.join("privilege_helper.c"),
-                drmtap_dir.join("pixel_convert.c"),
-                drmtap_dir.join("cursor.c"),
-                drmtap_dir.join("gpu_egl.c"),
-                drmtap_dir.join("gpu_intel.c"),
-                drmtap_dir.join("gpu_amd.c"),
-                drmtap_dir.join("gpu_nvidia.c"),
-                drmtap_dir.join("gpu_generic.c"),
-            ])
-            .include(drmtap_dir)
-            .include("/usr/include/libdrm")
-            .define("_GNU_SOURCE", None)
-            .define("_POSIX_C_SOURCE", "200809L")
-            .flag("-std=c11")
-            .flag("-Wno-unused-parameter")
-            .flag("-Wno-sign-compare")
-            .compile("drmtap");
-
-        // Link system dependencies that libdrmtap needs
-        println!("cargo:rustc-link-lib=drm");
-        println!("cargo:rustc-link-lib=EGL");
-        println!("cargo:rustc-link-lib=GLESv2");
-        println!("cargo:rustc-link-lib=seccomp");
-        println!("cargo:rustc-link-lib=cap");
-    }
+    // DRM backend: libdrmtap-sys crate handles C compilation and linking
 }

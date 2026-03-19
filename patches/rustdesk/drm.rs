@@ -23,65 +23,7 @@ pub const IS_CURSOR_EMBEDDED: bool = false;
 // FFI bindings to libdrmtap
 // ---------------------------------------------------------------------------
 
-#[allow(non_camel_case_types, dead_code)]
-mod ffi {
-    use std::os::raw::{c_char, c_int, c_void};
-
-    /// Opaque context handle returned by `drmtap_open`.
-    #[repr(C)]
-    pub struct drmtap_ctx {
-        _opaque: [u8; 0],
-    }
-
-    /// Configuration for `drmtap_open`.
-    #[repr(C)]
-    pub struct drmtap_config {
-        pub device_path: *const c_char,
-        pub crtc_id: u32,
-        pub helper_path: *const c_char,
-        pub debug: c_int,
-    }
-
-    /// Frame metadata + pointer to mapped pixel data.
-    #[repr(C)]
-    pub struct drmtap_frame_info {
-        pub data: *mut c_void,
-        pub dma_buf_fd: c_int,
-        pub width: u32,
-        pub height: u32,
-        pub stride: u32,
-        pub format: u32,
-        pub modifier: u64,
-        pub fb_id: u32,
-        pub _priv: *mut c_void,
-    }
-
-    /// Display information from enumeration.
-    #[repr(C)]
-    pub struct drmtap_display {
-        pub crtc_id: u32,
-        pub connector_id: u32,
-        pub name: [c_char; 32],
-        pub width: u32,
-        pub height: u32,
-        pub refresh_hz: u32,
-        pub active: c_int,
-    }
-
-    extern "C" {
-        pub fn drmtap_open(cfg: *const drmtap_config) -> *mut drmtap_ctx;
-        pub fn drmtap_close(ctx: *mut drmtap_ctx);
-        pub fn drmtap_list_displays(
-            ctx: *mut drmtap_ctx,
-            out: *mut drmtap_display,
-            max: c_int,
-        ) -> c_int;
-        pub fn drmtap_grab_mapped(
-            ctx: *mut drmtap_ctx,
-            frame: *mut drmtap_frame_info,
-        ) -> c_int;
-    }
-}
+use libdrmtap_sys as ffi;
 
 // ---------------------------------------------------------------------------
 // Helpers
