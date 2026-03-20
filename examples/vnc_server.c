@@ -413,6 +413,8 @@ int main(int argc, char **argv) {
 
     /* Capture loop */
     int fps = 0;
+    int skipped = 0;
+    uint32_t last_fb_id = 0;
     time_t last_time = 0;
 
     while (running && rfbIsActive(server)) {
@@ -425,6 +427,15 @@ int main(int argc, char **argv) {
             usleep(100000);
             continue;
         }
+
+        /* Skip EGL detiling + memcpy if framebuffer hasn't changed */
+        if (frame.fb_id == last_fb_id) {
+            drmtap_frame_release(ctx, &frame);
+            skipped++;
+            usleep(16666);  /* ~60 Hz poll rate */
+            continue;
+        }
+        last_fb_id = frame.fb_id;
 
         if (frame.data) {
             for (int y = 0; y < screen_height; y++) {
@@ -439,9 +450,10 @@ int main(int argc, char **argv) {
         fps++;
         time_t now = time(NULL);
         if (now != last_time) {
-            printf("\rFPS: %d    ", fps);
+            printf("\rFPS: %d (skipped: %d)    ", fps, skipped);
             fflush(stdout);
             fps = 0;
+            skipped = 0;
             last_time = now;
         }
     }
