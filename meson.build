@@ -206,7 +206,7 @@ libvncserver_dep = dependency('libvncserver', required: false)
 if libvncserver_dep.found()
     executable('vnc_server',
         'examples/vnc_server.c',
-        dependencies: [libdrmtap_dep, libvncserver_dep],
+        dependencies: [libdrmtap_dep, libvncserver_dep, libdrm_dep],
         include_directories: lib_include,
         install: false,
     )
