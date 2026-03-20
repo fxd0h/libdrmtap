@@ -251,6 +251,18 @@ const char *drmtap_error(drmtap_ctx *ctx);
  */
 const char *drmtap_gpu_driver(drmtap_ctx *ctx);
 
+/**
+ * @brief Get the underlying DRM file descriptor.
+ *
+ * Useful for advanced operations like drmWaitVBlank() to synchronize
+ * frame capture with display refresh. The fd is owned by the context —
+ * do NOT close it.
+ *
+ * @param ctx Capture context
+ * @return DRM fd (>= 0), or -1 if context is NULL
+ */
+int drmtap_drm_fd(drmtap_ctx *ctx);
+
 /* ========================================================================= */
 /* Pixel Conversion                                                          */
 /* ========================================================================= */

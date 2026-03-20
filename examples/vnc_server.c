@@ -39,6 +39,7 @@
 #include <errno.h>
 #include <linux/uinput.h>
 #include <linux/input-event-codes.h>
+#include <xf86drm.h>
 #include <drmtap.h>
 #include <rfb/rfb.h>
 #include <rfb/keysym.h>
@@ -411,15 +412,31 @@ int main(int argc, char **argv) {
            (uinput_mouse_fd >= 0) ? "mouse + keyboard enabled" : "DISABLED");
     printf("Press Ctrl+C to stop.\n\n");
 
-    /* Capture loop */
+    /* Capture loop — uses drmWaitVBlank to sleep until display refresh */
     int fps = 0;
     int skipped = 0;
     uint32_t last_fb_id = 0;
     time_t last_time = 0;
+    int drm_fd = drmtap_drm_fd(ctx);
+    int vblank_supported = 1;
 
     while (running && rfbIsActive(server)) {
         long timeout_us = 16666;
         rfbProcessEvents(server, timeout_us);
+
+        /* Wait for next vblank — sleeps instead of busy-polling */
+        if (vblank_supported) {
+            drmVBlank vbl = {0};
+            vbl.request.type = DRM_VBLANK_RELATIVE;
+            vbl.request.sequence = 1;
+            if (drmWaitVBlank(drm_fd, &vbl) < 0) {
+                /* Some drivers don't support vblank — fall back to usleep */
+                vblank_supported = 0;
+            }
+        }
+        if (!vblank_supported) {
+            usleep(16666);
+        }
 
         memset(&frame, 0, sizeof(frame));
         ret = drmtap_grab_mapped(ctx, &frame);
@@ -432,7 +449,6 @@ int main(int argc, char **argv) {
         if (frame.fb_id == last_fb_id) {
             drmtap_frame_release(ctx, &frame);
             skipped++;
-            usleep(16666);  /* ~60 Hz poll rate */
             continue;
         }
         last_fb_id = frame.fb_id;
