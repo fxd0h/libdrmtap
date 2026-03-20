@@ -47,13 +47,19 @@ lib_sources = files(
 
 lib_deps = [libdrm_dep, threads_dep]
 
-# Add GPU backends if VAAPI is available
+# GPU backends: Intel and AMD (always compiled — match functions needed by drm_grab.c)
+lib_sources += files(
+    'src/gpu_intel.c',
+    'src/gpu_amd.c',
+)
+
+# Link VAAPI if available (used by gpu_intel/gpu_amd _process functions)
 if libva_dep.found() and libva_drm_dep.found()
-    lib_sources += files(
-        'src/gpu_intel.c',
-        'src/gpu_amd.c',
-    )
     lib_deps += [libva_dep, libva_drm_dep]
+    add_project_arguments('-DHAVE_VAAPI=1', language: 'c')
+    message('VAAPI backends: enabled (Intel/AMD GPU-accelerated)')
+else
+    message('VAAPI backends: disabled (match-only stubs)')
 endif
 
 # Nvidia backend (no extra deps — CPU deswizzle)
