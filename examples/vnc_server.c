@@ -164,11 +164,22 @@ static void cleanup_uinput(void) {
  * ============================================================ */
 
 static int keysym_to_keycode(rfbKeySym keysym) {
-    /* Common keys — not exhaustive but covers most usage */
+    /* Linux keycodes follow QWERTY physical layout, NOT alphabetical order.
+     * We need an explicit lookup table for a-z. */
+    static const int alpha_keycodes[26] = {
+        /* a=*/ KEY_A,  /* b=*/ KEY_B,  /* c=*/ KEY_C,  /* d=*/ KEY_D,
+        /* e=*/ KEY_E,  /* f=*/ KEY_F,  /* g=*/ KEY_G,  /* h=*/ KEY_H,
+        /* i=*/ KEY_I,  /* j=*/ KEY_J,  /* k=*/ KEY_K,  /* l=*/ KEY_L,
+        /* m=*/ KEY_M,  /* n=*/ KEY_N,  /* o=*/ KEY_O,  /* p=*/ KEY_P,
+        /* q=*/ KEY_Q,  /* r=*/ KEY_R,  /* s=*/ KEY_S,  /* t=*/ KEY_T,
+        /* u=*/ KEY_U,  /* v=*/ KEY_V,  /* w=*/ KEY_W,  /* x=*/ KEY_X,
+        /* y=*/ KEY_Y,  /* z=*/ KEY_Z,
+    };
+
     if (keysym >= XK_a && keysym <= XK_z)
-        return KEY_A + (keysym - XK_a);
+        return alpha_keycodes[keysym - XK_a];
     if (keysym >= XK_A && keysym <= XK_Z)
-        return KEY_A + (keysym - XK_A);
+        return alpha_keycodes[keysym - XK_A];
     if (keysym >= XK_0 && keysym <= XK_9)
         return KEY_0 + (keysym - XK_0);
     if (keysym >= XK_F1 && keysym <= XK_F12)
