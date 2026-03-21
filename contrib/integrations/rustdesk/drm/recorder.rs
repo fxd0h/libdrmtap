@@ -191,6 +191,7 @@ pub struct Capturer {
     total_time_us: u64,
     dirty_count: u64,
     skip_count: u64,
+    last_grab_time: Instant,
 }
 
 impl Capturer {
@@ -229,6 +230,7 @@ impl Capturer {
                 total_time_us: 0,
                 dirty_count: 0,
                 skip_count: 0,
+                last_grab_time: Instant::now(),
             })
         }
     }
@@ -238,45 +240,58 @@ impl Capturer {
 }
 
 impl TraitCapturer for Capturer {
-    fn frame<'a>(&'a mut self, _timeout: Duration) -> io::Result<Frame<'a>> {
+    fn frame<'a>(&'a mut self, timeout: Duration) -> io::Result<Frame<'a>> {
         unsafe {
-            let t_start = Instant::now();
+            // Rate limit: minimum 16ms between grabs (~60 FPS max)
+            let elapsed = self.last_grab_time.elapsed();
+            let min_interval = Duration::from_millis(16);
+            if elapsed < min_interval {
+                std::thread::sleep(min_interval - elapsed);
+            }
 
             let mut frame: ffi::drmtap_frame_info = std::mem::zeroed();
             let ret = ffi::drmtap_grab_mapped(self.ctx, &mut frame);
             if ret < 0 {
+                std::thread::sleep(Duration::from_millis(16));
                 return Err(io::ErrorKind::WouldBlock.into());
             }
-
-            let t_grab = Instant::now();
 
             if frame.data.is_null() || frame.width == 0 || frame.height == 0 {
                 ffi::drmtap_frame_release(self.ctx, &mut frame);
+                std::thread::sleep(Duration::from_millis(16));
                 return Err(io::ErrorKind::WouldBlock.into());
             }
+
+            self.last_grab_time = Instant::now();
+            let current_fb_id = frame.fb_id;
+
+            // fb_id skip: if framebuffer hasn't changed, skip expensive copy
+            if current_fb_id == self.last_fb_id && self.last_fb_id != 0 {
+                ffi::drmtap_frame_release(self.ctx, &mut frame);
+                self.skip_count += 1;
+                let sleep_ms = timeout.as_millis().min(33).max(1) as u64;
+                std::thread::sleep(Duration::from_millis(sleep_ms));
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.last_fb_id = current_fb_id;
 
             let w = frame.width as usize;
             let h = frame.height as usize;
             let stride = frame.stride as usize;
             let frame_size = w * 4 * h;
-            let current_fb_id = frame.fb_id;  // Save BEFORE release
 
-            // Resize buffer if needed
             if self.buffer.len() != frame_size {
                 self.buffer.resize(frame_size, 0);
             }
 
-            // Always copy — data must be read before release
             let src = frame.data as *const u8;
             if stride == w * 4 {
                 std::ptr::copy_nonoverlapping(src, self.buffer.as_mut_ptr(), frame_size);
             } else {
                 for y in 0..h {
-                    let src_row = src.add(y * stride);
-                    let dst_offset = y * w * 4;
                     std::ptr::copy_nonoverlapping(
-                        src_row,
-                        self.buffer.as_mut_ptr().add(dst_offset),
+                        src.add(y * stride),
+                        self.buffer.as_mut_ptr().add(y * w * 4),
                         w * 4,
                     );
                 }
@@ -284,31 +299,7 @@ impl TraitCapturer for Capturer {
 
             ffi::drmtap_frame_release(self.ctx, &mut frame);
 
-            let t_copy = Instant::now();
-
-            // Metrics
             self.frame_count += 1;
-            self.grab_time_us += t_grab.duration_since(t_start).as_micros() as u64;
-            self.copy_time_us += t_copy.duration_since(t_grab).as_micros() as u64;
-            self.total_time_us += t_copy.duration_since(t_start).as_micros() as u64;
-            self.dirty_count += 1;
-
-            if self.frame_count % 60 == 0 {
-                let n = 60u64;
-                eprintln!(
-                    "[DRM-METRICS] frames={} | grab={:.0}µs copy={:.0}µs total={:.0}µs | fb_id={}",
-                    self.frame_count,
-                    self.grab_time_us as f64 / n as f64,
-                    self.copy_time_us as f64 / n as f64,
-                    self.total_time_us as f64 / n as f64,
-                    current_fb_id,
-                );
-                self.grab_time_us = 0;
-                self.copy_time_us = 0;
-                self.total_time_us = 0;
-                self.dirty_count = 0;
-            }
-
             self.w = w;
             self.h = h;
             Ok(Frame::PixelBuffer(PixelBuffer::new(

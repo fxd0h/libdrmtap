@@ -592,7 +592,7 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
      * framebuffers, this means we fall to the CPU path which returns
      * -ENOTSUP, and the raw data is returned as-is. */
 #ifdef HAVE_EGL
-    fprintf(stderr, "[DRMTAP] EGL check: fd=%d avail=%d mod=0x%lx\n",
+    drmtap_debug_log(ctx, "EGL check: fd=%d avail=%d mod=0x%lx",
             frame->dma_buf_fd, drmtap_gpu_egl_available(ctx),
             (unsigned long)modifier);
     if (frame->dma_buf_fd >= 0 && drmtap_gpu_egl_available(ctx)) {
@@ -604,7 +604,7 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                                           frame->width, frame->height,
                                           frame->stride, frame->format,
                                           modifier, &egl_data, &egl_size);
-        fprintf(stderr, "[DRMTAP] EGL convert: ret=%d data=%p\n", ret, egl_data);
+        drmtap_debug_log(ctx, "EGL convert: ret=%d data=%p", ret, egl_data);
         if (ret == 0 && egl_data) {
             /* Store in ctx for reuse / cleanup */
             free(ctx->deswizzle_buf);
