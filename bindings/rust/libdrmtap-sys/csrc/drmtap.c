@@ -309,3 +309,10 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx) {
     }
     return ctx->driver_name;
 }
+
+int drmtap_drm_fd(drmtap_ctx *ctx) {
+    if (!ctx) {
+        return -1;
+    }
+    return ctx->drm_fd;
+}

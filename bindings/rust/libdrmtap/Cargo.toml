@@ -1,6 +1,6 @@
 [package]
 name = "libdrmtap"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["Mariano Abad <weimaraner@gmail.com>"]
 description = "Safe Rust wrapper for libdrmtap — DRM/KMS screen capture for Linux (login screen, Wayland, headless)"
@@ -13,7 +13,7 @@ keywords = ["drm", "kms", "screen-capture", "wayland", "remote-desktop"]
 categories = ["multimedia::video", "os::linux-apis"]
 
 [dependencies]
-libdrmtap-sys = { version = "0.2.1", path = "../libdrmtap-sys" }
+libdrmtap-sys = { version = "0.3.0", path = "../libdrmtap-sys" }
 
 [[example]]
 name = "capture_test"

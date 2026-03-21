@@ -1,6 +1,6 @@
 [package]
 name = "libdrmtap-sys"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["Mariano Abad <weimaraner@gmail.com>"]
 description = "Raw FFI bindings for libdrmtap — DRM/KMS screen capture library for Linux. Includes embedded C sources compiled statically."
