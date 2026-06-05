@@ -93,6 +93,13 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
 // Debug log to stderr (only when ctx->debug is set)
 void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
 
+/* Command structure for CMD_GRAB (client to helper) */
+typedef struct {
+    uint8_t  cmd;           /* CMD_GRAB (0x01) */
+    uint8_t  _pad1[3];      /* align to 4 bytes */
+    uint32_t crtc_id;       /* target CRTC id (0 = auto-select first active) */
+} helper_cmd_grab_t;
+
 /* Result from helper v2 grab — helper reads pixels and sends via socket.
  * Must match struct grab_metadata in drmtap-helper.c */
 /* Flags for helper_grab_result_t.flags */

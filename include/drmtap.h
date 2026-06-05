@@ -96,6 +96,8 @@ typedef struct {
     uint32_t crtc_id;       /**< Use in drmtap_config.crtc_id */
     uint32_t connector_id;  /**< DRM connector id */
     char name[32];          /**< e.g., "HDMI-A-1", "DP-2", "eDP-1" */
+    uint32_t x;             /**< X offset in virtual FB (from CRTC) */
+    uint32_t y;             /**< Y offset in virtual FB (from CRTC) */
     uint32_t width;         /**< Current mode width in pixels */
     uint32_t height;        /**< Current mode height in pixels */
     uint32_t refresh_hz;    /**< Vertical refresh rate */

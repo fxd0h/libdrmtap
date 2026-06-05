@@ -32,6 +32,8 @@ pub struct drmtap_display {
     pub crtc_id: u32,
     pub connector_id: u32,
     pub name: [c_char; 32],
+    pub x: u32,
+    pub y: u32,
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u32,

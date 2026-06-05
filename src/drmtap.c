@@ -171,6 +171,9 @@ int drmtap_version(void) {
 }
 
 drmtap_ctx *drmtap_open(const drmtap_config *config) {
+    if (config) {
+        fprintf(stderr, "[[DRMTAP_OJOS_RAYOS_X]] OPENING WITH CRTC_ID: %u\n", config->crtc_id);
+    }
     drmtap_ctx *ctx = calloc(1, sizeof(drmtap_ctx));
     if (!ctx) {
         drmtap_set_error(NULL, "Failed to allocate context: %s",

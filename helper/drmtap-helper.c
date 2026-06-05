@@ -94,6 +94,13 @@ struct drm_virtgpu_3d_wait {
 #define CMD_GRAB 0x01
 #define CMD_QUIT 0xFF
 
+/* Command structure for CMD_GRAB (client to helper) */
+struct helper_cmd_grab {
+    uint8_t  cmd;           /* CMD_GRAB (0x01) */
+    uint8_t  _pad1[3];      /* align to 4 bytes */
+    uint32_t crtc_id;       /* target CRTC id (0 = auto-select first active) */
+};
+
 /* Response status */
 #define RESP_OK    0x00
 #define RESP_ERROR 0x01
@@ -247,7 +254,7 @@ static int send_error(int sock, const char *reason) {
 
 // Grab current framebuffer. Helper reads pixels in its own process
 // (where dumb_mmap returns fresh data) and sends them via the socket.
-static int grab_and_send(int sock, int drm_fd, int is_virtio) {
+static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virtio) {
     void *mapped = MAP_FAILED;
     size_t mapped_size = 0;
 
@@ -257,17 +264,52 @@ static int grab_and_send(int sock, int drm_fd, int is_virtio) {
         return send_error(sock, "drmModeGetPlaneResources failed");
     }
 
+    /* Search for the plane currently bound to the target CRTC */
     uint32_t fb_id = 0;
     for (uint32_t i = 0; i < planes->count_planes; i++) {
         drmModePlane *plane = drmModeGetPlane(drm_fd, planes->planes[i]);
-        if (plane) {
-            if (plane->fb_id != 0) {
-                fb_id = plane->fb_id;
+        if (!plane) continue;
+
+        /* If CRTC specified, skip planes not bound to it */
+        if (target_crtc != 0) {
+            if (plane->crtc_id != target_crtc) {
                 drmModeFreePlane(plane);
-                break;
+                continue;
             }
-            drmModeFreePlane(plane);
         }
+
+        /* Check for active framebuffer */
+        if (plane->fb_id != 0) {
+            /* Check plane type — prefer PRIMARY */
+            drmModeObjectProperties *props = drmModeObjectGetProperties(
+                drm_fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
+            int is_primary = 0;
+            if (props) {
+                for (uint32_t p = 0; p < props->count_props; p++) {
+                    drmModePropertyRes *prop = drmModeGetProperty(
+                        drm_fd, props->props[p]);
+                    if (prop) {
+                        if (strcmp(prop->name, "type") == 0 &&
+                            props->prop_values[p] == DRM_PLANE_TYPE_PRIMARY) {
+                            is_primary = 1;
+                        }
+                        drmModeFreeProperty(prop);
+                    }
+                }
+                drmModeFreeObjectProperties(props);
+            }
+
+            if (is_primary || fb_id == 0) {
+                fb_id = plane->fb_id;
+                fprintf(stderr, "drmtap-helper: matched plane=%u to crtc=%u (fb=%u, %s)\n",
+                        plane->plane_id, target_crtc, fb_id, is_primary ? "PRIMARY" : "overlay");
+                if (is_primary) {
+                    drmModeFreePlane(plane);
+                    break;
+                }
+            }
+        }
+        drmModeFreePlane(plane);
     }
     drmModeFreePlaneResources(planes);
 
@@ -469,16 +511,22 @@ int main(int argc, char *argv[]) {
 
     /* Event loop: receive commands, process with persistent fd */
     while (1) {
-        uint8_t cmd;
-        ssize_t n = recv(sock, &cmd, 1, 0);
+        struct helper_cmd_grab hcmd;
+        ssize_t n = recv(sock, &hcmd, sizeof(hcmd), 0);
 
         if (n <= 0) {
             break;
         }
 
+        uint8_t cmd = hcmd.cmd;
+        if (n < (ssize_t)sizeof(hcmd)) {
+            /* Fallback or partial read — can happen if client still uses old 1-byte protocol
+             * but for now we expect the full struct. */
+        }
+
         switch (cmd) {
             case CMD_GRAB:
-                grab_and_send(sock, drm_fd, is_virtio);
+                grab_and_send(sock, drm_fd, hcmd.crtc_id, is_virtio);
                 break;
 
             case CMD_QUIT:

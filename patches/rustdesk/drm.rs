@@ -32,7 +32,7 @@ use libdrmtap_sys as ffi;
 /// Build a `drmtap_config` from environment variables.
 /// - `DRM_DEVICE`: explicit /dev/dri/cardN path (optional, auto-detects).
 /// - `DRMTAP_DEBUG`: set to "1" to enable libdrmtap debug logging.
-fn build_config() -> (Option<std::ffi::CString>, ffi::drmtap_config) {
+fn build_config(crtc_id: u32) -> (Option<std::ffi::CString>, ffi::drmtap_config) {
     let device_env = std::env::var("DRM_DEVICE").ok();
     let device_cstr = device_env.map(|s| std::ffi::CString::new(s).unwrap());
     let cfg = ffi::drmtap_config {
@@ -40,7 +40,7 @@ fn build_config() -> (Option<std::ffi::CString>, ffi::drmtap_config) {
             .as_ref()
             .map(|c| c.as_ptr())
             .unwrap_or(std::ptr::null()),
-        crtc_id: 0,
+        crtc_id,
         helper_path: std::ptr::null(),
         debug: if std::env::var("DRMTAP_DEBUG").is_ok() {
             1
@@ -70,7 +70,7 @@ fn open_context() -> io::Result<*mut ffi::drmtap_ctx> {
             }
         });
     }
-    let (_cstr, cfg) = build_config();
+    let (_cstr, cfg) = build_config(0);
     let ctx = unsafe { ffi::drmtap_open(&cfg) };
     if ctx.is_null() {
         Err(io::Error::new(
@@ -115,8 +115,11 @@ fn copy_frame_data(
 
 pub struct Display {
     name: String,
+    x: usize,
+    y: usize,
     w: usize,
     h: usize,
+    crtc_id: u32,
     is_primary: bool,
 }
 
@@ -145,8 +148,11 @@ impl Display {
                     .collect();
                 Display {
                     name: String::from_utf8_lossy(&name_bytes).to_string(),
+                    x: raw[i].x as usize,
+                    y: raw[i].y as usize,
                     w: if raw[i].width == 0 { 1920 } else { raw[i].width as usize },
                     h: if raw[i].height == 0 { 1080 } else { raw[i].height as usize },
+                    crtc_id: raw[i].crtc_id,
                     is_primary: idx == 0,
                 }
             })
@@ -189,7 +195,7 @@ impl Display {
     }
 
     pub fn origin(&self) -> (i32, i32) {
-        (0, 0)
+        (self.x as i32, self.y as i32)
     }
 
     pub fn is_online(&self) -> bool {
@@ -239,10 +245,8 @@ impl Capturer {
                 std::thread::sleep(Duration::from_millis(200 * (attempt as u64 + 1)));
             }
 
-            let ctx = match open_context() {
-                Ok(c) => { eprintln!("[DIAG] drm: open_context() OK ctx={:?}", c); c },
-                Err(e) => { eprintln!("[DIAG] drm: open_context() FAILED: {}", e); continue; },
-            };
+            let (_cstr, cfg) = build_config(display.crtc_id);
+            let ctx = unsafe { ffi::drmtap_open(&cfg) };
 
             // Validate with a test grab
             let mut test: ffi::drmtap_frame_info = unsafe { std::mem::zeroed() };

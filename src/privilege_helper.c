@@ -253,9 +253,12 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
     }
 
     /* Send grab command */
-    uint8_t cmd = CMD_GRAB;
-    ssize_t n = send(ctx->helper_fd, &cmd, 1, MSG_NOSIGNAL);
-    if (n != 1) {
+    helper_cmd_grab_t hcmd = {
+        .cmd = CMD_GRAB,
+        .crtc_id = ctx->crtc_id
+    };
+    ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+    if (n != sizeof(hcmd)) {
         drmtap_debug_log(ctx, "helper send failed, trying respawn");
         drmtap_helper_stop(ctx);
 
@@ -264,8 +267,8 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
             return ret;
         }
 
-        n = send(ctx->helper_fd, &cmd, 1, MSG_NOSIGNAL);
-        if (n != 1) {
+        n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+        if (n != sizeof(hcmd)) {
             drmtap_set_error(ctx, "helper communication failed after respawn");
             return -EIO;
         }
