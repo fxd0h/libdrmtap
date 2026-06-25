@@ -21,7 +21,7 @@ Capture the screen at the kernel level: login screens, Wayland, headless — no 
 libdrmtap = "0.3"
 ```
 
-This pulls in `libdrmtap-sys` 0.4.1, which embeds and statically compiles the C
+This pulls in `libdrmtap-sys` 0.4.2, which embeds and statically compiles the C
 sources (and the privilege helper) — no system `libdrmtap` install needed.
 
 ## Example
