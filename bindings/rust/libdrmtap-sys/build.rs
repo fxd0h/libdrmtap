@@ -1,6 +1,6 @@
-// build.rs — Compile libdrmtap C sources statically via cc crate
-//
-// No external shared library needed — all C code is embedded in this crate.
+// build.rs — Compile libdrmtap C sources statically via cc crate.
+// Also compiles drmtap-helper as a standalone executable and emits its path
+// as cargo:HELPER_BIN so downstream build scripts can copy/install it.
 
 fn main() {
     let csrc = std::path::Path::new("csrc");
@@ -59,4 +59,41 @@ fn main() {
     println!("cargo:rustc-link-lib=GLESv2");
     println!("cargo:rustc-link-lib=seccomp");
     println!("cargo:rustc-link-lib=cap");
+
+    // Compile drmtap-helper as a standalone executable.
+    // It inherits a socketpair fd from the parent, opens the DRM device with
+    // CAP_SYS_ADMIN and returns DMA-BUF fds via SCM_RIGHTS.  The binary is
+    // written to OUT_DIR and its path is emitted as cargo:HELPER_BIN so that
+    // downstream build scripts (e.g. rustdesk's build.rs) can copy or install it.
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let helper_out = out_dir.join("drmtap-helper");
+
+    let compiler = build.get_compiler();
+    let mut cmd = compiler.to_command();
+    cmd.arg("-o").arg(&helper_out)
+        .arg(csrc.join("drmtap-helper.c"))
+        .arg(format!("-I{}", csrc.display()))
+        .arg("-D_GNU_SOURCE")
+        .arg("-D_POSIX_C_SOURCE=200809L")
+        .arg("-DHAVE_SECCOMP=1")
+        .arg("-DHAVE_LIBCAP=1");
+
+    // Include libdrm headers for drmtap-helper.c (same probe as the library).
+    match pkg_config::Config::new().cargo_metadata(false).probe("libdrm") {
+        Ok(lib) => {
+            for inc in &lib.include_paths {
+                cmd.arg(format!("-I{}", inc.display()));
+            }
+        }
+        Err(_) => { cmd.arg("-I/usr/include/libdrm"); }
+    }
+
+    cmd.arg("-ldrm").arg("-lcap").arg("-lseccomp");
+
+    let status = cmd.status().expect("failed to compile drmtap-helper");
+    assert!(status.success(), "drmtap-helper compilation failed");
+
+    println!("cargo:rerun-if-changed={}", csrc.join("drmtap-helper.c").display());
+    // Expose the compiled helper path to downstream crates via DEP_DRMTAP_HELPER_BIN.
+    println!("cargo:HELPER_BIN={}", helper_out.display());
 }
