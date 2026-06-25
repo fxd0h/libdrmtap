@@ -40,6 +40,7 @@
 /* Must match values in drmtap-helper.c */
 #define HELPER_SOCKET_FD 3
 #define CMD_GRAB 0x01
+#define CMD_GET_CURSOR 0x02
 #define CMD_QUIT 0xFF
 #define RESP_OK    0x00
 
@@ -253,9 +254,12 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
     }
 
     /* Send grab command */
-    uint8_t cmd = CMD_GRAB;
-    ssize_t n = send(ctx->helper_fd, &cmd, 1, MSG_NOSIGNAL);
-    if (n != 1) {
+    helper_cmd_grab_t hcmd = {
+        .cmd = CMD_GRAB,
+        .crtc_id = ctx->crtc_id
+    };
+    ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+    if (n != sizeof(hcmd)) {
         drmtap_debug_log(ctx, "helper send failed, trying respawn");
         drmtap_helper_stop(ctx);
 
@@ -264,8 +268,8 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
             return ret;
         }
 
-        n = send(ctx->helper_fd, &cmd, 1, MSG_NOSIGNAL);
-        if (n != 1) {
+        n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+        if (n != sizeof(hcmd)) {
             drmtap_set_error(ctx, "helper communication failed after respawn");
             return -EIO;
         }
@@ -329,6 +333,75 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
     if (recv_all(ctx->helper_fd, pixel_buf, result->wire.data_size) < 0) {
         drmtap_set_error(ctx, "helper pixel recv failed");
         return -EIO;
+    }
+
+    return 0;
+}
+
+int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
+    memset(cursor, 0, sizeof(*cursor));
+    cursor->pixels = NULL;
+
+    if (ctx->helper_fd < 0) {
+        int ret = drmtap_helper_spawn(ctx);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    helper_cmd_grab_t hcmd = {
+        .cmd = CMD_GET_CURSOR,
+        .crtc_id = ctx->crtc_id,
+    };
+    ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+    if (n != sizeof(hcmd)) {
+        drmtap_helper_stop(ctx);
+        if (drmtap_helper_spawn(ctx) < 0) {
+            return -EIO;
+        }
+        n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+        if (n != sizeof(hcmd)) {
+            return -EIO;
+        }
+    }
+
+    helper_cursor_wire_t w;
+    memset(&w, 0, sizeof(w));
+    if (recv_all(ctx->helper_fd, &w, sizeof(w)) < 0) {
+        drmtap_set_error(ctx, "helper cursor metadata recv failed");
+        return -EIO;
+    }
+
+    cursor->x = w.x;
+    cursor->y = w.y;
+    cursor->hot_x = w.hot_x;
+    cursor->hot_y = w.hot_y;
+    cursor->width = w.width;
+    cursor->height = w.height;
+    cursor->visible = w.visible ? 1 : 0;
+
+    if (w.visible && w.data_size > 0) {
+        /* Drain oversized payloads defensively (cursors are tiny, ~64x64). */
+        if (w.data_size > 256u * 256u * 4u) {
+            size_t rem = w.data_size;
+            char drn[4096];
+            while (rem > 0) {
+                size_t c = rem < sizeof(drn) ? rem : sizeof(drn);
+                if (recv(ctx->helper_fd, drn, c, 0) <= 0) break;
+                rem -= c;
+            }
+            cursor->visible = 0;
+            return 0;
+        }
+        cursor->pixels = (uint32_t *)malloc(w.data_size);
+        if (!cursor->pixels) {
+            return -ENOMEM;
+        }
+        if (recv_all(ctx->helper_fd, cursor->pixels, w.data_size) < 0) {
+            free(cursor->pixels);
+            cursor->pixels = NULL;
+            return -EIO;
+        }
     }
 
     return 0;

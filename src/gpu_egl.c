@@ -358,17 +358,35 @@ static void ensure_linear_texture(egl_state_t *state, uint32_t w, uint32_t h) {
  * Returns 1 if EGL + GLES are functional, 0 otherwise.
  */
 int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
-    if (load_egl_procs() < 0) {
-        return 0;
+    /* EGL availability is a static property of the GPU, but this is called on
+     * every captured frame. Cache it once.
+     *
+     * CRITICAL: this must NOT call eglTerminate() on the display. The display
+     * returned by get_egl_display_for_card() is the SAME shared EGLDisplay used
+     * by the live detile contexts. Terminating it here — while another capture
+     * thread is mid-eglCreateImage — invalidates that thread's display and makes
+     * its detile fail with EGL_NOT_INITIALIZED, so it falls back to returning the
+     * raw tiled/compressed buffer (garbage/color corruption). Concurrent captures
+     * (e.g. two monitors viewed at once) hit this constantly. */
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    static int cached = -1;
+    pthread_mutex_lock(&lk);
+    if (cached < 0) {
+        if (load_egl_procs() < 0) {
+            cached = 0;
+        } else {
+            EGLDisplay display = get_egl_display_for_card(ctx->device_path);
+            if (display == EGL_NO_DISPLAY) {
+                cached = 0;
+            } else {
+                EGLint major, minor;
+                cached = eglInitialize(display, &major, &minor) ? 1 : 0;
+                /* Intentionally no eglTerminate(display) — see above. */
+            }
+        }
     }
-    EGLDisplay display = get_egl_display_for_card(ctx->device_path);
-    if (display == EGL_NO_DISPLAY) {
-        return 0;
-    }
-    EGLint major, minor;
-    int ok = eglInitialize(display, &major, &minor);
-    eglTerminate(display);
-    return ok ? 1 : 0;
+    pthread_mutex_unlock(&lk);
+    return cached;
 }
 
 /**
@@ -389,7 +407,38 @@ int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
  * @param out_size  Output: size of the allocated buffer
  * @return 0 on success, negative errno on error
  */
+static int egl_convert_impl(drmtap_ctx *ctx,
+                            int dma_buf_fd,
+                            uint32_t width, uint32_t height,
+                            uint32_t stride, uint32_t fourcc,
+                            uint64_t modifier,
+                            void **out_data, size_t *out_size);
+
+/* Public entry point: serialize GPU detiles across the whole process.
+ *
+ * Each capture runs on its own thread with its own thread-local EGL context, but
+ * the GPU is the real bottleneck. When two 4K monitors are captured at once,
+ * letting both detiles run concurrently makes each take longer (wall-clock) than
+ * the compositor's page-flip interval, so the live scanout buffer is recycled
+ * mid-read and the CCS-compressed result comes out as garbage/color corruption.
+ * A single process-global lock keeps every detile short enough to complete within
+ * one flip interval, which eliminates the corruption while each thread still owns
+ * its EGL context. */
 int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
+                           int dma_buf_fd,
+                           uint32_t width, uint32_t height,
+                           uint32_t stride, uint32_t fourcc,
+                           uint64_t modifier,
+                           void **out_data, size_t *out_size) {
+    static pthread_mutex_t g_convert_lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&g_convert_lock);
+    int _ret = egl_convert_impl(ctx, dma_buf_fd, width, height, stride, fourcc,
+                                modifier, out_data, out_size);
+    pthread_mutex_unlock(&g_convert_lock);
+    return _ret;
+}
+
+static int egl_convert_impl(drmtap_ctx *ctx,
                             int dma_buf_fd,
                             uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t fourcc,
@@ -399,8 +448,16 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
         return -EINVAL;
     }
 
-    /* Lazy-init EGL state (thread-local) */
-    static egl_state_t state = {0};
+    /* Lazy-init EGL state, one per thread.
+     *
+     * MUST be thread-local: an EGL/GL context is current in at most one thread,
+     * and each capture (e.g. one per monitor in a multi-display session) runs on
+     * its own thread. A single process-global state shared across threads would
+     * race on the FBO/program/textures and thrash the context (via the
+     * owner-thread re-creation below), producing corrupted/garbage frames under
+     * concurrent capture. Thread-local storage gives each capture thread its own
+     * EGL context over the shared EGLDisplay — the correct EGL threading model. */
+    static _Thread_local egl_state_t state = {0};
     int ret;
 
     drmtap_debug_log(NULL, "EGL: state.initialized=%d", state.initialized);

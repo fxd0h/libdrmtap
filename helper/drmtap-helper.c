@@ -92,6 +92,7 @@ struct drm_virtgpu_3d_wait {
 
 /* Protocol commands */
 #define CMD_GRAB 0x01
+#define CMD_GET_CURSOR 0x02
 #define CMD_QUIT 0xFF
 
 /* Command structure for CMD_GRAB (client to helper) */
@@ -246,6 +247,115 @@ static int send_error(int sock, const char *reason) {
     struct grab_metadata meta = {0};  /* data_size=0 signals error */
     send_all(sock, &meta, sizeof(meta));
     perror("cap_set_proc failed"); return -1;
+}
+
+/* Cursor metadata sent before the cursor pixels — must match
+ * helper_cursor_wire_t in the library (drmtap_internal.h). */
+struct cursor_metadata {
+    int32_t  x, y;          /* cursor plane CRTC_X/CRTC_Y (top-left on screen) */
+    int32_t  hot_x, hot_y;  /* hotspot offset within the cursor image */
+    uint32_t width, height; /* cursor image size */
+    uint32_t visible;       /* 1 = a hardware cursor plane is active on the CRTC */
+    uint32_t data_size;     /* width*height*4 if visible, else 0 */
+};
+
+// Read a single uint64 plane/object property by name (0 if absent).
+static uint64_t get_prop_val(int drm_fd, uint32_t obj_id, uint32_t obj_type,
+                             const char *name) {
+    uint64_t val = 0;
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(drm_fd, obj_id, obj_type);
+    if (!props) return 0;
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        drmModePropertyRes *prop = drmModeGetProperty(drm_fd, props->props[i]);
+        if (prop) {
+            if (strcmp(prop->name, name) == 0) {
+                val = props->prop_values[i];
+                drmModeFreeProperty(prop);
+                break;
+            }
+            drmModeFreeProperty(prop);
+        }
+    }
+    drmModeFreeObjectProperties(props);
+    return val;
+}
+
+/* ========================================================================= */
+/* Cursor capture (privileged) — reads the hardware cursor plane             */
+/* ========================================================================= */
+
+// Capture the hardware cursor plane bound to target_crtc and send its image.
+// If no cursor plane is active on that CRTC (cursor idle / on another monitor),
+// sends metadata with visible=0 and no pixels.
+static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
+    struct cursor_metadata meta = {0};
+
+    drmModePlaneRes *planes = drmModeGetPlaneResources(drm_fd);
+    if (!planes) {
+        send_all(sock, &meta, sizeof(meta));
+        return 0;
+    }
+
+    uint32_t cursor_fb = 0, cursor_plane = 0;
+    for (uint32_t i = 0; i < planes->count_planes; i++) {
+        drmModePlane *plane = drmModeGetPlane(drm_fd, planes->planes[i]);
+        if (!plane) continue;
+        if (plane->fb_id != 0 &&
+            (target_crtc == 0 || plane->crtc_id == target_crtc)) {
+            if (get_prop_val(drm_fd, plane->plane_id, DRM_MODE_OBJECT_PLANE,
+                             "type") == DRM_PLANE_TYPE_CURSOR) {
+                cursor_fb = plane->fb_id;
+                cursor_plane = plane->plane_id;
+                drmModeFreePlane(plane);
+                break;
+            }
+        }
+        drmModeFreePlane(plane);
+    }
+    drmModeFreePlaneResources(planes);
+
+    if (cursor_fb == 0) {
+        send_all(sock, &meta, sizeof(meta));  /* visible=0 */
+        return 0;
+    }
+
+    meta.x = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "CRTC_X");
+    meta.y = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "CRTC_Y");
+    meta.hot_x = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "HOTSPOT_X");
+    meta.hot_y = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "HOTSPOT_Y");
+
+    drmModeFB2 *fb2 = drmModeGetFB2(drm_fd, cursor_fb);
+    if (!fb2 || fb2->handles[0] == 0) {
+        if (fb2) drmModeFreeFB2(fb2);
+        send_all(sock, &meta, sizeof(meta));  /* visible=0 */
+        return 0;
+    }
+    meta.width = fb2->width;
+    meta.height = fb2->height;
+
+    int prime_fd = -1;
+    void *mapped = MAP_FAILED;
+    size_t size = (size_t)fb2->width * fb2->height * 4;
+    if (drmPrimeHandleToFD(drm_fd, fb2->handles[0], O_RDONLY | O_CLOEXEC,
+                           &prime_fd) == 0 && prime_fd >= 0) {
+        mapped = mmap(NULL, size, PROT_READ, MAP_SHARED, prime_fd, 0);
+    }
+    drmModeFreeFB2(fb2);
+
+    if (mapped == MAP_FAILED) {
+        if (prime_fd >= 0) close(prime_fd);
+        send_all(sock, &meta, sizeof(meta));  /* visible=0 (couldn't read) */
+        return 0;
+    }
+
+    meta.visible = 1;
+    meta.data_size = (uint32_t)size;
+    send_all(sock, &meta, sizeof(meta));
+    send_all(sock, mapped, size);
+    munmap(mapped, size);
+    close(prime_fd);
+    return 0;
 }
 
 /* ========================================================================= */
@@ -527,6 +637,10 @@ int main(int argc, char *argv[]) {
         switch (cmd) {
             case CMD_GRAB:
                 grab_and_send(sock, drm_fd, hcmd.crtc_id, is_virtio);
+                break;
+
+            case CMD_GET_CURSOR:
+                cursor_and_send(sock, drm_fd, hcmd.crtc_id);
                 break;
 
             case CMD_QUIT:

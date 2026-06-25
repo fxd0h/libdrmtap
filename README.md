@@ -250,6 +250,10 @@ libdrmtap uses a **dual-path** approach for GPU-tiled framebuffers:
 
 **Wayland positioning**: For interactive desktop sharing where user consent matters, use Wayland protocols (`ext-image-capture-source-v1`, PipeWire). For unattended system-level capture (servers, kiosks, CI, remote management, **login screens**), use libdrmtap. We complement Wayland — we don't compete with it.
 
+## Known Limitations
+
+- **Cursor hotspot on bare-metal drivers.** The cursor *image* and *position* are captured exactly, but the cursor **hotspot** (the click point inside the image, e.g. an arrow's tip or an I-beam's centre) is only exposed by the DRM cursor plane on virtualized drivers (`virtio-gpu`, `vmwgfx`), via the `HOTSPOT_X`/`HOTSPOT_Y` plane properties. On bare-metal drivers (i915, amdgpu, nvidia) those properties are absent, and compositors such as Mutter move the cursor with the legacy `drmModeMoveCursor` API — which never updates the atomic `CRTC_X`/`CRTC_Y` plane position either. As a result, on bare metal the hotspot must be *approximated* from the captured image (e.g. the top-left of an arrow's bounding box, the centre of a tall/narrow I-beam), so the rendered cursor can land a few pixels off the true click point. `drmtap_cursor_info.hot_x`/`hot_y` carry the real hotspot when the driver provides it and `0` otherwise; consumers should fall back to an image-derived estimate in that case. The exact position *is* available from the kernel's `/sys/kernel/debug/dri/N/state` debug dump, but that interface is root-only, not a stable ABI, and driver-specific — so it is unsuitable for production use.
+
 ## Why This Exists
 
 This project was born from a real frustration: trying to get remote desktop working on Ubuntu Wayland. After RustDesk broke packages, Sunshine failed on KMS, and every solution required "just switch to X11" — we decided to solve it at the root.

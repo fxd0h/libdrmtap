@@ -163,6 +163,17 @@ static void test_cursor_capture(void) {
            cursor.x, cursor.y, cursor.hot_x, cursor.hot_y,
            cursor.width, cursor.height, cursor.visible);
 
+    if (!cursor.visible) {
+        /* Valid state: a cursor plane exists but currently has no framebuffer
+         * attached. This is normal when the compositor uses a software cursor
+         * (composited into the primary plane, so it is already in the captured
+         * frame) or when the pointer is on a different CRTC. Not an error. */
+        printf("  SKIP: cursor plane has no fb (software cursor or pointer on another CRTC)\n");
+        drmtap_cursor_release(ctx, &cursor);
+        drmtap_close(ctx);
+        return;
+    }
+
     TEST_ASSERT(cursor.width > 0);
     TEST_ASSERT(cursor.height > 0);
 

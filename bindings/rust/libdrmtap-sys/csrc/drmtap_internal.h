@@ -93,6 +93,13 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
 // Debug log to stderr (only when ctx->debug is set)
 void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
 
+/* Command structure for CMD_GRAB (client to helper) */
+typedef struct {
+    uint8_t  cmd;           /* CMD_GRAB (0x01) */
+    uint8_t  _pad1[3];      /* align to 4 bytes */
+    uint32_t crtc_id;       /* target CRTC id (0 = auto-select first active) */
+} helper_cmd_grab_t;
+
 /* Result from helper v2 grab — helper reads pixels and sends via socket.
  * Must match struct grab_metadata in drmtap-helper.c */
 /* Flags for helper_grab_result_t.flags */
@@ -125,6 +132,20 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx);
 
 int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
                         void *pixel_buf, size_t buf_size);
+
+/* Cursor metadata received from the helper — must match struct cursor_metadata
+ * in drmtap-helper.c. */
+typedef struct {
+    int32_t  x, y;
+    int32_t  hot_x, hot_y;
+    uint32_t width, height;
+    uint32_t visible;
+    uint32_t data_size;
+} helper_cursor_wire_t;
+
+/* Capture the cursor via the privileged helper (used when the library process
+ * lacks CAP_SYS_ADMIN). Populates `cursor` (allocates cursor->pixels). */
+int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 
 /* GPU backend: generic linear (gpu_generic.c) */
 int drmtap_gpu_generic_match(const char *driver);

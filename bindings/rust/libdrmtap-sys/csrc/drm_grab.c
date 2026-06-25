@@ -119,38 +119,26 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
         return 0;
     }
 
-    /* Get CRTC index for pipe matching */
-    uint32_t crtc_index = 0;
-    drmModeRes *res = drmModeGetResources(ctx->drm_fd);
-    if (res) {
-        for (int i = 0; i < res->count_crtcs; i++) {
-            if (res->crtcs[i] == target_crtc) {
-                crtc_index = (uint32_t)i;
-                break;
-            }
-        }
-        drmModeFreeResources(res);
-    }
-
-    /* Search for primary plane on the target CRTC */
+    /* Search for the plane currently bound to the target CRTC */
     for (uint32_t i = 0; i < planes->count_planes; i++) {
         drmModePlane *plane = drmModeGetPlane(ctx->drm_fd, planes->planes[i]);
         if (!plane) {
             continue;
         }
 
-        /* Check if this plane can drive our CRTC */
-        if (!(plane->possible_crtcs & (1u << crtc_index))) {
+        /* Skip planes not bound to our target CRTC */
+        if (plane->crtc_id != target_crtc) {
             drmModeFreePlane(plane);
             continue;
         }
 
-        /* Check if it has an active framebuffer */
+        int is_primary = 0;
+
+        /* Check if it has an active framebuffer (it should if bound, but let's be safe) */
         if (plane->fb_id != 0) {
             /* Check plane type to prefer PRIMARY */
             drmModeObjectProperties *props = drmModeObjectGetProperties(
                 ctx->drm_fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
-            int is_primary = 0;
 
             if (props) {
                 for (uint32_t p = 0; p < props->count_props; p++) {
@@ -169,15 +157,16 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
 
             if (is_primary || result == 0) {
                 result = plane->plane_id;
-                drmtap_debug_log(ctx, "found plane %u (fb=%u, %s)",
-                                 plane->plane_id, plane->fb_id,
+                drmtap_debug_log(ctx, "find_primary_plane: matched plane=%u to crtc=%u (fb=%u, %s)",
+                                 plane->plane_id, target_crtc, plane->fb_id,
                                  is_primary ? "PRIMARY" : "overlay");
             }
         }
 
         drmModeFreePlane(plane);
-        if (result != 0 && planes->count_planes > 1) {
-            /* Keep looking for PRIMARY even if we found an overlay */
+        if (result != 0 && is_primary) {
+            /* Found the primary plane for this CRTC, we are done */
+            break;
         }
     }
 

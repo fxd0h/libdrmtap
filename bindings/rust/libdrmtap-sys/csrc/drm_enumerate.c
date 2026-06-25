@@ -104,10 +104,12 @@ int drmtap_list_displays(drmtap_ctx *ctx, drmtap_display *out, int max_count) {
             snprintf(d->name, sizeof(d->name), "%s-%u",
                      type_name, conn->connector_type_id);
 
-            /* Get current mode from the CRTC */
+            /* Get current mode and offsets from the CRTC */
             if (crtc_id) {
                 drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, crtc_id);
                 if (crtc) {
+                    d->x = crtc->x;
+                    d->y = crtc->y;
                     if (crtc->mode_valid) {
                         d->width = crtc->mode.hdisplay;
                         d->height = crtc->mode.vdisplay;

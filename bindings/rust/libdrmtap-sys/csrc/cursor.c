@@ -135,6 +135,14 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
 
     memset(cursor, 0, sizeof(*cursor));
 
+    /* When running unprivileged via the helper, the cursor plane's framebuffer
+     * can only be read with CAP_SYS_ADMIN. Delegate the whole capture to the
+     * helper (it locates the cursor plane for ctx->crtc_id and reads the image).
+     * A live helper_fd means we are in that unprivileged-with-helper mode. */
+    if (ctx->helper_fd >= 0) {
+        return drmtap_helper_get_cursor(ctx, cursor);
+    }
+
     uint32_t cursor_plane_id = find_cursor_plane(ctx);
     if (cursor_plane_id == 0) {
         return -ENOENT;  /* No cursor plane */
@@ -177,8 +185,9 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     /* Get cursor framebuffer info */
     drmModeFB2 *fb2 = drmModeGetFB2(ctx->drm_fd, plane->fb_id);
     if (!fb2) {
+        /* No direct privilege to read the cursor framebuffer — go via helper. */
         drmModeFreePlane(plane);
-        return -EACCES;  /* Likely needs CAP_SYS_ADMIN */
+        return drmtap_helper_get_cursor(ctx, cursor);
     }
 
     cursor->width = fb2->width;
@@ -207,6 +216,13 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
 
     drmModeFreeFB2(fb2);
     drmModeFreePlane(plane);
+
+    /* If the framebuffer existed but its handle wasn't readable (handles[0]==0,
+     * i.e. we lack CAP_SYS_ADMIN), we have a visible cursor but no pixels — read
+     * it through the privileged helper instead. */
+    if (cursor->visible && cursor->pixels == NULL) {
+        return drmtap_helper_get_cursor(ctx, cursor);
+    }
 
     drmtap_debug_log(ctx, "cursor: %ux%u at (%d,%d) hotspot=(%d,%d) %s",
                      cursor->width, cursor->height,

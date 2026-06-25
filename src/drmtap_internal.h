@@ -133,6 +133,20 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx);
 int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
                         void *pixel_buf, size_t buf_size);
 
+/* Cursor metadata received from the helper — must match struct cursor_metadata
+ * in drmtap-helper.c. */
+typedef struct {
+    int32_t  x, y;
+    int32_t  hot_x, hot_y;
+    uint32_t width, height;
+    uint32_t visible;
+    uint32_t data_size;
+} helper_cursor_wire_t;
+
+/* Capture the cursor via the privileged helper (used when the library process
+ * lacks CAP_SYS_ADMIN). Populates `cursor` (allocates cursor->pixels). */
+int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
+
 /* GPU backend: generic linear (gpu_generic.c) */
 int drmtap_gpu_generic_match(const char *driver);
 int drmtap_gpu_generic_process(drmtap_ctx *ctx, void *data,
