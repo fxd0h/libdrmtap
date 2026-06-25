@@ -25,9 +25,11 @@
  *   CMD_QUIT (0xFF): Clean exit
  *
  * Security:
- *   - Validates socket fd on startup
- *   - Drops all caps except CAP_SYS_ADMIN (if libcap available)
- *   - Installs seccomp filter (if libseccomp available)
+ *   - Validates socket fd on startup (refuses to run if not spawned by the lib)
+ *   - Restricts the opened device to a path that canonicalizes under /dev/dri/
+ *   - Sets PR_SET_NO_NEW_PRIVS
+ *   - Drops all caps except CAP_SYS_ADMIN via libcap (hard-fail if unavailable)
+ *   - Installs a default-KILL seccomp allowlist (hard-fail if unavailable)
  *   - Sets FD_CLOEXEC on all opened fds
  */
 
@@ -44,6 +46,8 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/un.h>
+#include <sys/prctl.h>
+#include <limits.h>
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -204,6 +208,9 @@ static int install_seccomp(void) {
         SCMP_SYS(fcntl),
         SCMP_SYS(exit_group), SCMP_SYS(exit),
         SCMP_SYS(rt_sigreturn),
+        SCMP_SYS(clock_gettime), /* used once per frame; normally vDSO, but
+                                    allow the real syscall so a vDSO fallback
+                                    cannot trip the default KILL action */
     };
 
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
@@ -555,6 +562,18 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 /* Main event loop                                                           */
 /* ========================================================================= */
 
+/* Restrict the device this CAP_SYS_ADMIN process will open to the /dev/dri
+ * directory. Canonicalize with realpath() so symlinks/.. cannot escape the
+ * allowlist, and reject anything that does not resolve under /dev/dri/.
+ * Returns 1 if allowed and writes the canonical path into `resolved`
+ * (PATH_MAX bytes). */
+static int device_path_allowed(const char *path, char *resolved) {
+    if (!realpath(path, resolved)) {
+        return 0;
+    }
+    return strncmp(resolved, "/dev/dri/", 9) == 0;
+}
+
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -581,15 +600,41 @@ int main(int argc, char *argv[]) {
         device = env_dev;
     }
 
+    /* The device path is attacker-influenceable (argv / DRM_DEVICE) and we run
+     * with CAP_SYS_ADMIN, so refuse anything that does not canonicalize under
+     * /dev/dri/ before we open it. */
+    char resolved_device[PATH_MAX];
+    if (!device_path_allowed(device, resolved_device)) {
+        fprintf(stderr,
+                "drmtap-helper: refusing device path '%s' "
+                "(must resolve under /dev/dri/)\n", device);
+        return 1;
+    }
+    device = resolved_device;
+
+    /* No new privileges (must be set before seccomp; also blocks gaining privs
+     * via any exec). */
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        perror("drmtap-helper: prctl(PR_SET_NO_NEW_PRIVS)");
+        return 1;
+    }
+
+    /* The whole point of this helper is to run privileged but confined. If we
+     * cannot establish the confinement, refuse to serve rather than run with
+     * CAP_SYS_ADMIN unconfined. */
 #ifdef HAVE_LIBCAP
     if (drop_caps() != 0) {
-        fprintf(stderr, "drmtap-helper: warning: failed to drop caps\n");
+        fprintf(stderr,
+                "drmtap-helper: refusing to run: could not drop capabilities\n");
+        return 1;
     }
 #endif
 
 #ifdef HAVE_SECCOMP
     if (install_seccomp() != 0) {
-        fprintf(stderr, "drmtap-helper: warning: failed to install seccomp\n");
+        fprintf(stderr,
+                "drmtap-helper: refusing to run: could not install seccomp filter\n");
+        return 1;
     }
 #endif
 
