@@ -10,15 +10,16 @@
 //   - Works on kiosk and embedded systems
 //   - Handles GPU tiling (Intel, AMD, Nvidia) automatically
 //
-// Integration (tested on Ubuntu 24.04 with virtio_gpu):
+// Integration (tested on Ubuntu 24.04; uses the static libdrmtap-sys crate):
 //
-//   1. Install libdrmtap:
-//        sudo apt install libdrmtap-dev
-//      Or build from source:
-//        meson setup build && meson compile -C build && sudo meson install -C build
+//   1. Add the crate to libs/scrap/Cargo.toml:
+//        libdrmtap-sys = { version = "0.4.1", optional = true }
+//      It statically embeds and compiles the C sources and builds the
+//      drmtap-helper binary — no system libdrmtap install, no meson install,
+//      no apt package, and no rustc-link-search.
 //
-//   2. Copy this directory to: libs/scrap/src/common/drm.rs
-//      (Just the recorder.rs content — it's a single self-contained file)
+//   2. Copy recorder.rs to: libs/scrap/src/common/drm.rs
+//      (a single self-contained file)
 //
 //   3. In libs/scrap/src/common/mod.rs, inside the cfg_if! block:
 //        mod drm;
@@ -29,12 +30,10 @@
 //        - In Display::all(), try drm::Display::all() first
 //        - Add DRM arms to all match blocks
 //
-//   5. In libs/scrap/build.rs (inside the unix branch):
-//        println!("cargo:rustc-link-search=/usr/local/lib/x86_64-linux-gnu");
+//   5. Build:
+//        cargo build --features drm
 //
-//   6. Build:
-//        cargo build
-//
-// The recorder.rs file contains the complete backend implementation.
+// The recorder.rs file contains the backend implementation. The canonical,
+// current version is in the upstream PR rustdesk/rustdesk#15420.
 
 pub mod recorder;

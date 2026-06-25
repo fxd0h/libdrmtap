@@ -13,20 +13,25 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
 
 ## ⚠️ Testing Status
 
-> **This crate has been tested on `virtio_gpu` (QEMU/Parallels VMs) only.**
+> **Verified working:** `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake
+> (`i915`, dual 3840x2160, EGL CCS detiling of the tiled/compressed framebuffer),
+> and NVIDIA Jetson Orin Nano (`nvidia-drm`, Wayland).
 >
-> Intel (i915/xe), AMD (amdgpu), and Nvidia (nvidia-drm) GPU backends are
-> implemented but **not yet validated on real hardware**. The EGL-based
-> universal detiling backend compiles and is ready for testing.
+> The AMD (`amdgpu`) backend is implemented but **not yet validated on real
+> hardware**.
 >
-> If you test on real hardware, please report results via
+> If you test AMD or other configurations, please report results via
 > [GitHub Issues](https://github.com/fxd0h/libdrmtap/issues).
 
 ## Requirements
 
-- Linux with DRM/KMS support
-- `libdrmtap` installed (`meson install -C build`)
-- `pkg-config` to locate the library
+- Linux with DRM/KMS support (kernel 4.20+ for the tiled/modifier framebuffer
+  path, i.e. Ubuntu 20.04+; linear/VM framebuffers work on older kernels)
+- A C compiler — the embedded C sources are compiled statically at build time.
+  There is **no** system `libdrmtap` install, `meson install`, or `pkg-config`
+  lookup of a shared library.
+- `libdrm` development headers (located via `pkg-config`), plus EGL, OpenGL ES 2,
+  libseccomp, and libcap (and their `-dev` headers) — the crate links these.
 
 ## Usage
 

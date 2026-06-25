@@ -14,7 +14,8 @@ docs/
     ├── 04_gpu_and_testing.md ← GPU differences + vkms testing
     ├── 05_api_and_architecture.md ← API, architecture, concurrency, damage tracking
     ├── 06_github_issues_analysis.md ← real issues/PRs analysis + gotcha checklist
-    └── 07_potential_adopters.md ← who would integrate libdrmtap (243K+ ⭐)
+    ├── 07_potential_adopters.md ← who would integrate libdrmtap (243K+ ⭐)
+    └── 08_reframe_egl_analysis.md ← ReFrame analysis: EGL GPU-universal detiling
 ```
 
 ## Key Topics by Document
@@ -31,6 +32,7 @@ docs/
 | Security model | `../SECURITY.md` (project root) |
 | Gotcha checklist | `06_github_issues_analysis.md` → bottom of file |
 | Integration targets | `07_potential_adopters.md` |
+| EGL GPU-universal detiling | `08_reframe_egl_analysis.md` |
 
 ## Conventions
 

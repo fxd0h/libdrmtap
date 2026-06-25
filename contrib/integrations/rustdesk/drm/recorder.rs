@@ -1,91 +1,27 @@
 // DRM/KMS capture backend for RustDesk — powered by libdrmtap
 //
 // This file is a self-contained capture backend that integrates directly
-// into RustDesk's scrap crate. It uses inline FFI bindings to libdrmtap,
-// requiring only the C library to be installed (no Rust crate dependency).
+// into RustDesk's scrap crate via the `libdrmtap-sys` crate, which statically
+// embeds and compiles the C sources and builds the privilege helper — no
+// system libdrmtap install, no shared `.so` linkage.
 //
 // Tested: Ubuntu 24.04 VM (virtio_gpu), RustDesk screenshot example
 // captured 1920x1017 @ BGRA, 7,810,560 bytes — pixel-perfect.
 //
 // To use in RustDesk:
-//   Place this file at libs/scrap/src/common/drm.rs
-//   See mod.rs in this directory for full integration instructions.
+//   Add `libdrmtap-sys = { version = "0.4.1", optional = true }` to
+//   libs/scrap/Cargo.toml, place this file at libs/scrap/src/common/drm.rs,
+//   and see mod.rs in this directory for the wiring. The canonical, current
+//   backend is in the upstream PR rustdesk/rustdesk#15420.
 
 use crate::{Frame, TraitCapturer};
 use std::{io, time::{Duration, Instant}};
 use super::x11::PixelBuffer;
 
-// FFI bindings to libdrmtap — struct layouts must match drmtap.h exactly!
-mod ffi {
-    use std::os::raw::{c_char, c_int, c_void};
-
-    // drmtap.h: typedef struct { const char *device_path; uint32_t crtc_id;
-    //           const char *helper_path; int debug; } drmtap_config;
-    #[repr(C)]
-    pub struct drmtap_config {
-        pub device_path: *const c_char,
-        pub crtc_id: u32,
-        pub helper_path: *const c_char,
-        pub debug: c_int,
-    }
-
-    // drmtap.h: typedef struct { uint32_t crtc_id; uint32_t connector_id;
-    //           char name[32]; uint32_t width, height, refresh_hz; int active;
-    //           } drmtap_display;
-    #[repr(C)]
-    #[derive(Clone)]
-    #[allow(non_camel_case_types)]
-    pub struct drmtap_display {
-        pub crtc_id: u32,
-        pub connector_id: u32,
-        pub name: [c_char; 32],
-        pub width: u32,
-        pub height: u32,
-        pub refresh_hz: u32,
-        pub active: c_int,
-    }
-
-    // drmtap.h: typedef struct { void *data; int dma_buf_fd;
-    //           uint32_t width, height, stride, format; uint64_t modifier;
-    //           void *_priv; } drmtap_frame_info;
-    #[repr(C)]
-    #[allow(non_camel_case_types)]
-    pub struct drmtap_frame_info {
-        pub data: *mut c_void,
-        pub dma_buf_fd: c_int,
-        pub width: u32,
-        pub height: u32,
-        pub stride: u32,
-        pub format: u32,
-        pub modifier: u64,
-        pub fb_id: u32,
-        pub _priv: *mut c_void,
-    }
-
-    #[allow(non_camel_case_types)]
-    pub type drmtap_ctx = c_void;
-
-    #[link(name = "drmtap")]
-    extern "C" {
-        pub fn drmtap_open(cfg: *const drmtap_config) -> *mut drmtap_ctx;
-        pub fn drmtap_close(ctx: *mut drmtap_ctx);
-        pub fn drmtap_list_displays(
-            ctx: *mut drmtap_ctx,
-            displays: *mut drmtap_display,
-            max: c_int,
-        ) -> c_int;
-        pub fn drmtap_grab_mapped(
-            ctx: *mut drmtap_ctx,
-            frame: *mut drmtap_frame_info,
-        ) -> c_int;
-        pub fn drmtap_frame_release(
-            ctx: *mut drmtap_ctx,
-            frame: *mut drmtap_frame_info,
-        );
-        pub fn drmtap_error(ctx: *const drmtap_ctx) -> *const c_char;
-        pub fn drmtap_gpu_driver(ctx: *const drmtap_ctx) -> *const c_char;
-    }
-}
+// FFI bindings come from the libdrmtap-sys crate (the embedded C sources are
+// compiled statically by its build script). The crate exposes the same
+// drmtap_* symbols and struct layouts as drmtap.h.
+use libdrmtap_sys as ffi;
 
 pub struct Display {
     name: String,

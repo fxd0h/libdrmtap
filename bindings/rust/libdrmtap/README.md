@@ -6,11 +6,23 @@ Capture the screen at the kernel level: login screens, Wayland, headless — no 
 
 ## ⚠️ Testing Status
 
-> **Tested on `virtio_gpu` (QEMU/Parallels VMs) only.**
+> **Verified on `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`,
+> dual 4K, EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`,
+> Wayland).**
 >
-> Intel, AMD, and Nvidia backends are implemented but not yet validated
-> on real hardware. If you test on real GPUs, please
+> The AMD (`amdgpu`) backend is implemented but not yet validated on real
+> hardware. If you test it, please
 > [report results](https://github.com/fxd0h/libdrmtap/issues).
+
+## Installation
+
+```toml
+[dependencies]
+libdrmtap = "0.3"
+```
+
+This pulls in `libdrmtap-sys` 0.4.1, which embeds and statically compiles the C
+sources (and the privilege helper) — no system `libdrmtap` install needed.
 
 ## Example
 
@@ -51,9 +63,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Requirements
 
-- Linux with DRM/KMS
-- `libdrmtap` C library installed
-- For unprivileged capture: `drmtap-helper` with `cap_sys_admin+ep`
+- Linux with DRM/KMS (kernel 4.20+ for the tiled/modifier path; linear/VM
+  framebuffers work on older kernels)
+- A C compiler — `libdrmtap-sys` compiles its embedded C sources statically, so
+  there is no system `libdrmtap` install required
+- For unprivileged capture: `drmtap-helper` with `cap_sys_admin+ep` (the helper
+  binary is built by `libdrmtap-sys`)
 
 ## License
 

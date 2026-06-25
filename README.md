@@ -50,8 +50,12 @@ int main() {
 
 ```toml
 [dependencies]
-libdrmtap = "0.1"
+libdrmtap = "0.3"
 ```
+
+> This pulls in `libdrmtap-sys` 0.4.1, which embeds and statically compiles the
+> C sources (and the privilege helper). No system `libdrmtap` install, no
+> `meson install`, no `pkg-config` to find a shared library.
 
 ```rust
 use libdrmtap::DrmTap;
@@ -84,11 +88,20 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Rust bindings ([crates.io](https://crates.io/crates/libdrmtap)) | ✅ Published |
 | MIT License | ✅ |
 
-> ⚠️ **Testing status**: Capture pipeline verified on `virtio_gpu` (QEMU/Parallels VMs).
-> Intel, AMD, and Nvidia GPU backends are implemented but await real hardware testing.
+> ⚠️ **Testing status**: Capture pipeline verified on `virtio_gpu` (QEMU/Parallels VMs),
+> Intel Meteor Lake (`i915`, dual 3840x2160, EGL CCS detiling), and NVIDIA Jetson
+> Orin Nano (`nvidia-drm`, Wayland). The AMD (`amdgpu`) backend is implemented but
+> still awaits real hardware testing.
 > If you test on real hardware, please [report results](https://github.com/fxd0h/libdrmtap/issues).
 
 ## Quick Start
+
+### Requirements
+
+The tiled/compressed framebuffer path (Intel/AMD/Nvidia modifiers) uses the DRM
+`GETFB2` ioctl, which needs **Linux 4.20+** — i.e. Ubuntu 20.04 (5.4), 22.04
+(5.15), 24.04 (6.8) or newer. Linear framebuffers (virtio-gpu and similar VMs)
+work on older kernels.
 
 ### Build
 
@@ -147,12 +160,16 @@ sudo ./build/vnc_server
 
 ### RustDesk integration
 
-A drop-in capture backend for [RustDesk](https://github.com/rustdesk/rustdesk)
-is available in `contrib/integrations/rustdesk/`. **Tested and verified** on
-Ubuntu 24.04 with `cargo build` (zero errors, binary links `libdrmtap.so.0`).
+libdrmtap is being upstreamed into [RustDesk](https://github.com/rustdesk/rustdesk)
+via [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420).
+The integration adds a `drm` backend to `scrap` that depends on the
+[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) 0.4.1 crate, which
+embeds and statically compiles the C sources (and the privilege helper) — so
+there is no system `libdrmtap` install and no dynamic `libdrmtap.so` linkage.
 
-See [`contrib/integrations/rustdesk/README.md`](contrib/integrations/rustdesk/README.md)
-for integration instructions.
+A self-contained example of the same crate-based backend lives in
+[`contrib/integrations/rustdesk/`](contrib/integrations/rustdesk/README.md).
+**Tested and verified** on Ubuntu 24.04 with `cargo build` (zero errors).
 
 ### Run tests
 
