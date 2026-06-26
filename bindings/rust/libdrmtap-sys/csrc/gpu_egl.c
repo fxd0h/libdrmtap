@@ -109,15 +109,60 @@ static const char *vertex_shader_src =
     "    v_texcoord = in_texcoord;\n"
     "}\n";
 
+/* The fragment shader samples the external (DRM) texture and outputs BGRA. When
+ * the scanout is HDR10 (u_hdr == 1) it additionally tone-maps the PQ/BT.2020
+ * sample to SDR/BT.709 8-bit — the same pipeline as the CPU path in
+ * pixel_convert.c (PQ EOTF -> gamut -> highlight soft-knee -> sRGB), done on the
+ * GPU so tiled HDR scanouts (which can't be CPU-deswizzled) are handled too. */
 static const char *fragment_shader_src =
     "#version 100\n"
     "#extension GL_OES_EGL_image_external : require\n"
     "precision highp float;\n"
     "uniform samplerExternalOES image;\n"
+    "uniform int u_hdr;\n"
+    "uniform float u_peak_n;\n"
     "varying vec2 v_texcoord;\n"
+    "float pq_eotf(float e) {\n"
+    "    float m1 = 0.1593017578125;\n"
+    "    float m2 = 78.84375;\n"
+    "    float c1 = 0.8359375;\n"
+    "    float c2 = 18.8515625;\n"
+    "    float c3 = 18.6875;\n"
+    "    float ep = pow(max(e, 0.0), 1.0 / m2);\n"
+    "    float num = max(ep - c1, 0.0);\n"
+    "    float den = max(c2 - c3 * ep, 1e-6);\n"
+    "    return 10000.0 * pow(num / den, 1.0 / m1);\n"
+    "}\n"
+    "float knee_curve(float x, float p) {\n"
+    "    float knee = 0.9;\n"
+    "    if (x <= knee) return x;\n"
+    "    float pk = max(p, knee + 0.5);\n"
+    "    if (x >= pk) return 1.0;\n"
+    "    float t = (x - knee) / (pk - knee);\n"
+    "    return knee + (1.0 - knee) * (t * (2.0 - t));\n"
+    "}\n"
+    "float srgb_oetf(float c) {\n"
+    "    c = clamp(c, 0.0, 1.0);\n"
+    "    if (c <= 0.0031308) return 12.92 * c;\n"
+    "    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;\n"
+    "}\n"
     "void main() {\n"
     "    vec4 c = texture2D(image, v_texcoord);\n"
-    "    gl_FragColor = vec4(c.b, c.g, c.r, c.a);\n"
+    "    if (u_hdr == 1) {\n"
+    "        float R = pq_eotf(c.r);\n"
+    "        float G = pq_eotf(c.g);\n"
+    "        float B = pq_eotf(c.b);\n"
+    "        float r =  1.660491 * R - 0.587641 * G - 0.072850 * B;\n"
+    "        float g = -0.124550 * R + 1.132900 * G - 0.008349 * B;\n"
+    "        float b = -0.018151 * R - 0.100579 * G + 1.118730 * B;\n"
+    "        float w = 203.0;\n"
+    "        r = srgb_oetf(knee_curve(max(r, 0.0) / w, u_peak_n));\n"
+    "        g = srgb_oetf(knee_curve(max(g, 0.0) / w, u_peak_n));\n"
+    "        b = srgb_oetf(knee_curve(max(b, 0.0) / w, u_peak_n));\n"
+    "        gl_FragColor = vec4(b, g, r, c.a);\n"
+    "    } else {\n"
+    "        gl_FragColor = vec4(c.b, c.g, c.r, c.a);\n"
+    "    }\n"
     "}\n";
 
 /* ========================================================================= */
@@ -675,6 +720,21 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     /* Render fullscreen quad: external texture → linear FBO */
     glUseProgram(state.program);
     glUniform1i(glGetUniformLocation(state.program, "image"), 0);
+
+    /* HDR10 scanout: tone-map PQ/BT.2020 -> SDR in the shader. eotf/peak come
+     * from the connector HDR_OUTPUT_METADATA (carried on ctx). */
+    int hdr_on = (ctx && ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
+    glUniform1i(glGetUniformLocation(state.program, "u_hdr"), hdr_on);
+    {
+        uint32_t mn = (ctx && ctx->cur_hdr_max_nits > 0)
+                          ? ctx->cur_hdr_max_nits : 1000u;
+        glUniform1f(glGetUniformLocation(state.program, "u_peak_n"),
+                    (float)((double)mn / 203.0));
+    }
+    if (hdr_on) {
+        drmtap_debug_log(ctx, "EGL: HDR tone-map in shader (peak=%u nits)",
+                         ctx->cur_hdr_max_nits);
+    }
 
     /* Fullscreen triangle strip.
      * Use standard unflipped coordinates. The EGL texture is natively

@@ -82,7 +82,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU fallback |
 | AMD (amdgpu) deswizzle | ✅ CPU fallback |
 | Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU fallback |
-| HDR / 10-bit (AR30/XR30, P010) | 🚧 In progress ([#16](https://github.com/fxd0h/libdrmtap/issues/16)) |
+| HDR10 → SDR tone-map (AR30/XR30, XR48/AR48) | ✅ Implemented (P010 not yet) |
 | Frame differencing (dirty rects) | ✅ Implemented |
 | Thread-safe (`pthread_mutex`) | ✅ Implemented |
 | Coexists with NoMachine/Sunshine | ✅ By design |
@@ -101,11 +101,16 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > GPU-side EGL readback on the guest. Solved technically; production integration is
 > in progress ([#15](https://github.com/fxd0h/libdrmtap/issues/15)).
 >
-> 🚧 **HDR is not ready.** HDR10 / 10-bit scanouts are **not** properly supported
-> yet ([#16](https://github.com/fxd0h/libdrmtap/issues/16)). The AR30/XR30 path
-> currently keeps only the top 8 of 10 bits with no PQ decode, BT.2020, or
-> tone-mapping, so capturing an HDR display today yields a washed-out, SDR-ish
-> result. `XR48`/`AR48` (16-bit) and `P010` (10-bit YUV) are not handled.
+> **HDR10 capture is tone-mapped to SDR.** When the connector advertises an HDR
+> scanout (`HDR_OUTPUT_METADATA`, PQ), libdrmtap applies the real transfer —
+> PQ (SMPTE ST 2084) decode, BT.2020 → BT.709 gamut, a highlight-preserving
+> tone-map, sRGB — and returns correct 8-bit SDR, instead of the washed-out
+> top-8-of-10-bits result. This matches what consumers like RustDesk expect
+> (their pipeline is 8-bit SDR; on other platforms the OS/compositor tone-maps
+> before they see it — on DRM we do it). Covers `AR30`/`XR30` (10-bit) and
+> `XR48`/`AR48` (16-bit), in both the CPU and the EGL (tiled) paths.
+> `P010` (10-bit YUV, used for overlay-video planes rather than the primary
+> desktop scanout) is not handled.
 
 ## Quick Start
 
