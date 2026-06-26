@@ -119,6 +119,9 @@ typedef struct {
  * Must match struct grab_metadata in drmtap-helper.c */
 /* Flags for helper_grab_result_t.flags */
 #define HELPER_FLAG_HAS_DMABUF  0x01  /* DMA-BUF fd follows via SCM_RIGHTS */
+#define HELPER_FLAG_VIRGL       0x02  /* DMA-BUF is a host-rendered virgl scanout:
+                                       * read it back on the GPU (EGL), not via a
+                                       * CPU mmap (which is black for it) */
 
 typedef struct {
     uint32_t width;

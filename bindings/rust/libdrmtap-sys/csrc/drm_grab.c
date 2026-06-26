@@ -59,7 +59,7 @@
 
 /* Forward declaration */
 static int gpu_auto_process(drmtap_ctx *ctx, void *data,
-                            drmtap_frame_info *frame);
+                            drmtap_frame_info *frame, int force_egl);
 
 /* ========================================================================= */
 /* Internal state for a captured frame (stored in frame->_priv)              */
@@ -449,6 +449,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
              * calloc'd (mapped=MAP_FAILED, prime_fd=-1), so there is no prior
              * mapping to release here. */
             int dmabuf_fd = hresult.dmabuf_fd;
+            /* virgl scanout: the helper exported the fd but a CPU mmap of it is
+             * black (host-side resource), so force the GPU EGL readback path. */
+            int is_virgl = (hresult.wire.flags & HELPER_FLAG_VIRGL) != 0;
+            int pret = 0;  /* gpu_auto_process result (propagated for virgl) */
             size_t mmap_size = (size_t)frame->stride * frame->height;
 
             /* mmap the DMA-BUF in the parent */
@@ -478,7 +482,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                     dmabuf_fd, mmap_size);
 
                 if (do_mmap) {
-                    gpu_auto_process(ctx, mapped, frame);
+                    pret = gpu_auto_process(ctx, mapped, frame, is_virgl);
                 }
             } else {
                 /* mmap failed — still have the fd for EGL zero-copy */
@@ -493,11 +497,18 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                     "for EGL zero-copy", dmabuf_fd);
 
                 if (do_mmap) {
-                    gpu_auto_process(ctx, NULL, frame);
+                    pret = gpu_auto_process(ctx, NULL, frame, is_virgl);
                 }
             }
 
             drmModeFreeFB2(fb2);
+            /* For a virgl frame the GPU readback is the only way to get real
+             * pixels; if it failed, propagate the error rather than handing the
+             * caller a black frame. Non-virgl frames keep the prior best-effort
+             * behaviour (pret is ignored). */
+            if (is_virgl && pret != 0) {
+                return pret;
+            }
             return 0;
         }
 
@@ -522,7 +533,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         frame->_priv = priv;
 
         if (do_mmap) {
-            gpu_auto_process(ctx, pixel_buf, frame);
+            gpu_auto_process(ctx, pixel_buf, frame, 0);
         }
 
         drmModeFreeFB2(fb2);
@@ -599,7 +610,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             drmtap_debug_log(ctx, "mapped %zu bytes at %p", size, mapped);
 
             /* Auto-deswizzle tiled framebuffers + format convert */
-            gpu_auto_process(ctx, mapped, frame);
+            gpu_auto_process(ctx, mapped, frame, 0);
         }
     }
 
@@ -622,13 +633,18 @@ cleanup:
 /* ========================================================================= */
 
 static int gpu_auto_process(drmtap_ctx *ctx, void *data,
-                            drmtap_frame_info *frame) {
-    if (!data) return 0;
+                            drmtap_frame_info *frame, int force_egl) {
+    /* force_egl is set for a virgl scanout: the DMA-BUF holds host-rendered
+     * pixels that a CPU mmap reads back black, so we must go down the EGL path
+     * (which imports the fd on the GPU) even though there is no usable `data`
+     * and the modifier is linear. */
+    if (!data && !force_egl) return 0;
 
     uint64_t modifier = frame->modifier;
 
-    /* Linear framebuffer: no deswizzle needed */
-    if (modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0) {
+    /* Linear framebuffer: no deswizzle needed (unless a virgl readback is
+     * forced — see force_egl above). */
+    if ((modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0) && !force_egl) {
         return 0;
     }
 
@@ -707,6 +723,16 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
         drmtap_debug_log(ctx, "auto-process: EGL failed (%d), trying CPU", ret);
     }
 #endif
+
+    /* A virgl readback was forced but the EGL path did not produce pixels (EGL
+     * unavailable, or the import/readback failed). The only CPU-visible copy of
+     * a host-rendered scanout is black, so fail closed instead of returning a
+     * bogus frame as success. */
+    if (force_egl) {
+        drmtap_set_error(ctx,
+            "virgl scanout needs GPU EGL readback, which is unavailable or failed");
+        return -ENOTSUP;
+    }
 
     /* --- CPU deswizzle for classic tiling (buffer already allocated above) --- */
     const char *driver = ctx->driver_name;
@@ -963,7 +989,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         frame->_priv = NULL;
 
         /* Auto-deswizzle tiled framebuffers + format convert */
-        gpu_auto_process(ctx, frame->data, frame);
+        gpu_auto_process(ctx, frame->data, frame, 0);
 
         return 0;   /* new frame */
     }
@@ -1058,7 +1084,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     frame->_priv = NULL;
 
     /* Auto-deswizzle tiled framebuffers + format convert */
-    gpu_auto_process(ctx, frame->data, frame);
+    gpu_auto_process(ctx, frame->data, frame, 0);
 
     return 0;   /* new frame */
 }

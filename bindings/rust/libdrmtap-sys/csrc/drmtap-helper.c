@@ -126,6 +126,10 @@ struct helper_cmd_grab {
 
 /* Metadata sent before pixel data — must match helper_grab_result_t in library */
 #define FLAG_HAS_DMABUF 0x01
+/* The exported DMA-BUF is a host-rendered virgl scanout: the parent must read it
+ * back on the GPU (EGL import + glReadPixels), not via a CPU mmap, which comes
+ * back black for a host-side resource. */
+#define FLAG_VIRGL      0x02
 
 struct grab_metadata {
     uint32_t width;
@@ -522,27 +526,33 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 #endif
     }
 
-    /* Decide once whether this virtio-gpu is "plain" (no virgl 3D). Without 3D
-     * the scanout is a 2D dumb buffer in guest RAM that we can export as a
-     * DMA-BUF and let the parent map directly (zero-copy), instead of copying
-     * the whole framebuffer over the socket every frame. With virgl the scanout
-     * can be a host-side 3D resource, so we keep the proven copy-after-transfer
-     * path there until the zero-copy path is validated on virgl. */
-    static int virtio_plain = -1;
-    if (is_virtio && virtio_plain < 0) {
-        virtio_plain = 0;
+    /* Decide once how to serve this virtio-gpu scanout. Two sub-cases:
+     *   - plain (no virgl 3D): the scanout is a 2D dumb buffer in guest RAM, so
+     *     we export it as a DMA-BUF and let the parent map it directly
+     *     (zero-copy), instead of copying the whole framebuffer every frame.
+     *   - virgl (3D features present): the scanout can be a host-side 3D
+     *     resource that a guest CPU mmap reads back black. We still export the
+     *     DMA-BUF, but tag it FLAG_VIRGL so the parent reads it back on the GPU
+     *     (EGL import + glReadPixels), which sees the real host-rendered pixels.
+     * If detection is unavailable, virtio_virgl stays 0; that just means "treat
+     * like plain" (export + direct map), which is correct for 2D virtio. */
+    static int virtio_detected = 0;  /* 1 once we've probed for 3D features */
+    static int virtio_virgl = 0;     /* 1 = confirmed virgl (3D features present) */
+    if (is_virtio && !virtio_detected) {
+        virtio_detected = 1;
 #if defined(__linux__) && defined(DRM_IOCTL_VIRTGPU_GETPARAM)
         uint64_t features = 0;
         struct drm_virtgpu_getparam gp = {
             .param = VIRTGPU_PARAM_3D_FEATURES,
             .value = (uint64_t)(uintptr_t)&features,
         };
-        if (drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_GETPARAM, &gp) == 0 && features == 0) {
-            virtio_plain = 1;
+        if (drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_GETPARAM, &gp) == 0 && features != 0) {
+            virtio_virgl = 1;
         }
         fprintf(stderr, "drmtap-helper: virtio 3D features=%llu -> %s path\n",
                 (unsigned long long)features,
-                virtio_plain ? "zero-copy DMA-BUF" : "pixel-copy");
+                virtio_virgl ? "DMA-BUF + GPU readback (virgl)"
+                             : "zero-copy DMA-BUF");
 #endif
     }
 
@@ -576,23 +586,33 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
      *     buffers on some drivers are not dumb-mappable (nvidia-drm on Tegra
      *     fails MODE_MAP_DUMB with "Failed to lookup gem object"), so requiring a
      *     dumb map first would break capture there even though the export works.
-     *   - plain virtio-gpu (guest-rendered, no host transfer): a linear scanout
-     *     in guest RAM the parent maps directly (no detile). Replaces the V2
-     *     pixel copy, dropping the helper's per-frame CPU cost.
+     *   - virtio-gpu (plain or virgl): a linear scanout the parent either maps
+     *     directly (plain, guest RAM) or reads back on the GPU (virgl, tagged
+     *     FLAG_VIRGL — a CPU mmap of a host-side resource is black). Replaces the
+     *     V2 pixel copy, dropping the helper's per-frame CPU cost.
      * Either way, if the export fails we fall through to the dumb-map pixel path. */
-    if ((meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio)
-        || (is_virtio && virtio_plain)) {
+    if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ || is_virtio) {
         int prime_fd = -1;
         int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
                                             DRM_CLOEXEC | DRM_RDWR, &prime_fd);
         if (prime_ret == 0 && prime_fd >= 0) {
             meta.flags = FLAG_HAS_DMABUF;
+            if (virtio_virgl) {
+                meta.flags |= FLAG_VIRGL;  /* parent must GPU-read it back */
+            }
             meta.data_size = 0;  /* no pixel data follows */
             ret = send_fd(sock, prime_fd, &meta, sizeof(meta));
             close(prime_fd);
             return ret;
         }
-        /* Export failed — fall through to the dumb-map pixel path. */
+        /* Export failed. For a confirmed virgl scanout the dumb-map fallback
+         * below would read back black (host-side resource), so fail closed
+         * rather than send a bogus all-black frame. */
+        if (virtio_virgl) {
+            return send_error(sock, "virgl DMA-BUF export failed "
+                                    "(no usable CPU readback for a host scanout)");
+        }
+        /* Otherwise fall through to the dumb-map pixel path. */
         fprintf(stderr,
             "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
             prime_ret);
