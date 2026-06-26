@@ -100,11 +100,12 @@ glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
 
 ### Shipped approach: EGL-primary with CPU fallback
 
-```
+```text
 drmtap_grab_mapped()
     ├── modifier == LINEAR → gpu_generic.c (mmap, zero deps)
     ├── DMA-BUF + EGL available → gpu_egl.c (universal, GPU-accelerated) ← primary
-    └── EGL unavailable → gpu_{intel,amd,nvidia}.c (CPU fallback)
+    ├── EGL unavailable, classic tiling → gpu_{intel,amd,nvidia}.c (CPU fallback)
+    └── EGL unavailable, CCS/compressed → -ENOTSUP (raw pixels passed through as linear)
 ```
 
 The CPU fallback only covers classic tiling. CCS-compressed modifiers cannot be

@@ -94,13 +94,13 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64, Wayland).
 > The AMD (`amdgpu`) backend is implemented but still awaits real hardware testing.
 > If you test on real hardware, please [report results](https://github.com/fxd0h/libdrmtap/issues).
-
+>
 > ℹ️ **virgl note**: Plain `virtio-gpu` is captured with a direct linear map. A
 > host-rendered **virgl** (3D) scanout cannot be read by the guest CPU (it comes
 > out black, and `TRANSFER_FROM_HOST` does not bring it back); it is captured via
 > GPU-side EGL readback on the guest. Solved technically; production integration is
 > in progress ([#15](https://github.com/fxd0h/libdrmtap/issues/15)).
-
+>
 > 🚧 **HDR is not ready.** HDR10 / 10-bit scanouts are **not** properly supported
 > yet ([#16](https://github.com/fxd0h/libdrmtap/issues/16)). The AR30/XR30 path
 > currently keeps only the top 8 of 10 bits with no PQ decode, BT.2020, or
