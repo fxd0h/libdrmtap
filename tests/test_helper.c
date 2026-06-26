@@ -34,7 +34,10 @@
 
 static void test_version(void) {
     int v = drmtap_version();
-    TEST_ASSERT(v == 0x000100);  /* 0.1.0 */
+    /* Track the header macros so this never goes stale on a version bump. */
+    TEST_ASSERT(v == ((DRMTAP_VERSION_MAJOR << 16) |
+                      (DRMTAP_VERSION_MINOR << 8) |
+                      DRMTAP_VERSION_PATCH));
     printf("  PASS: version = 0x%06x\n", v);
 }
 

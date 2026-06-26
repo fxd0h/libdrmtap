@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('libdrmtap', 'c',
-    version: '0.1.0',
+    version: '0.4.3',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -10,6 +10,33 @@ project('libdrmtap', 'c',
         'b_ndebug=if-release',
     ],
 )
+
+# ============================================================================
+# Version coherence
+# ============================================================================
+# The library version lives in three places: this project() version, the
+# DRMTAP_VERSION_* macros in include/drmtap.h (returned by drmtap_version()),
+# and the Rust crate version (cross-checked by the version unit tests). Parse
+# the public header here and fail configuration early if it drifts from the
+# project version, so the sources can never silently diverge.
+fs = import('fs')
+_ver_parts = {'MAJOR': '', 'MINOR': '', 'PATCH': ''}
+foreach _line : fs.read('include/drmtap.h').split('\n')
+    _tokens = _line.split()
+    if _tokens.length() >= 3 and _tokens[0] == '#define'
+        foreach _part : ['MAJOR', 'MINOR', 'PATCH']
+            if _tokens[1] == 'DRMTAP_VERSION_' + _part
+                _ver_parts += {_part: _tokens[2]}
+            endif
+        endforeach
+    endif
+endforeach
+_hdr_version = '@0@.@1@.@2@'.format(
+    _ver_parts['MAJOR'], _ver_parts['MINOR'], _ver_parts['PATCH'])
+assert(_hdr_version == meson.project_version(),
+    'version mismatch: meson project version is ' + meson.project_version() +
+    ' but DRMTAP_VERSION_* in include/drmtap.h is ' + _hdr_version +
+    ' — keep them equal')
 
 # ============================================================================
 # Dependencies
