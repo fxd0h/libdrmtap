@@ -70,30 +70,42 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 
 | Feature | Status |
 |---|---|
-| VMs (virtio_gpu, Parallels, QEMU) | ✅ Verified (57 FPS) |
+| VMs (virtio_gpu, Parallels, QEMU) | ✅ Verified |
 | Multi-monitor (per-CRTC) | ✅ Implemented |
-| Zero-copy DMA-BUF output | ✅ Implemented |
+| Zero-copy DMA-BUF output (V3) | ✅ Implemented |
 | Mapped RGBA output | ✅ Verified |
-| Continuous capture (polling loop) | ✅ 57 FPS verified |
+| Continuous capture (polling loop) | ✅ Verified |
 | Cursor capture (position + pixels) | ✅ Verified |
 | Privileged helper (setcap, no root) | ✅ Verified |
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
-| EGL/GLES2 GPU-universal detiling | ✅ Implemented (all GPUs) |
+| EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |
 | Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU fallback |
 | AMD (amdgpu) deswizzle | ✅ CPU fallback |
 | Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU fallback |
-| HDR / 10-bit (AR30/XR30 → XRGB) | ✅ Implemented |
+| HDR / 10-bit (AR30/XR30, P010) | 🚧 In progress ([#16](https://github.com/fxd0h/libdrmtap/issues/16)) |
 | Frame differencing (dirty rects) | ✅ Implemented |
 | Thread-safe (`pthread_mutex`) | ✅ Implemented |
 | Coexists with NoMachine/Sunshine | ✅ By design |
 | Rust bindings ([crates.io](https://crates.io/crates/libdrmtap)) | ✅ Published |
 | MIT License | ✅ |
 
-> ⚠️ **Testing status**: Capture pipeline verified on `virtio_gpu` (QEMU/Parallels VMs),
-> Intel Meteor Lake (`i915`, dual 3840x2160, EGL CCS detiling), and NVIDIA Jetson
-> Orin Nano (`nvidia-drm`, Wayland). The AMD (`amdgpu`) backend is implemented but
-> still awaits real hardware testing.
+> ⚠️ **Testing status**: Capture pipeline verified with the V3 zero-copy path on
+> `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`, dual 3840x2160,
+> EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64, Wayland).
+> The AMD (`amdgpu`) backend is implemented but still awaits real hardware testing.
 > If you test on real hardware, please [report results](https://github.com/fxd0h/libdrmtap/issues).
+>
+> ℹ️ **virgl note**: Plain `virtio-gpu` is captured with a direct linear map. A
+> host-rendered **virgl** (3D) scanout cannot be read by the guest CPU (it comes
+> out black, and `TRANSFER_FROM_HOST` does not bring it back); it is captured via
+> GPU-side EGL readback on the guest. Solved technically; production integration is
+> in progress ([#15](https://github.com/fxd0h/libdrmtap/issues/15)).
+>
+> 🚧 **HDR is not ready.** HDR10 / 10-bit scanouts are **not** properly supported
+> yet ([#16](https://github.com/fxd0h/libdrmtap/issues/16)). The AR30/XR30 path
+> currently keeps only the top 8 of 10 bits with no PQ decode, BT.2020, or
+> tone-mapping, so capturing an HDR display today yields a washed-out, SDR-ish
+> result. `XR48`/`AR48` (16-bit) and `P010` (10-bit YUV) are not handled.
 
 ## Quick Start
 
@@ -184,20 +196,24 @@ sudo DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
 
 ## Performance
 
-Benchmarks measured with `drmtap_grab_mapped_fast()` (persistent-mmap with always-transfer mode):
+CPU cost of the capture loop, measured as a share of one core (approximate; on
+Ubuntu 24.04). The library figure is the full grab + detile loop in the consuming
+process; the helper figure is the privileged `drmtap-helper` process.
 
-| Environment | Resolution | Capture Time | FPS | Method |
+| Environment | Resolution | Capture CPU (1 core) | Helper CPU | Path |
 |---|---|---|---|---|
-| QEMU/Parallels virtio-gpu | 1920×1080 | **5–8 ms** | **30 fps** | TRANSFER_FROM_HOST + mmap cache |
-| Same-frame fast path | any | **< 0.1 ms** | N/A | Cached mmap, no ioctl |
+| Intel Meteor Lake (`i915`) | dual 3840×2160 @ 60 | **~16%** | ~0.4% | V3 zero-copy, EGL CCS detile |
+| NVIDIA Jetson Orin Nano (`nvidia-drm`) | 1920×1080 | **~11%** | ~0.4% | V3 zero-copy, EGL detile |
+| Plain virtio-gpu VM | typical desktop | **~1.2%** | ~0.7% | V3 zero-copy, direct linear map |
+
+> Plain virtio dropped from **~14%** on the old V2 copy path to **~1.2%** once V3
+> stopped copying full frames across the socket.
 
 **How it works:**
-- **4-slot mmap cache** — GEM handles, prime fds, and mmap pointers persist across calls. No allocation per frame.
-- **Always-transfer mode** — Issues `VIRTGPU_TRANSFER_FROM_HOST` every call for guaranteed-fresh data (like X11's `XShmGetImage`).
-- **fb_id tracking** — Detects compositor page flips and reuses the correct cached slot.
-- **Zero-copy path** — When using DMA-BUF output, the application can import the buffer directly (e.g., as an EGLImage or Vulkan texture).
-
-> These numbers were measured during real RustDesk remote desktop sessions at 1920×1080 on Ubuntu 24.04 (GNOME/Wayland) inside a Parallels VM.
+- **V3 zero-copy (default)** — the privileged helper exports the active scanout as a DMA-BUF and passes the fd back over a `socketpair` via `SCM_RIGHTS`. No full-frame copy crosses the socket.
+- **V2 copy (fallback)** — when DMA-BUF export is not possible, the helper dumb-maps the framebuffer and copies the pixels over the socket.
+- **GPU EGL readback** — tiled/compressed scanouts (Intel CCS, AMD, Nvidia block-linear, vendor modifiers) and host-rendered virgl buffers are imported as an `EGLImage` and read back linear with `glReadPixels`. Plain linear framebuffers are mapped directly with no detile.
+- **Zero-copy DMA-BUF output** — consumers that take the DMA-BUF output can import the buffer directly (e.g. as an `EGLImage` or Vulkan texture) and skip the readback entirely.
 
 ## Why Not Use Existing Tools?
 
@@ -235,11 +251,11 @@ Every existing project is either a complete application, a plugin, or PipeWire-b
 │                                                 │
 │  ┌────────────┐  ┌────────────────────────────┐ │
 │  │ gpu_backend│  │ privilege_helper           │ │
-│  │ EGL: All   │  │ Auto-spawn drmtap-helper   │ │
-│  │ Intel: CPU │  │ SCM_RIGHTS fd passing      │ │
-│  │ AMD:  CPU  │  │ cap_drop + seccomp         │ │
-│  │ NV:   CPU  │  │ Transparent to user        │ │
-│  │ VM: Linear │  │                            │ │
+│  │ EGL: all   │  │ Auto-spawn drmtap-helper   │ │
+│  │ (primary)  │  │ DMA-BUF fd via SCM_RIGHTS  │ │
+│  │ CPU detile │  │ V3 zero-copy / V2 copy     │ │
+│  │ (fallback) │  │ cap_drop + seccomp         │ │
+│  │ VM: linear │  │ Transparent to user        │ │
 │  └────────────┘  └────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
 │           libdrm / kernel DRM/KMS               │
@@ -292,7 +308,9 @@ The entire research phase — analyzing codebases, reading GitHub issues, studyi
 
 We believe AI agents are a force multiplier for open source. A single developer with AI assistance can produce research and code that would traditionally require a team. This project is proof of that thesis.
 
-**See [`docs/AI_DEVELOPMENT.md`](docs/AI_DEVELOPMENT.md) for our full AI development philosophy and methodology.**
+Agent-written code is held to the **same bar as any other contribution**: every PR is reviewed by [CodeRabbit](https://coderabbit.ai), scanned by CodeQL and `cppcheck`, and validated under ASan/UBSan in CI — and the privileged helper survived a serious security audit during RustDesk upstreaming. The hardening was *praised*, not waved through. AI speeds up the work; it does not lower the standard.
+
+**See [`docs/AI_DEVELOPMENT.md`](docs/AI_DEVELOPMENT.md) for our full AI development philosophy, and [`AGENTS.md`](AGENTS.md) for the working agreement we hand to coding agents.**
 
 ## Documentation
 

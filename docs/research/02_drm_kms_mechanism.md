@@ -1,7 +1,11 @@
 # DRM/KMS Mechanism — Deep Technical Analysis
 
-> **Date**: 2026-03-14  
+> **Date**: 2026-03-14 (research snapshot; the **Key Findings** section has been reconciled with the shipped design)  
 > **Sources**: kmsvnc/drm.c, kms-screenshot.c, FFmpeg/kmsgrab.c, kernel DRM documentation
+
+> **Reading note**: the pipelines below survey how *other* tools tackle DRM/KMS capture. What
+> libdrmtap actually built — a GPU-universal **EGL/GLES2** detile backend plus a zero-copy
+> **DMA-BUF + `SCM_RIGHTS` (V3)** helper protocol — is summarised in **Key Findings for libdrmtap**.
 
 ---
 
@@ -98,7 +102,9 @@ Modern framebuffers are NOT stored in linear memory. Each GPU uses its own tilin
 | Nvidia | Custom | 16×128 tiles | Manual CPU deswizzle |
 | VM (vmwgfx, virtio) | DRM_FORMAT_MOD_LINEAR | Linear ✅ | Direct, no conversion |
 
-**Key for libdrmtap**: detect the modifier and choose the correct pipeline automatically.
+**Key for libdrmtap**: detect the modifier and route accordingly — linear buffers are mapped
+directly, and everything tiled/compressed (Intel X/Y + CCS, AMD, Nvidia block-linear) goes through
+the GPU-universal **EGL** detile path. No per-vendor VAAPI pipeline is required (see Key Findings #1).
 
 ### Manual Deswizzle (kmsvnc)
 ```c
@@ -126,6 +132,13 @@ for (int y = 0; y < height; y++) {
 | RGB565 | 16 | Compact RGB | Embedded |
 | ABGR16161616 | 64 | HDR 16-bit/channel | HDR displays |
 | XR30 / AR30 | 30 | 10-bit per channel | HDR |
+
+> ⚠️ **HDR is not properly handled yet.** Today the AR30/XR30 (10-bit) path is a naïve bit-shift
+> that keeps the top 8 of 10 bits — no PQ decode, no BT.2020 primaries, no tone-mapping — so an HDR
+> scanout comes out as a washed-out, truncated SDR frame. ABGR16161616 (16-bit) and 10-bit YUV (P010)
+> are not handled, and `HDR_OUTPUT_METADATA` / connector `Colorspace` are not read. Proper HDR10 is an
+> open item ([#16](https://github.com/fxd0h/libdrmtap/issues/16)) and the current top blocker — do not
+> treat any 10-bit/HDR row above as "supported".
 
 ---
 
@@ -163,8 +176,14 @@ kmsvnc implements this logic:
 
 ## Key Findings for libdrmtap
 
-### 1. We need VAAPI as the primary backend
-kmsvnc and gpu-screen-recorder use it for Intel and AMD. It's what solves tiling without CPU overhead. Without VAAPI, we need manual deswizzle which is slow.
+### 1. A GPU-universal EGL/GLES2 detile backend, not VAAPI
+kmsvnc and gpu-screen-recorder reach for VAAPI on Intel and AMD, but VAAPI is vendor-specific and
+pulls in libva. libdrmtap instead uses a single EGL/OpenGL ES backend (`src/gpu_egl.c`): import the
+DMA-BUF as an `EGLImage` (carrying the DRM format modifier), draw it, and `glReadPixels` into a linear
+RGBA buffer. Because `EGL_EXT_image_dma_buf_import` delegates the de-tiling to the driver, one code
+path covers Intel X/Y-tiled + CCS, AMD, and Nvidia block-linear. EGL is the **primary** detile path; a
+CPU deswizzle survives only as a fallback for a few formats. Plain linear framebuffers (virtio-gpu,
+simple VMs) are mapped directly with no detile at all.
 
 ### 2. drmModeGetFB2 is mandatory (not GetFB)
 The old `drmModeGetFB()` API doesn't return pixel format or modifier. Without that info we can't decode the buffer. `drmModeGetFB2()` requires kernel ≥ 4.11.
@@ -172,11 +191,32 @@ The old `drmModeGetFB()` API doesn't return pixel format or modifier. Without th
 ### 3. DMA_BUF_IOCTL_SYNC is essential for continuous capture
 Without sync, concurrent reads with the GPU produce tearing or corrupted data.
 
-### 4. Intel CCS is a documented special case
-kmsvnc explicitly documents it: "please set INTEL_DEBUG=noccs". It's a gotcha our library must detect and report to the user.
+### 4. Intel CCS is handled by the EGL path, not a dead end
+kmsvnc punts on CCS ("please set `INTEL_DEBUG=noccs`"). Because the EGL importer hands the DRM modifier
+straight to the driver, libdrmtap de-tiles CCS framebuffers transparently — verified on dual-4K Meteor
+Lake (i915) over the V3 zero-copy path. So CCS is a handled case, not a gotcha we have to report back to
+the user.
 
 ### 5. The privileged helper pattern is the industry standard
 gpu-screen-recorder uses a separate helper process (`kms_server`) with `cap_sys_admin`. This allows the main app to run without privileges. Our library should follow this pattern.
 
 ### 6. kms-screenshot shows the alternative AMDGPU approach
 Uses SDMA copy (AMD's DMA engine) to copy from tiled framebuffer to a linear buffer, without VAAPI. More complex but doesn't require libva. Also has Vulkan as an alternative.
+
+### 7. Zero-copy via DMA-BUF + SCM_RIGHTS (the V3 path)
+The privileged helper does not stream pixels over the socket. It exports the scanout as a DMA-BUF and
+passes the **fd** to the unprivileged library via `SCM_RIGHTS` (the "V3" protocol); the library then
+maps or EGL-imports it directly, so no full frame ever crosses the socket. A **V2** fallback (dumb-map
+the framebuffer and copy the bytes over the socket) is kept for cases where DMA-BUF export is not
+possible. On plain virtio the V3 path costs ≈1.2% of one core total (helper ≈0.7%), versus ≈14% on the
+old V2 copy path.
+
+### 8. virgl (host-rendered virtio 3D) needs GPU readback, not TRANSFER_FROM_HOST
+A virgl scanout is rendered on the **host** GPU; a guest CPU `mmap` of the DMA-BUF comes back black, and
+`VIRTGPU_TRANSFER_FROM_HOST` does **not** bring those pixels back into guest memory either. The working
+answer is the same EGL backend: import the buffer on the guest GPU and `glReadPixels`, which reads the
+host-rendered pixels correctly. This is solved technically; productionizing it is tracked in
+[#15](https://github.com/fxd0h/libdrmtap/issues/15). Plain (non-virgl) virtio is unaffected: there the
+host-rendered pixels do land in guest RAM, so the library's direct path pulls them with
+`TRANSFER_FROM_HOST` + a dumb map, while the helper path serves the same scanout zero-copy over V3. It is
+specifically the virgl 3D scanout that `TRANSFER_FROM_HOST` cannot recover.

@@ -45,9 +45,19 @@ A single developer researching all of this manually would take weeks. With AI ag
 5. **API design** — Compared 3 implementations, proposed unified API
 6. **Architecture** — Designed the helper binary pattern based on gpu-screen-recorder's approach
 
-### Implementation Phase (ongoing)
-- Guided by the research findings
-- Every architectural decision traceable to a specific finding in the research docs
+### Implementation Phase (shipped — C library 0.4.3)
+Guided by the research findings, the agents went on to build the library itself. Every architectural decision is traceable to a specific finding in the research docs. What shipped:
+
+- 🧩 **Two-process architecture** — an unprivileged library plus a small privileged `drmtap-helper` that carries `CAP_SYS_ADMIN` via file capabilities and talks over a socketpair, so the main process never has to run privileged.
+- 🖥️ **Multi-GPU capture** — Intel i915/xe (verified on dual-4K Meteor Lake), Nvidia `nvidia-drm` including Tegra/Jetson (verified on Orin Nano, aarch64), and virtio-gpu (verified). AMD `amdgpu` is implemented but not yet verified on real hardware, with a generic linear fallback for other drivers.
+- ⚡ **V3 and V2 capture paths** — V3 (default) exports the scanout as a DMA-BUF and passes the fd over `SCM_RIGHTS` for zero-copy capture; V2 falls back to dumb-mapping and copying the pixels over the socket when DMA-BUF export isn't possible.
+- 🎨 **GPU-universal EGL detiling** (`gpu_egl.c`) — imports tiled/compressed framebuffers (Intel X/Y-tiled + CCS, AMD, Nvidia block-linear, vendor modifiers) as an EGLImage and uses GLES2 + `glReadPixels` to produce linear RGBA; a CPU deswizzle exists as a fallback for some formats. Plain linear framebuffers are mapped directly with no detile.
+- 🔒 **A hardened helper** — verifies it was spawned by the library and checks the peer uid via `SO_PEERCRED`, restricts the DRM device to a realpath under `/dev/dri/` opened `O_RDONLY`, sets `PR_SET_NO_NEW_PRIVS`, drops all capabilities except `CAP_SYS_ADMIN` (libcap), and installs a default-KILL seccomp allowlist (libseccomp) that deliberately forbids `open`/`openat`. Built with stack-protector-strong, FORTIFY, PIE and full RELRO.
+
+### What AI Is Working On Now (open issues)
+- 🌈 **HDR10 (#16)** — the current top blocker. The 10-bit AR30/XR30 path today just keeps the top 8 of 10 bits — no PQ decode, no BT.2020, no tone-mapping — so an HDR scanout comes out truncated and washed out. 16-bit and 10-bit YUV (P010) aren't handled and `HDR_OUTPUT_METADATA` isn't read yet. Proper HDR is in progress, **not** done.
+- 🪟 **virgl integration (#15)** — host-rendered virtio-gpu 3D scanouts can't be read by guest CPU mmap (they come out black). GPU-side EGL readback on the guest GPU solves it technically, but production integration is still open.
+- 🔗 **RustDesk integration** — a DRM capture backend for RustDesk's `scrap` (depending on `libdrmtap-sys`) to avoid the Wayland portal consent dialog. Upstream PR [`rustdesk/rustdesk#15420`](https://github.com/rustdesk/rustdesk/pull/15420) is under maintainer review — the security hardening was praised — but it is **not** merged yet.
 
 ## What AI Did NOT Do
 
@@ -70,7 +80,7 @@ If you use AI tools (Copilot, ChatGPT, Claude, Gemini, or others) to help with y
 
 > A single developer with AI agents can produce research and code that would traditionally require a team of specialists.
 
-This project is living proof of that thesis. The entire research corpus (7 documents, ~5000 lines of technical analysis) was produced by one human + AI agents in a single session.
+This project is living proof of that thesis. The entire research corpus (9 documents, ~1,900 lines of technical analysis) was produced by one human + AI agents, and the shipped 0.4.3 library grew directly out of it.
 
 We hope this inspires other open-source developers to embrace AI as a tool — not a replacement, but an amplifier of human capability.
 

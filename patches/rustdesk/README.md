@@ -31,4 +31,12 @@ cargo build --release
 ## Based on
 
 - RustDesk v1.4.6
-- libdrmtap (this repo, main branch)
+- libdrmtap (this repo, `main` branch) — `scrap` pins `libdrmtap-sys = "0.4.3"`
+
+## Upstream status
+
+These patches track upstream PR
+[rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420),
+which adds a DRM/KMS capture backend to `scrap` so RustDesk can capture
+Wayland sessions without the portal consent dialog. The PR is **under
+maintainer review** (in progress, not yet merged).

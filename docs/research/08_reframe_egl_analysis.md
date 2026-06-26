@@ -2,7 +2,8 @@
 
 > **Date**: 2026-03-14  
 > **Source**: [AlynxZhou/reframe](https://github.com/AlynxZhou/reframe) — 36 releases, C++, LGPL-3.0  
-> **Relevance**: Proves that a single EGL path handles ALL GPU tiling formats
+> **Relevance**: Shows that a single EGL import + `glReadPixels` path handles tiled and compressed scanout formats across GPU vendors (the Intel/AMD/Nvidia modifiers we tested), instead of a per-GPU CPU deswizzler  
+> **Status**: Shipped — this analysis became `src/gpu_egl.c`, the **primary** detile path in libdrmtap 0.4.3. The per-GPU CPU deswizzle backends were kept as a fallback.
 
 ---
 
@@ -81,7 +82,7 @@ glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
 
 ## Comparison: EGL Path vs Per-GPU CPU Deswizzle
 
-| | EGL path (ReFrame) | CPU deswizzle (our current backends) |
+| | EGL path (ReFrame → shipped as `gpu_egl.c`) | CPU deswizzle (our fallback backends) |
 |---|---|---|
 | **Code** | ~200 lines, universal | ~100 lines per GPU × 4 GPUs |
 | **GPU support** | Intel, AMD, Nvidia, RPi, any EGL | Each GPU manually coded |
@@ -89,20 +90,28 @@ glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
 | **Performance** | GPU-accelerated | CPU-bound |
 | **Dependencies** | libEGL, libGLESv2 | None |
 | **Headless/no-GPU** | ❌ Needs working EGL | ✅ Works with dumb mmap |
-| **Tested in prod** | Yes, 36 releases | Not tested on real hardware |
+| **Role in libdrmtap** | Primary detile path; verified on Intel i915/xe, Nvidia (incl. Tegra/Jetson), virtio-gpu | Fallback when EGL is unavailable; AMD path not yet verified on hardware |
 
 ---
 
 ## Strategy for libdrmtap
 
-### Recommended approach: dual path
+> **Update**: This is the path libdrmtap shipped. `gpu_egl.c` is now the **primary** detile route; the per-GPU CPU deswizzle backends remain as a fallback for environments without working EGL. Plain linear scanouts (virtio-gpu, simple VMs) skip detiling entirely and are mapped directly.
 
-```
+### Shipped approach: EGL-primary with CPU fallback
+
+```text
 drmtap_grab_mapped()
     ├── modifier == LINEAR → gpu_generic.c (mmap, zero deps)
-    ├── EGL available → gpu_egl.c (universal, GPU-accelerated)
-    └── EGL unavailable → gpu_{intel,amd,nvidia}.c (CPU fallback)
+    ├── DMA-BUF + EGL available → gpu_egl.c (universal, GPU-accelerated) ← primary
+    ├── EGL unavailable, classic tiling → gpu_{intel,amd,nvidia}.c (CPU fallback)
+    └── EGL unavailable, CCS/compressed → -ENOTSUP (raw pixels passed through as linear)
 ```
+
+The CPU fallback only covers classic tiling. CCS-compressed modifiers cannot be
+CPU-deswizzled (the dumb map still holds compressed bytes), so without the EGL
+path they return `-ENOTSUP` and the raw pixels are passed through as linear
+rather than silently corrupted — EGL is effectively required for CCS.
 
 ### Dependencies for EGL path
 

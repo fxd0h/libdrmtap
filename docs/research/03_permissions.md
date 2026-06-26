@@ -83,7 +83,8 @@ ioctl(prime_fd, DMA_BUF_IOCTL_SYNC, &sync);
 
 ### Typical installation
 ```bash
-# Option 1: setcap (recommended)
+# Option 1: setcap (recommended); install root:<group> mode 0750
+sudo install -o root -g <group> -m 0750 drmtap-helper /usr/local/bin/drmtap-helper
 sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper
 
 # Option 2: SUID root (less secure)
@@ -128,11 +129,11 @@ DrmCapture *drmcapture_open(DrmCaptureConfig *config);
 
 ### Helper binary: drmtap-helper
 
-Minimal binary that:
-1. Opens `/dev/dri/cardN`
-2. Enumerates planes/CRTCs
-3. Calls drmModeGetFB2 + drmPrimeHandleToFD
-4. Passes fd to parent process via SCM_RIGHTS
-5. Exits (or stays as daemon for continuous capture)
+Small privileged binary that:
+1. Verifies it was spawned by the library — it inherits the socketpair on fd 3 and checks the peer uid via `SO_PEERCRED`, refusing any other caller.
+2. Opens the DRM node `O_RDONLY`, restricted to a `realpath()` under `/dev/dri/` so symlinks/`..` cannot escape.
+3. Sets `PR_SET_NO_NEW_PRIVS`, drops every capability except `CAP_SYS_ADMIN` (libcap), then installs a default-KILL seccomp allowlist (libseccomp). `open`/`openat` are deliberately **not** on the allowlist — the device is opened once *before* the filter loads, so a compromised helper cannot open arbitrary files even while holding `CAP_SYS_ADMIN`.
+4. Enumerates planes/CRTCs and calls `drmModeGetFB2` + `drmPrimeHandleToFD`.
+5. Passes the DMA-BUF fd to the parent via `SCM_RIGHTS` (V3 zero-copy); falls back to dumb-mapping and copying pixels over the socket (V2) when DMA-BUF export is not possible.
 
-Estimated size: ~300-500 lines of C.
+Built with exploit-mitigation flags (stack-protector-strong, FORTIFY, PIE, full RELRO); the build hard-fails if libcap or libseccomp is missing. **Recommended packaging:** install `root:<group>` mode `0750` — a world-executable file-capability binary on a multi-user host is a real consideration, and is handled on the consumer (RustDesk) side rather than inside libdrmtap.

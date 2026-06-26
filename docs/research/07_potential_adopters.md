@@ -1,6 +1,6 @@
 # Potential Adopters and Integration Analysis
 
-> **Date**: 2026-03-14 (updated)  
+> **Date**: 2026-06-26 (updated)  
 > **Sources**: GitHub repos, issue trackers, user reports, web research
 
 ---
@@ -16,7 +16,7 @@
 
 ### Integration path for each:
 
-**RustDesk**: `cargo add libdrmtap` — both crates published on crates.io (`libdrmtap-sys` + `libdrmtap`). RustDesk adds it as optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`. Integration module already written in `contrib/integrations/rustdesk/`.
+**RustDesk**: `cargo add libdrmtap-sys` — both crates published on crates.io (`libdrmtap-sys` 0.4.3 + `libdrmtap` 0.3.2). RustDesk adds it as an optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`. **Now in review**: upstream PR [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) adds a `drm` capture backend to `scrap` on top of `libdrmtap-sys` and is under maintainer review (in progress — not merged). A self-contained reference backend also lives in `contrib/integrations/rustdesk/`.
 
 **Sunshine**: Replace internal KMS code with `#include <drmtap.h>`. They already use DMA-BUF → VAAPI pipeline, so `drmtap_grab()` (zero-copy) slots in directly.
 
@@ -86,6 +86,8 @@ Projects with capture problems that libdrmtap solves:
 | Rust safe wrapper | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Frame timestamps | ❌ | ✅ | ❌ | ✅ | ✅ |
 
+> **Note**: the "HDR metadata" row is *demand* — what Sunshine/OBS/FFmpeg would want, not what we ship. libdrmtap does **not** properly support HDR today: the 10-bit AR30/XR30 path just keeps the top 8 of 10 bits (no PQ decode, no BT.2020, no tone-mapping) and the EGL path outputs 8-bit, so an HDR scanout comes back truncated/SDR-ish. Proper HDR10 is an open item ([#16](https://github.com/fxd0h/libdrmtap/issues/16)) and the current top blocker.
+
 ---
 
 ## Outreach Strategy
@@ -93,7 +95,7 @@ Projects with capture problems that libdrmtap solves:
 | Step | Action | Status |
 |---|---|---|
 | 1 | Publish `libdrmtap-sys` + `libdrmtap` on crates.io | ✅ Done |
-| 2 | Test on real hardware (Intel, AMD, Nvidia, RPi) | 🔜 Pending hardware access |
-| 3 | Post to r/linux, r/rustdesk, r/selfhosted, Hacker News | 🔜 After hardware validation |
-| 4 | Open issues on RustDesk and Sunshine repos proposing integration | 🔜 After validation |
+| 2 | Test on real hardware (Intel, Nvidia, virtio-gpu, AMD) | 🟡 In progress — Intel i915 (dual 4K Meteor Lake), Nvidia Jetson Orin Nano, and virtio-gpu verified; AMD amdgpu implemented but still untested |
+| 3 | Post to r/linux, r/rustdesk, r/selfhosted, Hacker News | 🔜 After broader hardware validation |
+| 4 | Open issues / PRs on RustDesk and Sunshine repos proposing integration | 🟡 RustDesk PR [#15420](https://github.com/rustdesk/rustdesk/pull/15420) under maintainer review; Sunshine pending |
 | 5 | Create OBS plugin as proof of concept | 🔜 Future |

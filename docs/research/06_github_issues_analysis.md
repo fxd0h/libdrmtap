@@ -190,8 +190,10 @@ Impact: Silent process crash (out-of-bounds read in deswizzle)
 **Fix applied:** CCS modifiers (0x05-0x08) return `-ENOTSUP` from `drmtap_deswizzle()`.
 `gpu_auto_process()` handles this by setting modifier to LINEAR (raw pixels, garbled but no crash).
 
-**Proper fix needed:** V3 helper protocol must pass DMA-BUF fd via SCM_RIGHTS for
-non-linear modifiers, so the parent can use EGL GPU deswizzle.
+**Proper fix (shipped):** the V3 helper protocol now passes the DMA-BUF fd via SCM_RIGHTS for
+non-linear modifiers, so the parent uses the EGL/GLES2 GPU detile path (`gpu_egl.c`) instead of
+CPU deswizzle. V3 (zero-copy) is the default; the V2 pixel copy is the fallback when DMA-BUF
+export is not possible.
 
 ### 5. Multi-monitor and coordinate mapping
 ```
@@ -221,25 +223,25 @@ Solution: #ifdef guards + fallback paths
 
 From reading all these issues, the library MUST:
 
-- [ ] Support AR30/XR30 (10-bit) and AB48/ABGR16161616 (16-bit HDR)
-- [ ] Refresh `plane->fb_id` on every frame (never cache)
-- [ ] Detect `handles[0] == 0` and activate helper automatically
+- [ ] Support AR30/XR30 (10-bit) and XR48/AR48 (16-bit HDR) — **in progress (#16), current top blocker.** Today AR30/XR30 only land as a naive bit-shift (top 8 of 10 bits → washed-out SDR); XR48/AR48 16-bit and P010 10-bit YUV are unhandled, and there is no PQ decode / BT.2020 / tone-mapping and no reading of `HDR_OUTPUT_METADATA`. Capturing an HDR scanout is *not* correct yet — this is real HDR10, not "just another format"
+- [x] Refresh `plane->fb_id` on every frame (never cache) — done (`drm_grab.c` re-reads `drmModeGetPlane()` each frame)
+- [x] Detect `handles[0] == 0` and activate helper automatically — done (`drm_grab.c` falls back to the privileged helper on `handles[0] == 0` / `EACCES`)
 - [ ] Handle non-zero offsets in mmap (ARM SoCs)
 - [ ] Have fallback when VAAPI reports "not implemented"
 - [ ] Try multiple `/dev/dri/cardN` if the first has no active planes
 - [ ] Read `panel orientation` property from connector
 - [ ] Define minimum kernel (5.6+) and add `#ifndef` guards
-- [ ] Use MIT/BSD license (not GPL)
+- [x] Use MIT/BSD license (not GPL) — done (libdrmtap is MIT)
 - [ ] Handle reconnection when framebuffers are destroyed and recreated
-- [ ] Implement Prime pipeline (not GEM_FLINK) for vkms compatibility
+- [x] Implement Prime pipeline (not GEM_FLINK) for vkms compatibility — done (`drmPrimeHandleToFD`; vkms is used for CI-friendly synthetic scanout)
 - [ ] Document that NixOS/Flatpak need special configuration for the helper
 - [ ] Do NOT implement damage tracking — FB_DAMAGE_CLIPS is for writers (compositors), not readers. Integrators (RustDesk, VNC) do their own frame diff
 - [ ] Support continuous capture as a simple polling loop — no callbacks, no epoll required
-- [ ] Protect `drmtap_ctx` with `pthread_mutex_t` for thread safety (or document one-ctx-per-thread pattern)
+- [x] Protect `drmtap_ctx` with `pthread_mutex_t` for thread safety (or document one-ctx-per-thread pattern) — done
 - [ ] Verify coexistence: multiple DRM readers (NoMachine, Sunshine, kmsvnc) can capture simultaneously
-- [ ] Helper binary path must be configurable (compile-time + runtime) — distros use `/usr/libexec/`, not `/usr/local/bin/`
-- [ ] Set `FD_CLOEXEC` on received DMA-BUF fds to prevent leaking to child processes
-- [ ] Handle helper crash recovery — auto-restart if helper dies mid-capture
+- [x] Helper binary path must be configurable (compile-time + runtime) — done (`ctx->helper_path` first, then `/usr/libexec/drmtap-helper` and `/usr/local/libexec/...`). Note: `libdrmtap-sys` instead embeds and statically compiles the helper sources
+- [x] Set `FD_CLOEXEC` on received DMA-BUF fds to prevent leaking to child processes — done
+- [x] Handle helper crash recovery — auto-respawn if helper dies mid-capture — done
 - [x] **Never CPU-deswizzle CCS modifiers** — `dumb_mmap` returns compressed data, only EGL can deswizzle. Return `-ENOTSUP` and require DMA-BUF fd + EGL (commit 7c7ce27)
-- [ ] **V3 protocol: pass DMA-BUF fd via SCM_RIGHTS** for non-linear modifiers so parent can use EGL GPU deswizzle (needed for Intel CCS in unprivileged mode)
+- [x] **V3 protocol: pass DMA-BUF fd via SCM_RIGHTS** for non-linear modifiers so parent can use EGL GPU deswizzle — shipped and now the default zero-copy capture path; Intel CCS detiles correctly in unprivileged/helper mode, with the V2 pixel copy as the fallback
 

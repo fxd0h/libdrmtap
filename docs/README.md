@@ -28,7 +28,7 @@ docs/
 | Thread safety / mutex strategy | `05_api_and_architecture.md` → Thread Safety section |
 | Coexistence with NoMachine | `05_api_and_architecture.md` → Coexistence section |
 | Cursor capture API | `05_api_and_architecture.md` → Proposed API |
-| HDR metadata API | `05_api_and_architecture.md` → Proposed API |
+| HDR metadata API (proposed; HDR10 not yet implemented, in progress #16) | `05_api_and_architecture.md` → Proposed API |
 | Security model | `../SECURITY.md` (project root) |
 | Gotcha checklist | `06_github_issues_analysis.md` → bottom of file |
 | Integration targets | `07_potential_adopters.md` |

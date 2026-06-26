@@ -7,17 +7,19 @@
 
 ## Quick Context for Agents
 
-**What is libdrmtap?** A C library for capturing Linux screen framebuffers via DRM/KMS. No Wayland, no PipeWire, no user prompts.
+**What is libdrmtap?** A C library for capturing the Linux screen by reading the active scanout framebuffer directly via DRM/KMS. No Wayland portal, no PipeWire, no consent dialog — works under X11, Wayland, headless, and VMs.
 
 **Key files to read first:**
 - [`docs/research/05_api_and_architecture.md`](docs/research/05_api_and_architecture.md) — API design and architecture
 - [`docs/research/02_drm_kms_mechanism.md`](docs/research/02_drm_kms_mechanism.md) — How DRM/KMS capture works
+- [`docs/research/08_reframe_egl_analysis.md`](docs/research/08_reframe_egl_analysis.md) — EGL GPU-universal detiling (the primary detile path)
 - [`docs/research/06_github_issues_analysis.md`](docs/research/06_github_issues_analysis.md) — Known gotchas
 
 **Build system:** Meson  
 **Language:** C11  
 **License:** MIT  
-**Test framework:** VKMS (Virtual KMS kernel module)  
+**Tests:** unit (no hardware) + integration via VKMS (Virtual KMS) or a real GPU  
+**Version:** C library `0.4.3` · Rust crates `libdrmtap-sys 0.4.3` / `libdrmtap 0.3.2`  
 
 ---
 
@@ -131,13 +133,13 @@ Reference issues with #NNN.
 
 Examples:
   grab: refresh plane fb_id on every frame
-  helper: add socketpair IPC for DMA-BUF passing
-  formats: add AR30/XR30 10-bit support
+  helper: export scanout as DMA-BUF and pass fd via SCM_RIGHTS
+  gpu-egl: detile CCS framebuffers via EGLImage import
   tests: add vkms enumeration test
   docs: update GPU compatibility table
 ```
 
-Prefixes: `grab`, `enumerate`, `formats`, `helper`, `gpu-intel`, `gpu-amd`, `gpu-nvidia`, `gpu-generic`, `tests`, `docs`, `build`, `ci`.
+Prefixes: `grab`, `enumerate`, `formats`, `cursor`, `helper`, `gpu-egl`, `gpu-intel`, `gpu-amd`, `gpu-nvidia`, `gpu-generic`, `tests`, `docs`, `build`, `ci`.
 
 ---
 
@@ -219,16 +221,20 @@ tests/
 ### Running Tests
 
 ```bash
-# Unit tests (no hardware needed)
+# Unit tests (no hardware needed): formats, deswizzle, helper
 meson test -C build --suite unit
 
-# Integration tests (needs vkms)
+# Integration tests (need a DRM device): enumerate, capture
+# vkms gives a synthetic scanout for CI-friendly testing
 sudo modprobe vkms
 DRM_DEVICE=/dev/dri/card1 meson test -C build --suite integration
 
-# Specific GPU tests (needs real hardware)
-DRM_DEVICE=/dev/dri/card0 meson test -C build --suite gpu
+# Same integration suite against real hardware (Intel/Nvidia/AMD/virtio)
+DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
 ```
+
+There are two suites only: `unit` and `integration`. There is no separate
+`gpu` suite — point the integration suite at a real GPU via `DRM_DEVICE`.
 
 ### Writing Tests
 
@@ -326,6 +332,13 @@ This is optional and has no effect on PR review.
 3. **Detect `handles[0] == 0`** — this means CAP_SYS_ADMIN is missing, trigger helper
 4. **Use Prime path (not GEM_FLINK)** — GEM_FLINK doesn't work with vkms
 5. **Check modifier for tiling** — `DRM_FORMAT_MOD_LINEAR` means no deswizzle needed
+6. **EGL is the primary detile path** — tiled/compressed FBs (Intel CCS, AMD, Nvidia
+   block-linear, vendor modifiers) go through `gpu_egl.c` (import DMA-BUF as EGLImage,
+   draw, `glReadPixels` to linear RGBA). CPU deswizzle is only a fallback for some formats.
+7. **HDR10 / 10-bit is NOT done** — it is an open issue ([#16](https://github.com/fxd0h/libdrmtap/issues/16))
+   and the current top blocker. The AR30/XR30 path naively keeps the top 8 of 10 bits (no PQ
+   decode, no BT.2020, no tone-mapping); 16-bit and P010 are unhandled. Do **not** mark HDR or
+   10-bit as "implemented" or "verified" — describe it as in progress (#16).
 
 ### When Writing Tests
 
@@ -356,35 +369,44 @@ libdrmtap/
 ├── README.md              ← Project overview
 ├── LICENSE                ← MIT
 ├── CONTRIBUTING.md        ← How to contribute
-├── meson.build            ← Build system
+├── SECURITY.md            ← Threat model + helper hardening
+├── meson.build            ← Build system (project version lives here)
 ├── include/
 │   └── drmtap.h           ← Public API (the only public header)
 ├── src/
-│   ├── drmtap.c           ← Main context management
+│   ├── drmtap.c           ← Main context management + lifecycle
+│   ├── drmtap_internal.h  ← Internal shared declarations (NOT installed)
 │   ├── drm_enumerate.c    ← Plane/CRTC/connector enumeration
-│   ├── drm_grab.c         ← Framebuffer capture
-│   ├── pixel_convert.c    ← Deswizzle + format conversion
-│   ├── gpu_intel.c        ← Intel VAAPI backend
-│   ├── gpu_amd.c          ← AMD VAAPI + SDMA backend
-│   ├── gpu_nvidia.c       ← Nvidia dumb + deswizzle backend
-│   ├── gpu_generic.c      ← Generic/VM linear backend
-│   └── privilege_helper.c ← Helper spawn + SCM_RIGHTS IPC
+│   ├── drm_grab.c         ← Scanout framebuffer capture (V3 zero-copy / V2 fallback)
+│   ├── cursor.c           ← Hardware cursor plane: image, position, hotspot
+│   ├── pixel_convert.c    ← CPU deswizzle + format conversion (fallback path)
+│   ├── gpu_egl.c          ← GPU-universal EGL/GLES2 detiler (PRIMARY detile path)
+│   ├── gpu_intel.c        ← Intel i915/xe tiling modifiers (CCS/X/Y-tiled)
+│   ├── gpu_amd.c          ← AMD amdgpu tiling (implemented, not yet HW-verified)
+│   ├── gpu_nvidia.c       ← Nvidia block-linear handling (incl. Tegra/Jetson)
+│   ├── gpu_generic.c      ← Generic/VM linear backend (virtio-gpu, simple VMs)
+│   └── privilege_helper.c ← Helper spawn + SCM_RIGHTS / DMA-BUF passing
 ├── helper/
-│   └── drmtap-helper.c    ← Privileged helper binary (~500 LOC)
+│   └── drmtap-helper.c    ← Privileged helper binary (CAP_SYS_ADMIN, seccomp-hardened)
 ├── tests/
-│   ├── test_enumerate.c
-│   ├── test_capture.c
-│   ├── test_formats.c
-│   ├── test_helper.c
-│   └── test_deswizzle.c
+│   ├── test_enumerate.c    ← integration suite (needs DRM device)
+│   ├── test_capture.c      ← integration suite (needs vkms or real GPU)
+│   ├── test_formats.c      ← unit suite
+│   ├── test_helper.c       ← unit suite
+│   ├── test_deswizzle.c    ← unit suite
+│   └── lsan.supp           ← LeakSanitizer suppressions
 ├── examples/
 │   ├── screenshot.c        ← Capture one frame → PNG
-│   └── stream.c            ← Continuous capture
+│   ├── stream.c            ← Continuous capture
+│   └── vnc_server.c        ← VNC demo (optional libvncserver)
+├── bindings/
+│   └── rust/               ← libdrmtap-sys (FFI, embeds C sources + helper) + libdrmtap (safe)
 ├── docs/
 │   ├── AI_DEVELOPMENT.md   ← AI development philosophy
-│   ├── README.md            ← Docs index
-│   └── research/            ← 7 technical research documents
+│   ├── README.md           ← Docs index
+│   └── research/           ← 9 technical research documents (00–08)
 └── .github/
+    ├── workflows/ci.yml    ← Build & Test (Ubuntu 22.04/24.04), Rust crate, cppcheck, CodeQL
     ├── ISSUE_TEMPLATE/
     │   ├── bug_report.md
     │   └── feature_request.md

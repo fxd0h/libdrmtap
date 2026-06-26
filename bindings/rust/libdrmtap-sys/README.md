@@ -33,6 +33,14 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
 - `libdrm` development headers (located via `pkg-config`), plus EGL, OpenGL ES 2,
   libseccomp, and libcap (and their `-dev` headers) — the crate links these.
 
+The build also compiles the privileged `drmtap-helper` binary from the same
+embedded sources, with exploit-mitigation hardening (stack-protector-strong,
+FORTIFY, PIE, full RELRO). Its path is exported to downstream build scripts as
+`DEP_DRMTAP_HELPER_BIN` so a consumer (e.g. RustDesk) can copy and `setcap` it.
+The library captures directly when it already has DRM master / `CAP_SYS_ADMIN`;
+otherwise it spawns the helper over a socketpair to read other clients'
+framebuffers, returning the scanout as a zero-copy DMA-BUF fd via `SCM_RIGHTS`.
+
 ## Usage
 
 This is a `-sys` crate with raw FFI bindings. For a safe wrapper, use [`libdrmtap`](https://crates.io/crates/libdrmtap).

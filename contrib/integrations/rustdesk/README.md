@@ -4,9 +4,11 @@ DRM/KMS capture backend for [RustDesk](https://github.com/rustdesk/rustdesk),
 built on the static [`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys)
 crate.
 
-> The canonical integration is the upstream PR
-> [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420).
-> The files here are a self-contained reference for the same crate-based backend.
+> The upstream integration PR
+> [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420)
+> is **under maintainer review** (in progress — not yet merged). It adds a `drm`
+> capture backend to `scrap` on top of `libdrmtap-sys` 0.4.3. The files here are a
+> self-contained reference for the same crate-based backend.
 
 ## Status
 
