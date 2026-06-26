@@ -806,10 +806,6 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
      * always deswizzle into a separate buffer (ctx->deswizzle_buf).
      */
 
-    /* Format conversion constants */
-    #define DRM_FMT_XR30 0x30335258u  /* fourcc('X','R','3','0') */
-    #define DRM_FMT_AR30 0x30335241u  /* fourcc('A','R','3','0') */
-    #define DRM_FMT_XR24 0x34325258u  /* fourcc('X','R','2','4') */
 
     /* Ensure the CPU-deswizzle shadow buffer is allocated (grow-once, capped —
      * see ensure_buf). frame->stride/height are validated at every entry point
@@ -916,13 +912,14 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
             /* Reduce 10-bit XR30/AR30 to 8-bit XRGB8888. An HDR10 (PQ) scanout
              * needs a real tone-map — the naive bit-shift would wash it out; a
              * plain SDR 10-bit scanout (same fourcc) just gets truncated. */
-            if (frame->format == DRM_FMT_XR30 ||
-                frame->format == DRM_FMT_AR30) {
+            if (frame->format == DRMTAP_FMT_XR30 ||
+                frame->format == DRMTAP_FMT_AR30) {
+                int conv;
                 if (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) {
                     drmtap_debug_log(ctx,
                         "auto-process: HDR10 AR30 -> tone-map to SDR (peak=%u)",
                         ctx->cur_hdr_max_nits);
-                    drmtap_tonemap_hdr10(
+                    conv = drmtap_tonemap_hdr10(
                         ctx->deswizzle_buf, ctx->deswizzle_buf,
                         frame->width, frame->height,
                         frame->stride, frame->stride,
@@ -930,13 +927,19 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                 } else {
                     drmtap_debug_log(ctx,
                         "auto-process: SDR 10-bit AR30 -> 8-bit XRGB8888");
-                    drmtap_convert_format(
+                    conv = drmtap_convert_format(
                         ctx->deswizzle_buf, ctx->deswizzle_buf,
                         frame->width, frame->height,
                         frame->stride, frame->stride,
-                        frame->format, DRM_FMT_XR24);
+                        frame->format, DRMTAP_FMT_XR24);
                 }
-                frame->format = DRM_FMT_XR24;
+                /* Only relabel the frame as 8-bit if the conversion succeeded;
+                 * otherwise leave the original format so the caller doesn't read
+                 * unconverted 10-bit data as XRGB8888. */
+                if (conv != 0) {
+                    return conv;
+                }
+                frame->format = DRMTAP_FMT_XR24;
             }
         }
         return ret;

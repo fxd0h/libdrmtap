@@ -132,7 +132,21 @@ static void test_rgb16(void) {
     /* Stride too small (2 px need 16 source bytes). */
     TEST_ASSERT(drmtap_convert_rgb16(mid, &out, 2, 1, 8, 4, 0,
                                      DRMTAP_EOTF_SDR, 0) == -EINVAL);
-    printf("  PASS: rgb16 HDR tone-map + SDR reduce\n");
+
+    /* Channel order: same 16-bit memory, RGB (XR48) vs BGR (XB48) layout. The
+     * SDR path keeps the high byte, so the result must pick the right channel. */
+    uint16_t color[4] = {0x1100, 0x2200, 0x3300, 0xFFFF};  /* mem px[0..2] */
+    uint32_t o_rgb = 0, o_bgr = 0;
+    TEST_ASSERT(drmtap_convert_rgb16(color, &o_rgb, 1, 1, 8, 4, 0 /*RGB*/,
+                                     DRMTAP_EOTF_SDR, 0) == 0);
+    TEST_ASSERT(drmtap_convert_rgb16(color, &o_bgr, 1, 1, 8, 4, 1 /*BGR*/,
+                                     DRMTAP_EOTF_SDR, 0) == 0);
+    TEST_ASSERT(((o_rgb >> 16) & 0xFF) == 0x33);  /* RGB: R = px[2] */
+    TEST_ASSERT(((o_bgr >> 16) & 0xFF) == 0x11);  /* BGR: R = px[0] */
+    TEST_ASSERT(((o_rgb >> 8) & 0xFF) == 0x22 &&
+                ((o_bgr >> 8) & 0xFF) == 0x22);   /* G is px[1] either way */
+    TEST_ASSERT((o_rgb & 0xFF) == 0x11 && (o_bgr & 0xFF) == 0x33);  /* B swaps */
+    printf("  PASS: rgb16 HDR tone-map + SDR reduce + channel order\n");
 }
 
 int main(void) {

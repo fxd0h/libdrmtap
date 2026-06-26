@@ -100,7 +100,7 @@ struct drmtap_ctx {
     /* HDR state of the frame currently being processed. Set per grab from the
      * connector HDR_OUTPUT_METADATA (helper sends it on the wire; direct mode
      * reads it itself) and consumed by the conversion path to decide whether to
-     * tone-map (DRMTAP_EOTF_PQ/HLG) or do a plain bit-depth reduction. */
+     * tone-map (DRMTAP_EOTF_PQ) or do a plain bit-depth reduction. */
     uint32_t cur_hdr_eotf;     /* DRMTAP_EOTF_* */
     uint32_t cur_hdr_max_nits; /* peak luminance, 0 = unknown */
 };
@@ -125,7 +125,8 @@ typedef struct {
 /* Result from helper v2 grab — helper reads pixels and sends via socket.
  * Must match struct grab_metadata in drmtap-helper.c */
 /* DRM EOTF values (from the connector HDR_OUTPUT_METADATA infoframe). These
- * match the kernel/CTA-861 numbering; only PQ and HLG mean "tone-map this". */
+ * match the kernel/CTA-861 numbering. PQ means "tone-map this"; HLG currently
+ * falls back to the plain bit-depth reduction (PQ/HDR10 is the desktop norm). */
 #define DRMTAP_EOTF_SDR  0  /* traditional gamma SDR (or no HDR metadata) */
 #define DRMTAP_EOTF_PQ   2  /* SMPTE ST 2084 (HDR10) */
 #define DRMTAP_EOTF_HLG  3  /* Hybrid Log-Gamma (BT.2100) */
