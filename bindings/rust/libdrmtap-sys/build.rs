@@ -76,7 +76,15 @@ fn main() {
         .arg("-D_GNU_SOURCE")
         .arg("-D_POSIX_C_SOURCE=200809L")
         .arg("-DHAVE_SECCOMP=1")
-        .arg("-DHAVE_LIBCAP=1");
+        .arg("-DHAVE_LIBCAP=1")
+        // Exploit-mitigation hardening for this privileged (CAP_SYS_ADMIN) binary.
+        .arg("-O2")
+        .arg("-fstack-protector-strong")
+        .arg("-U_FORTIFY_SOURCE")
+        .arg("-D_FORTIFY_SOURCE=2")
+        .arg("-fPIE")
+        .arg("-pie")
+        .arg("-Wl,-z,relro,-z,now");
 
     // Include libdrm headers for drmtap-helper.c (same probe as the library).
     match pkg_config::Config::new().cargo_metadata(false).probe("libdrm") {

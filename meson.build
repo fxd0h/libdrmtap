@@ -127,10 +127,21 @@ if libcap_dep.found()
     helper_c_args += '-DHAVE_LIBCAP=1'
 endif
 
+# Exploit-mitigation hardening for the privileged (CAP_SYS_ADMIN) helper.
+helper_c_args += '-fstack-protector-strong'
+# _FORTIFY_SOURCE needs an optimized build; at -O0 it only warns, and the CI
+# build uses -Werror, so gate it on optimization being enabled.
+if get_option('optimization') not in ['0', 'g']
+    helper_c_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=2']
+endif
+helper_link_args = ['-Wl,-z,relro,-z,now']
+
 executable('drmtap-helper',
     'helper/drmtap-helper.c',
     dependencies: helper_deps,
     c_args: helper_c_args,
+    link_args: helper_link_args,
+    pie: true,
     install: true,
     install_dir: get_option('libexecdir'),
 )
