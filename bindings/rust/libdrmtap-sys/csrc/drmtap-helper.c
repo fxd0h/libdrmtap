@@ -89,6 +89,19 @@ struct drm_virtgpu_3d_wait {
     DRM_IOW(DRM_COMMAND_BASE + DRM_VIRTGPU_WAIT, \
             struct drm_virtgpu_3d_wait)
 #endif
+/* GETPARAM (used to detect virgl 3D) lives in <drm/virtgpu_drm.h>, not in
+ * <linux/virtio_gpu.h>; provide the uapi definition if it's missing. */
+#ifndef DRM_IOCTL_VIRTGPU_GETPARAM
+struct drm_virtgpu_getparam {
+    __u64 param;
+    __u64 value;
+};
+#define VIRTGPU_PARAM_3D_FEATURES 1
+#define DRM_VIRTGPU_GETPARAM 0x03
+#define DRM_IOCTL_VIRTGPU_GETPARAM \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_VIRTGPU_GETPARAM, \
+             struct drm_virtgpu_getparam)
+#endif
 #endif
 
 /* Socket fd inherited from parent (via socketpair) */
@@ -457,7 +470,7 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 
     uint32_t gem_handle = fb2->handles[0];
 
-    /* virtio_gpu: transfer pixels from host GPU to guest RAM */
+    /* virtio_gpu: transfer pixels from host GPU to guest RAM, then wait. */
     if (is_virtio) {
 #ifdef __linux__
         struct drm_virtgpu_3d_transfer_from_host xfer = {0};
@@ -470,6 +483,30 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
             wait_args.handle = gem_handle;
             drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_WAIT, &wait_args);
         }
+#endif
+    }
+
+    /* Decide once whether this virtio-gpu is "plain" (no virgl 3D). Without 3D
+     * the scanout is a 2D dumb buffer in guest RAM that we can export as a
+     * DMA-BUF and let the parent map directly (zero-copy), instead of copying
+     * the whole framebuffer over the socket every frame. With virgl the scanout
+     * can be a host-side 3D resource, so we keep the proven copy-after-transfer
+     * path there until the zero-copy path is validated on virgl. */
+    static int virtio_plain = -1;
+    if (is_virtio && virtio_plain < 0) {
+        virtio_plain = 0;
+#if defined(__linux__) && defined(DRM_IOCTL_VIRTGPU_GETPARAM)
+        uint64_t features = 0;
+        struct drm_virtgpu_getparam gp = {
+            .param = VIRTGPU_PARAM_3D_FEATURES,
+            .value = (uint64_t)(uintptr_t)&features,
+        };
+        if (drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_GETPARAM, &gp) == 0 && features == 0) {
+            virtio_plain = 1;
+        }
+        fprintf(stderr, "drmtap-helper: virtio 3D features=%llu -> %s path\n",
+                (unsigned long long)features,
+                virtio_plain ? "zero-copy DMA-BUF" : "pixel-copy");
 #endif
     }
 
@@ -495,13 +532,20 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 
     int ret;
 
-    /* Preferred path for tiled (non-linear) framebuffers: export the GEM buffer
-     * as a DMA-BUF fd and pass it via SCM_RIGHTS so the parent can EGL-import and
-     * GPU-deswizzle it. Done BEFORE any MODE_MAP_DUMB on purpose: scanout buffers
-     * on some drivers are not dumb-mappable (nvidia-drm on Tegra fails
-     * MODE_MAP_DUMB with "Failed to lookup gem object"), so requiring a dumb map
-     * first would break capture on those GPUs even though the export works. */
-    if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio) {
+    /* Export the GEM buffer as a DMA-BUF fd and pass it via SCM_RIGHTS so the
+     * parent maps it directly — no per-frame pixel copy over the socket. Two
+     * cases take this path:
+     *   - tiled (non-linear) non-virtio framebuffers: the parent EGL-imports and
+     *     GPU-deswizzles. Done BEFORE any MODE_MAP_DUMB on purpose: scanout
+     *     buffers on some drivers are not dumb-mappable (nvidia-drm on Tegra
+     *     fails MODE_MAP_DUMB with "Failed to lookup gem object"), so requiring a
+     *     dumb map first would break capture there even though the export works.
+     *   - plain virtio-gpu (guest-rendered, no host transfer): a linear scanout
+     *     in guest RAM the parent maps directly (no detile). Replaces the V2
+     *     pixel copy, dropping the helper's per-frame CPU cost.
+     * Either way, if the export fails we fall through to the dumb-map pixel path. */
+    if ((meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio)
+        || (is_virtio && virtio_plain)) {
         int prime_fd = -1;
         int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
                                             DRM_CLOEXEC | DRM_RDWR, &prime_fd);
