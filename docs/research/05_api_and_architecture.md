@@ -67,8 +67,11 @@
 The library runs in **two processes**. When it already holds the rights it
 captures directly; otherwise it spawns a small privileged helper
 (`drmtap-helper`) that carries `CAP_SYS_ADMIN` via file capabilities (`setcap`)
-and talks to the library over a `socketpair`. DRM master / `CAP_SYS_ADMIN` is
-what lets it read *other clients'* framebuffers (`GetFB2` + `PrimeHandleToFD`).
+and talks to the library over a `socketpair`. DRM gates access to *other
+clients'* framebuffers behind DRM master / `CAP_SYS_ADMIN`: the helper holds
+that capability and uses it to look up and export the scanout (`GetFB2` +
+`PrimeHandleToFD`), and the unprivileged library maps the exported buffer to
+read the pixels.
 
 Two helper protocol paths exist:
 

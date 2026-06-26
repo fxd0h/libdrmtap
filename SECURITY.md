@@ -189,13 +189,13 @@ a user-visible indicator.
 ## Installation, audit, removal
 
 ```bash
-# An administrator consciously grants the capability to the helper binary:
-sudo setcap cap_sys_admin+ep /usr/lib/rustdesk/drmtap-helper   # (path varies by integration)
-
-# Recommended on multi-user hosts: restrict who can execute the setcap helper
-# to a dedicated group rather than leaving it world-executable.
+# Restrict who can execute the helper FIRST, so it is never world-executable
+# while it already carries the capability (path varies by integration):
 sudo chown root:rustdesk-capture /usr/lib/rustdesk/drmtap-helper
 sudo chmod 0750 /usr/lib/rustdesk/drmtap-helper
+
+# ...then an administrator consciously grants the capability to the binary:
+sudo setcap cap_sys_admin+ep /usr/lib/rustdesk/drmtap-helper
 
 # Audit: find capability-bearing binaries
 sudo getcap -r / 2>/dev/null | grep drmtap

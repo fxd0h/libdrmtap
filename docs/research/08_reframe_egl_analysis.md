@@ -2,7 +2,7 @@
 
 > **Date**: 2026-03-14  
 > **Source**: [AlynxZhou/reframe](https://github.com/AlynxZhou/reframe) — 36 releases, C++, LGPL-3.0  
-> **Relevance**: Proves that a single EGL path handles ALL GPU tiling formats  
+> **Relevance**: Shows that a single EGL import + `glReadPixels` path handles tiled and compressed scanout formats across GPU vendors (the Intel/AMD/Nvidia modifiers we tested), instead of a per-GPU CPU deswizzler  
 > **Status**: Shipped — this analysis became `src/gpu_egl.c`, the **primary** detile path in libdrmtap 0.4.3. The per-GPU CPU deswizzle backends were kept as a fallback.
 
 ---
@@ -106,6 +106,11 @@ drmtap_grab_mapped()
     ├── DMA-BUF + EGL available → gpu_egl.c (universal, GPU-accelerated) ← primary
     └── EGL unavailable → gpu_{intel,amd,nvidia}.c (CPU fallback)
 ```
+
+The CPU fallback only covers classic tiling. CCS-compressed modifiers cannot be
+CPU-deswizzled (the dumb map still holds compressed bytes), so without the EGL
+path they return `-ENOTSUP` and the raw pixels are passed through as linear
+rather than silently corrupted — EGL is effectively required for CCS.
 
 ### Dependencies for EGL path
 

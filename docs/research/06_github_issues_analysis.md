@@ -223,7 +223,7 @@ Solution: #ifdef guards + fallback paths
 
 From reading all these issues, the library MUST:
 
-- [ ] Support AR30/XR30 (10-bit) and AB48/ABGR16161616 (16-bit HDR) — **in progress (#16), current top blocker.** Today AR30/XR30 only land as a naive bit-shift (top 8 of 10 bits → washed-out SDR); AB48/XR48 16-bit and P010 10-bit YUV are unhandled, and there is no PQ decode / BT.2020 / tone-mapping and no reading of `HDR_OUTPUT_METADATA`. Capturing an HDR scanout is *not* correct yet — this is real HDR10, not "just another format"
+- [ ] Support AR30/XR30 (10-bit) and XR48/AR48 (16-bit HDR) — **in progress (#16), current top blocker.** Today AR30/XR30 only land as a naive bit-shift (top 8 of 10 bits → washed-out SDR); XR48/AR48 16-bit and P010 10-bit YUV are unhandled, and there is no PQ decode / BT.2020 / tone-mapping and no reading of `HDR_OUTPUT_METADATA`. Capturing an HDR scanout is *not* correct yet — this is real HDR10, not "just another format"
 - [x] Refresh `plane->fb_id` on every frame (never cache) — done (`drm_grab.c` re-reads `drmModeGetPlane()` each frame)
 - [x] Detect `handles[0] == 0` and activate helper automatically — done (`drm_grab.c` falls back to the privileged helper on `handles[0] == 0` / `EACCES`)
 - [ ] Handle non-zero offsets in mmap (ARM SoCs)

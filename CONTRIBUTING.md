@@ -113,8 +113,10 @@ sudo modprobe vkms
 # point DRM_DEVICE at the vkms card (check /dev/dri/ — it is often card1)
 DRM_DEVICE=/dev/dri/card1 meson test -C build --suite integration
 
-# ...or against your real GPU:
-meson test -C build --suite integration
+# ...or against your real GPU (point DRM_DEVICE at the right card; without it
+# the library auto-detects the first card with an active CRTC, which can be the
+# wrong one on multi-GPU systems):
+DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
 ```
 
 Running the suites under the sanitizer build (`build-asan` above) is the recommended pre-submit check.
