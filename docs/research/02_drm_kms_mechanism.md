@@ -133,12 +133,12 @@ for (int y = 0; y < height; y++) {
 | ABGR16161616 | 64 | HDR 16-bit/channel | HDR displays |
 | XR30 / AR30 | 30 | 10-bit per channel | HDR |
 
-> ⚠️ **HDR is not properly handled yet.** Today the AR30/XR30 (10-bit) path is a naïve bit-shift
-> that keeps the top 8 of 10 bits — no PQ decode, no BT.2020 primaries, no tone-mapping — so an HDR
-> scanout comes out as a washed-out, truncated SDR frame. ABGR16161616 (16-bit) and 10-bit YUV (P010)
-> are not handled, and `HDR_OUTPUT_METADATA` / connector `Colorspace` are not read. Proper HDR10 is an
-> open item ([#16](https://github.com/fxd0h/libdrmtap/issues/16)) and the current top blocker — do not
-> treat any 10-bit/HDR row above as "supported".
+> ✅ **HDR10 is tone-mapped to SDR** ([#16](https://github.com/fxd0h/libdrmtap/issues/16), done).
+> The helper reads the connector `HDR_OUTPUT_METADATA` (EOTF + peak) and, when the scanout is PQ,
+> the conversion does a real transfer: PQ (ST 2084) decode → BT.2020 → BT.709 gamut → a peak-aware
+> highlight curve → sRGB → 8-bit, for `AR30`/`XR30` and 16-bit `XR48`/`AR48`, in both the CPU and
+> the EGL (tiled) paths. A plain SDR 10-bit scanout (same fourcc) gets a straight bit-depth
+> reduction instead. `P010` (overlay-video YUV) and HLG are not tone-mapped.
 
 ---
 

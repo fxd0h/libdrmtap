@@ -19,7 +19,7 @@
 | VM | ✅ | ✅ | ❌ | **✅** |
 | Multi-monitor | ✅ (per CRTC) | ✅ (per CRTC) | ✅ | **✅** |
 | Cursor capture | ❌ | ✅ | ❌ | **✅** |
-| HDR | ❌ | ❌ | ✅ (tone-map) | **🚧 in progress (#16)** |
+| HDR | ❌ | ❌ | ✅ (tone-map) | **✅ (tone-map to SDR)** |
 | Continuous capture | ✅ (frames/sec) | ✅ (VNC stream) | ❌ (1 shot) | **✅** |
 | Output formats | DRM_PRIME fd | RGBA buffer | PPM file | **DMA-BUF fd + mmap** |
 | Dependencies | libavutil,libdrm | libdrm,libva,libvncserver | libdrm,libamdgpu,vulkan | **libdrm, egl/glesv2(opt)** |
@@ -180,13 +180,15 @@ void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 // Returns 1 if display configuration changed since last call, 0 if unchanged.
 int drmtap_displays_changed(drmtap_ctx *ctx);
 
-// --- HDR Metadata (PROPOSED — NOT yet implemented, tracked in #16) ---
-// HDR10 is the current top blocker. The 10-bit AR30/XR30 path today only keeps
-// the top 8 of 10 bits (no PQ decode, no BT.2020, no tone-mapping) and the EGL
-// path outputs 8-bit; 16-bit (XR48/AR48) and 10-bit YUV (P010) are unhandled,
-// and HDR_OUTPUT_METADATA / connector Colorspace are not read. Capturing an HDR
-// scanout currently yields a truncated, SDR-ish frame. The struct below is the
-// intended future shape only.
+// --- HDR (implemented as in-capture tone-mapping to SDR, #16) ---
+// HDR is handled automatically rather than exposed as a passthrough API: the
+// helper reads the connector HDR_OUTPUT_METADATA (EOTF + peak) and, when the
+// scanout is PQ, the conversion does PQ decode -> BT.2020->709 -> tone-map ->
+// sRGB to 8-bit (AR30/XR30 + 16-bit XR48/AR48, CPU and EGL paths). The public
+// primitive is drmtap_tonemap_hdr10(). The metadata struct/getter below was the
+// proposed *passthrough* shape (preserve HDR for a downstream HDR encoder); it
+// is NOT shipped — target consumers (RustDesk, VNC) are 8-bit SDR, so we
+// tone-map instead of preserving. Kept here as a possible future direction.
 
 typedef struct {
     uint32_t colorspace;        // DRM_MODE_COLORIMETRY_*
@@ -205,7 +207,8 @@ typedef struct {
     int valid;                  // 0 = no HDR metadata available
 } drmtap_hdr_info;
 
-// Get HDR metadata for the current display (PROPOSED — see #16, not yet shipped)
+// Get HDR metadata for the current display (PROPOSED passthrough API — NOT
+// shipped; libdrmtap tone-maps HDR to SDR instead of exposing the metadata)
 // Returns 0 on success, -ENODATA if SDR, negative errno on error
 int drmtap_get_hdr_info(drmtap_ctx *ctx, drmtap_hdr_info *hdr);
 ```
@@ -517,7 +520,7 @@ Adding `libdrmtap-sys` is standard practice for them. They `cargo add libdrmtap`
 | GPU | EGL/GLES2 GPU-universal detiling backend | ✅ Implemented |
 | HW | Intel i915/xe + Nvidia/Tegra + virtio-gpu validation | ✅ Verified (AMD implemented, not yet verified) |
 | RustDesk | DRM capture backend PR (rustdesk/rustdesk#15420) | 🚧 Under maintainer review |
-| HDR10 | PQ / BT.2020 10-bit pipeline | 🚧 In progress (#16) |
+| HDR10 | PQ / BT.2020 → SDR tone-map | ✅ Done (#16) |
 
 ---
 

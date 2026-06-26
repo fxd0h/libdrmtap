@@ -5,7 +5,7 @@
 
 > **Update (libdrmtap 0.4.3)** — The tables below capture the early *research* into how reference projects (kmsvnc, kms-screenshot, FFmpeg) deswizzle each vendor. libdrmtap ultimately took a different route: a single GPU-universal **EGL/GLES2 detiling** backend (`src/gpu_egl.c`) imports the scanout DMA-BUF as an `EGLImage`, draws it, and `glReadPixels()` to linear RGBA — so per-vendor tiling (Intel X/Y-tiled + CCS, AMD modifiers, Nvidia block-linear) is handled by the driver itself, with no per-GPU CPU deswizzle in the common case. A CPU deswizzle remains only as a fallback for some formats. **Verified:** Intel `i915`/`xe` (dual-4K Meteor Lake, CCS), Nvidia `nvidia-drm` incl. Tegra/Jetson (Orin Nano, aarch64), and virtio-gpu. **AMD `amdgpu` is implemented but not yet verified on real hardware.**
 >
-> ⚠️ **HDR is _not_ supported yet** — it is the current top blocker, tracked in [#16](https://github.com/fxd0h/libdrmtap/issues/16). The AR30/XR30 (10-bit) path is a naive bit-shift that keeps the top 8 of 10 bits (no PQ decode, no BT.2020, no tone-mapping), the EGL path outputs 8-bit, and 16-bit (`XR48`/`AR48`) and 10-bit YUV (`P010`) are not handled. Capturing an HDR scanout today yields a truncated, washed-out SDR result.
+> ✅ **HDR10 is tone-mapped to SDR** ([#16](https://github.com/fxd0h/libdrmtap/issues/16), done). When the connector advertises HDR (`HDR_OUTPUT_METADATA`, PQ), `AR30`/`XR30` (10-bit) and `XR48`/`AR48`/`XB48`/`AB48` (16-bit) scanouts are PQ-decoded, BT.2020 → BT.709 gamut-mapped, tone-mapped (highlight-preserving, peak-aware) and sRGB-encoded to 8-bit — in both the CPU and the EGL (tiled) paths. Plain SDR 10-bit gets a straight bit-depth reduction. `P010` (overlay-video YUV) and HLG are not tone-mapped.
 
 ---
 
@@ -30,7 +30,7 @@
 | Pipeline | Prime → VAAPI **or** AMDGPU SDMA copy |
 | Tiling | AMD_FMT_MOD_* (variable, device-specific) |
 | Common format | XRGB8888, ABGR8888, ABGR16161616 (HDR) |
-| Gotcha | HDR (16-bit/channel, `ABGR16161616`) needs PQ decode + tone-mapping to land in 8-bit — **not done in libdrmtap yet** ([#16](https://github.com/fxd0h/libdrmtap/issues/16)) |
+| Gotcha | HDR (16-bit/channel, `ABGR16161616`) needs PQ decode + tone-mapping to land in 8-bit — **done** ([#16](https://github.com/fxd0h/libdrmtap/issues/16)): PQ → BT.2020→709 → tone-map → sRGB, for 10-bit and 16-bit RGB |
 | VAAPI | ✅ Good support via mesa radeonsi |
 | SDMA | Dedicated DMA engine for GPU→CPU copy |
 | Vulkan | Alternative for deswizzle via compute shader |

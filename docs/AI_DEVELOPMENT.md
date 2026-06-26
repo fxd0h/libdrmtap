@@ -54,10 +54,10 @@ Guided by the research findings, the agents went on to build the library itself.
 - 🎨 **GPU-universal EGL detiling** (`gpu_egl.c`) — imports tiled/compressed framebuffers (Intel X/Y-tiled + CCS, AMD, Nvidia block-linear, vendor modifiers) as an EGLImage and uses GLES2 + `glReadPixels` to produce linear RGBA; a CPU deswizzle exists as a fallback for some formats. Plain linear framebuffers are mapped directly with no detile.
 - 🔒 **A hardened helper** — verifies it was spawned by the library and checks the peer uid via `SO_PEERCRED`, restricts the DRM device to a realpath under `/dev/dri/` opened `O_RDONLY`, sets `PR_SET_NO_NEW_PRIVS`, drops all capabilities except `CAP_SYS_ADMIN` (libcap), and installs a default-KILL seccomp allowlist (libseccomp) that deliberately forbids `open`/`openat`. Built with stack-protector-strong, FORTIFY, PIE and full RELRO.
 
-### What AI Is Working On Now (open issues)
-- 🌈 **HDR10 (#16)** — the current top blocker. The 10-bit AR30/XR30 path today just keeps the top 8 of 10 bits — no PQ decode, no BT.2020, no tone-mapping — so an HDR scanout comes out truncated and washed out. 16-bit and 10-bit YUV (P010) aren't handled and `HDR_OUTPUT_METADATA` isn't read yet. Proper HDR is in progress, **not** done.
-- 🪟 **virgl integration (#15)** — host-rendered virtio-gpu 3D scanouts can't be read by guest CPU mmap (they come out black). GPU-side EGL readback on the guest GPU solves it technically, but production integration is still open.
-- 🔗 **RustDesk integration** — a DRM capture backend for RustDesk's `scrap` (depending on `libdrmtap-sys`) to avoid the Wayland portal consent dialog. Upstream PR [`rustdesk/rustdesk#15420`](https://github.com/rustdesk/rustdesk/pull/15420) is under maintainer review — the security hardening was praised — but it is **not** merged yet.
+### Status
+- 🌈 **HDR10 (#16, done)** — HDR scanouts are tone-mapped to SDR: PQ (ST 2084) decode, BT.2020 → BT.709 gamut, a highlight-preserving curve and sRGB, for `AR30`/`XR30` and 16-bit `XR48`/`AR48`, in both the CPU and EGL (tiled) paths, driven by the connector `HDR_OUTPUT_METADATA`. `P010` (overlay YUV) and HLG fall back to a plain reduction.
+- 🪟 **virgl integration (#15, done)** — host-rendered virtio-gpu 3D scanouts (black to a guest CPU mmap) are captured via GPU-side EGL readback on the guest GPU, verified end-to-end in a virgl VM.
+- 🔗 **RustDesk integration (open)** — a DRM capture backend for RustDesk's `scrap` (depending on `libdrmtap-sys`) to avoid the Wayland portal consent dialog. Upstream PR [`rustdesk/rustdesk#15420`](https://github.com/rustdesk/rustdesk/pull/15420) is under maintainer review — the security hardening was praised — but it is **not** merged yet.
 
 ## What AI Did NOT Do
 

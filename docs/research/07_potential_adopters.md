@@ -86,7 +86,7 @@ Projects with capture problems that libdrmtap solves:
 | Rust safe wrapper | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Frame timestamps | ❌ | ✅ | ❌ | ✅ | ✅ |
 
-> **Note**: the "HDR metadata" row is *demand* — what Sunshine/OBS/FFmpeg would want, not what we ship. libdrmtap does **not** properly support HDR today: the 10-bit AR30/XR30 path just keeps the top 8 of 10 bits (no PQ decode, no BT.2020, no tone-mapping) and the EGL path outputs 8-bit, so an HDR scanout comes back truncated/SDR-ish. Proper HDR10 is an open item ([#16](https://github.com/fxd0h/libdrmtap/issues/16)) and the current top blocker.
+> **Note**: the "HDR metadata" row is *demand* — passing HDR through to a downstream HDR encoder, which is different from what libdrmtap ships. libdrmtap tone-maps HDR10 scanouts **to SDR** ([#16](https://github.com/fxd0h/libdrmtap/issues/16), done): PQ decode, BT.2020 → BT.709, a peak-aware curve, sRGB, for AR30/XR30 and 16-bit RGB. It does not *preserve* HDR — there's no 10-bit/metadata passthrough — because the target consumers (RustDesk, VNC) are 8-bit SDR.
 
 ---
 
