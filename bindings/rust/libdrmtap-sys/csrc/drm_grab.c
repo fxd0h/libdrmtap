@@ -501,6 +501,19 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             return 0;
         }
 
+        /* The V2 payload must be exactly one full frame. ctx->pixel_buf is reused
+         * across grabs, so accepting a short payload would expose stale pixels
+         * from a previous frame behind the advertised stride*height geometry.
+         * (frame->stride/height were validated above, so this can't overflow.) */
+        if (hresult.wire.data_size != (size_t)frame->stride * frame->height) {
+            drmtap_set_error(ctx, "helper V2 payload %u != expected %zu bytes",
+                             hresult.wire.data_size,
+                             (size_t)frame->stride * frame->height);
+            free(priv);
+            drmModeFreeFB2(fb2);
+            return -EPROTO;
+        }
+
         /* V2 fallback: pixel data received into ctx->pixel_buf. frame->data
          * borrows that buffer — valid until the next grab or drmtap_close();
          * priv must not free it (is_heap_buf=0, mapped=MAP_FAILED above). */
