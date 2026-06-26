@@ -25,9 +25,13 @@ extern "C" {
 /* Version                                                                   */
 /* ========================================================================= */
 
+/* Version of the C library. Kept equal to the libdrmtap-sys crate version
+ * (the C sources packaged for Rust are the same code) and to the meson
+ * project version; the unit tests cross-check all three. The higher-level
+ * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
-#define DRMTAP_VERSION_MINOR 1
-#define DRMTAP_VERSION_PATCH 0
+#define DRMTAP_VERSION_MINOR 4
+#define DRMTAP_VERSION_PATCH 3
 
 /**
  * @brief Get the library version as a packed integer.

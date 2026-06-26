@@ -146,8 +146,15 @@ mod tests {
 
     #[test]
     fn test_version() {
+        // The C library version (DRMTAP_VERSION_* in csrc/drmtap.h) is kept
+        // equal to this crate's version. Derive the expected packed value from
+        // CARGO_PKG_VERSION so the two can never silently drift apart.
+        let major: i32 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
+        let minor: i32 = env!("CARGO_PKG_VERSION_MINOR").parse().unwrap();
+        let patch: i32 = env!("CARGO_PKG_VERSION_PATCH").parse().unwrap();
+        let expected = (major << 16) | (minor << 8) | patch;
         let v = unsafe { drmtap_version() };
-        assert_eq!(v, 0x000100); // 0.1.0
+        assert_eq!(v, expected);
     }
 
     #[test]

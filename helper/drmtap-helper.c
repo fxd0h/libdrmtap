@@ -182,23 +182,29 @@ static int send_fd(int sock, int fd, const void *meta, size_t meta_len) {
 static int drop_caps(void) {
     cap_t caps = cap_init();
     if (!caps) {
-        perror("cap_set_proc failed"); return -1;
+        perror("drmtap-helper: cap_init failed"); return -1;
     }
 
     cap_value_t keep[] = { CAP_SYS_ADMIN };
     if (cap_set_flag(caps, CAP_PERMITTED, 1, keep, CAP_SET) != 0 ||
         cap_set_flag(caps, CAP_EFFECTIVE, 1, keep, CAP_SET) != 0) {
+        int saved = errno;       /* cap_free() may clobber errno */
         cap_free(caps);
-        perror("cap_set_proc failed"); return -1;
+        errno = saved;
+        perror("drmtap-helper: cap_set_flag failed"); return -1;
     }
 
     int ret = cap_set_proc(caps);
+    int saved = errno;           /* preserve before cap_free() touches errno */
     cap_free(caps);
 
-    if (ret == 0) {
-        fprintf(stderr, "drmtap-helper: dropped caps, keeping CAP_SYS_ADMIN\n");
+    if (ret != 0) {
+        errno = saved;
+        perror("drmtap-helper: cap_set_proc failed");
+        return -1;
     }
-    return ret;
+    fprintf(stderr, "drmtap-helper: dropped caps, keeping CAP_SYS_ADMIN\n");
+    return 0;
 }
 #endif
 
@@ -207,7 +213,8 @@ static int drop_caps(void) {
 static int install_seccomp(void) {
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL_PROCESS);
     if (!ctx) {
-        perror("cap_set_proc failed"); return -1;
+        /* seccomp_init does not set errno; perror would print a stale value. */
+        fprintf(stderr, "drmtap-helper: seccomp_init failed\n"); return -1;
     }
 
     /* NOTE: open/openat are deliberately NOT allowed. The DRM device is opened
@@ -232,19 +239,27 @@ static int install_seccomp(void) {
     };
 
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
-        if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, allowed[i], 0) != 0) {
+        /* seccomp_rule_add returns -errno (it does not set errno itself). */
+        int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, allowed[i], 0);
+        if (rc != 0) {
             seccomp_release(ctx);
-            perror("cap_set_proc failed"); return -1;
+            fprintf(stderr, "drmtap-helper: seccomp_rule_add failed: %s\n",
+                    strerror(-rc));
+            return -1;
         }
     }
 
     int ret = seccomp_load(ctx);
     seccomp_release(ctx);
 
-    if (ret == 0) {
-        fprintf(stderr, "drmtap-helper: seccomp filter installed\n");
+    if (ret != 0) {
+        /* seccomp_load also returns -errno. */
+        fprintf(stderr, "drmtap-helper: seccomp_load failed: %s\n",
+                strerror(-ret));
+        return -1;
     }
-    return ret;
+    fprintf(stderr, "drmtap-helper: seccomp filter installed\n");
+    return 0;
 }
 #endif
 
@@ -259,19 +274,30 @@ static int send_all(int sock, const void *buf, size_t len) {
     while (sent < len) {
         ssize_t n = send(sock, p + sent, len - sent, MSG_NOSIGNAL);
         if (n <= 0) {
-            perror("cap_set_proc failed"); return -1;
+            perror("drmtap-helper: send failed"); return -1;
         }
         sent += (size_t)n;
     }
     return 0;
 }
 
-// Send error: metadata with data_size=0
+// Send error: metadata with data_size=0. For logical/validation failures where
+// errno carries no useful information about the cause.
 static int send_error(int sock, const char *reason) {
     fprintf(stderr, "drmtap-helper: %s\n", reason);
     struct grab_metadata meta = {0};  /* data_size=0 signals error */
     send_all(sock, &meta, sizeof(meta));
-    perror("cap_set_proc failed"); return -1;
+    return -1;
+}
+
+// Like send_error, but for failures of a syscall or libdrm call that just set
+// errno: capture it first (before send_all can overwrite it) and append it.
+static int send_error_errno(int sock, const char *reason) {
+    int saved = errno;
+    fprintf(stderr, "drmtap-helper: %s: %s\n", reason, strerror(saved));
+    struct grab_metadata meta = {0};  /* data_size=0 signals error */
+    send_all(sock, &meta, sizeof(meta));
+    return -1;
 }
 
 /* Cursor metadata sent before the cursor pixels — must match
@@ -396,7 +422,7 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     /* Refresh plane state on persistent fd */
     drmModePlaneRes *planes = drmModeGetPlaneResources(drm_fd);
     if (!planes) {
-        return send_error(sock, "drmModeGetPlaneResources failed");
+        return send_error_errno(sock, "drmModeGetPlaneResources failed");
     }
 
     /* Search for the plane currently bound to the target CRTC */
@@ -460,7 +486,7 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     /* GetFB2 on persistent fd */
     drmModeFB2 *fb2 = drmModeGetFB2(drm_fd, fb_id);
     if (!fb2) {
-        return send_error(sock, "drmModeGetFB2 failed");
+        return send_error_errno(sock, "drmModeGetFB2 failed");
     }
 
     if (fb2->handles[0] == 0) {
@@ -577,12 +603,12 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     struct drm_mode_map_dumb map = {0};
     map.handle = gem_handle;
     if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
-        return send_error(sock, "MODE_MAP_DUMB failed");
+        return send_error_errno(sock, "MODE_MAP_DUMB failed");
     }
     mapped = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED,
                   drm_fd, map.offset);
     if (mapped == MAP_FAILED) {
-        return send_error(sock, "mmap failed");
+        return send_error_errno(sock, "mmap failed");
     }
     meta.flags = 0;
     meta.data_size = (uint32_t)mapped_size;
