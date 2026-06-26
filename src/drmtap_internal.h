@@ -26,6 +26,13 @@
 /* Context structure (shared across modules)                                 */
 /* ========================================================================= */
 
+/* Upper bound on any CPU-side framebuffer buffer we allocate from a GetFB2
+ * report. Doubles as a DoS guard: a bogus or hostile width/height/stride
+ * (the framebuffer geometry is not under our control) cannot force an
+ * unbounded allocation. Sized for one 8K BGRA frame (7680 x 4320 x 4 bytes,
+ * ~126 MB). */
+#define DRMTAP_MAX_FB_BYTES ((size_t)7680 * 4320 * 4)
+
 struct drmtap_ctx {
     /* DRM device */
     int drm_fd;
@@ -73,9 +80,17 @@ struct drmtap_ctx {
     uint32_t fast_last_fb_id;       /* fb_id from last capture (change detect) */
     int      fast_initialized;      /* 1 = plane found, slots ready */
 
-    /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs) */
+    /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs).
+     * Grow-once and reused across grabs; capped at DRMTAP_MAX_FB_BYTES;
+     * freed in drmtap_close(). */
     void *deswizzle_buf;
     size_t deswizzle_buf_size;
+
+    /* Helper-mode (V2) pixel receive buffer. Same model as deswizzle_buf:
+     * ctx-owned, grow-once, reused across grabs, capped, freed in
+     * drmtap_close() — never a per-frame malloc/free. */
+    void *pixel_buf;
+    size_t pixel_buf_size;
 
     /* Cached FB2 multi-plane info (for EGL CCS import) */
     uint32_t fb2_pitches[4];

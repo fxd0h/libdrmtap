@@ -184,13 +184,21 @@ test('deswizzle', test_deswizzle, suite: 'unit')
 test('helper', test_helper, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
+# LSan: suppress the deliberate process-lifetime EGL/Mesa display allocation
+# (see tests/lsan.supp) so a real leak in a sanitized run stands out.
+lsan_supp = meson.project_source_root() / 'tests' / 'lsan.supp'
+integration_env = [
+    'DRM_DEVICE=/dev/dri/card1',
+    'LSAN_OPTIONS=suppressions=' + lsan_supp,
+]
+
 test('enumerate', test_enumerate, suite: 'integration',
-    env: ['DRM_DEVICE=/dev/dri/card1'],
+    env: integration_env,
     is_parallel: false,
 )
 
 test('capture', test_capture, suite: 'integration',
-    env: ['DRM_DEVICE=/dev/dri/card1'],
+    env: integration_env,
     is_parallel: false,
 )
 

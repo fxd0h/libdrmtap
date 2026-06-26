@@ -1,0 +1,12 @@
+# LeakSanitizer suppressions for libdrmtap integration tests.
+#
+# drmtap_gpu_egl_available() calls eglInitialize() on a process-shared
+# EGLDisplay and deliberately never calls eglTerminate(): terminating the
+# shared display would invalidate it for other capture threads mid-detile and
+# corrupt their output (see the comment in src/gpu_egl.c). The EGL/Mesa driver
+# state allocated by eglInitialize is therefore intentionally kept alive for the
+# whole process lifetime and reclaimed by the OS at exit. It is not a leak we
+# can or should free, so suppress it here — this keeps the ASan integration run
+# meaningful (a real, fixable leak still shows up instead of drowning in EGL
+# driver allocations).
+leak:drmtap_gpu_egl_available

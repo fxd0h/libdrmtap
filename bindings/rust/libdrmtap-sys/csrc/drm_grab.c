@@ -192,6 +192,32 @@ static int dmabuf_sync_end(int fd) {
     return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
+/* Ensure *buf holds at least `size` bytes, growing once and never shrinking so
+ * steady-state capture reuses one allocation instead of malloc/free per frame.
+ * Caps the allocation at DRMTAP_MAX_FB_BYTES as a guard against a bogus/hostile
+ * framebuffer geometry forcing an unbounded request. Contents are not preserved
+ * across a grow. Returns 0, -EINVAL (zero size), -EFBIG (over the cap), or
+ * -ENOMEM. */
+static int ensure_buf(void **buf, size_t *cap, size_t size) {
+    if (size == 0) {
+        return -EINVAL;
+    }
+    if (size > DRMTAP_MAX_FB_BYTES) {
+        return -EFBIG;
+    }
+    if (*buf && *cap >= size) {
+        return 0;
+    }
+    free(*buf);
+    *buf = malloc(size);
+    if (!*buf) {
+        *cap = 0;
+        return -ENOMEM;
+    }
+    *cap = size;
+    return 0;
+}
+
 /* ========================================================================= */
 /* virtio_gpu transfer helpers                                               */
 /* ========================================================================= */
@@ -327,19 +353,26 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         drmtap_debug_log(ctx,
             "No CAP_SYS_ADMIN (needs helper), trying helper...");
 
-        /* Allocate pixel buffer for helper to fill */
+        /* Receive buffer for the helper to fill. ctx-owned, grow-once and
+         * reused across grabs (never per-frame churn), capped — see ensure_buf.
+         * Freed in drmtap_close(). */
         size_t buf_size = (size_t)fb2->pitches[0] * fb2->height;
-        void *pixel_buf = malloc(buf_size);
-        if (!pixel_buf) {
+        ret = ensure_buf(&ctx->pixel_buf, &ctx->pixel_buf_size, buf_size);
+        if (ret != 0) {
+            if (ret == -EFBIG) {
+                drmtap_set_error(ctx,
+                    "framebuffer too large: %zu bytes (max %zu)",
+                    buf_size, (size_t)DRMTAP_MAX_FB_BYTES);
+            }
             drmModeFreeFB2(fb2);
-            return -ENOMEM;
+            return ret;
         }
+        void *pixel_buf = ctx->pixel_buf;
 
         /* Helper reads pixels in its own process and sends via socket */
         helper_grab_result_t hresult;
         ret = drmtap_helper_grab(ctx, &hresult, pixel_buf, buf_size);
         if (ret < 0) {
-            free(pixel_buf);
             drmtap_set_error(ctx,
                 "No CAP_SYS_ADMIN and helper failed (ret=%d). "
                 "Install the helper: sudo cp drmtap-helper /usr/local/bin/ "
@@ -352,17 +385,17 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         /* Allocate private state */
         priv = calloc(1, sizeof(frame_priv_t));
         if (!priv) {
-            free(pixel_buf);
             drmModeFreeFB2(fb2);
             return -ENOMEM;
         }
         priv->helper_drm_fd = -1;
         priv->prime_fd = -1;
         priv->gem_handle = 0;
-        priv->mapped = pixel_buf;       /* reuse mapped field for free() */
-        priv->mapped_size = buf_size;
+        /* pixel_buf is ctx-owned and reused; priv must never free/munmap it. */
+        priv->mapped = MAP_FAILED;
+        priv->mapped_size = 0;
         priv->used_dumb_map = 1;        /* skip dmabuf_sync in release */
-        priv->is_heap_buf = 1;          /* free() instead of munmap() */
+        priv->is_heap_buf = 0;          /* ctx owns the buffer; do not free */
 
         /* Fill frame info from helper metadata */
         memset(frame, 0, sizeof(*frame));
@@ -375,33 +408,18 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
         /* V3: helper sent DMA-BUF fd via SCM_RIGHTS */
         if (hresult.dmabuf_fd >= 0) {
-            free(pixel_buf);  /* Don't need pixel buffer */
-            /* priv->mapped aliased pixel_buf (set above for the heap-buffer
-             * path); it is now dangling. Clear it before the cleanup block so we
-             * don't munmap a freed pointer. priv is freshly calloc'd, so there
-             * is no real previous-frame mmap to release here anyway. */
-            priv->mapped = MAP_FAILED;
-            priv->is_heap_buf = 0;
-
+            /* The helper passed a DMA-BUF fd instead of pixels; ctx->pixel_buf
+             * stays allocated for reuse on the next grab. priv is freshly
+             * calloc'd (mapped=MAP_FAILED, prime_fd=-1), so there is no prior
+             * mapping to release here. */
             int dmabuf_fd = hresult.dmabuf_fd;
             size_t mmap_size = (size_t)frame->stride * frame->height;
-
-            /* Clean up previous frame's DMA-BUF resources (they change every frame
-             * because the compositor flips between framebuffers) */
-            if (priv->mapped != MAP_FAILED && priv->mapped != NULL) {
-                munmap(priv->mapped, priv->mapped_size);
-                priv->mapped = MAP_FAILED;
-            }
-            if (priv->prime_fd >= 0 && priv->prime_fd != dmabuf_fd) {
-                close(priv->prime_fd);
-            }
 
             /* mmap the DMA-BUF in the parent */
             void *mapped = mmap(NULL, mmap_size, PROT_READ, MAP_SHARED,
                                 dmabuf_fd, 0);
 
             priv->prime_fd = dmabuf_fd;
-            priv->is_heap_buf = 0;
 
             if (mapped != MAP_FAILED) {
                 priv->mapped = mapped;
@@ -409,6 +427,14 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                 frame->data = mapped;
                 frame->dma_buf_fd = dmabuf_fd;
                 frame->_priv = priv;
+
+                /* This is a real DMA-BUF the helper exported via PrimeHandleToFD,
+                 * not a dumb buffer. Clear the dumb-map flag inherited from the
+                 * heap path above and bracket the CPU read with DMA_BUF_SYNC so
+                 * cache-coherency is correct (stale pixels otherwise, notably on
+                 * ARM/Jetson). The matching SYNC_END runs in the cleanup block. */
+                priv->used_dumb_map = 0;
+                dmabuf_sync_start(dmabuf_fd);
 
                 drmtap_debug_log(ctx,
                     "helper V3: mmap'd DMA-BUF fd=%d (%zu bytes), "
@@ -439,7 +465,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             return 0;
         }
 
-        /* V2 fallback: pixel data received via socket */
+        /* V2 fallback: pixel data received into ctx->pixel_buf. frame->data
+         * borrows that buffer — valid until the next grab or drmtap_close();
+         * priv must not free it (is_heap_buf=0, mapped=MAP_FAILED above). */
         frame->dma_buf_fd = -1;
         frame->data = pixel_buf;
         frame->_priv = priv;
@@ -566,16 +594,18 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     #define DRM_FMT_AR30 0x30335241u  /* fourcc('A','R','3','0') */
     #define DRM_FMT_XR24 0x34325258u  /* fourcc('X','R','2','4') */
 
-    /* Ensure shadow buffer is allocated */
+    /* Ensure shadow buffer is allocated (grow-once, capped — see ensure_buf).
+     * This runs before both the EGL and CPU detile paths, so the cap also
+     * bounds the EGL output (width*4*height <= stride*height = size). */
     size_t size = (size_t)frame->stride * frame->height;
-    if (ctx->deswizzle_buf_size < size) {
-        free(ctx->deswizzle_buf);
-        ctx->deswizzle_buf = malloc(size);
-        if (!ctx->deswizzle_buf) {
-            ctx->deswizzle_buf_size = 0;
-            return -ENOMEM;
+    int br = ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size, size);
+    if (br != 0) {
+        if (br == -EFBIG) {
+            drmtap_set_error(ctx,
+                "framebuffer too large for deswizzle: %zu bytes (max %zu)",
+                size, (size_t)DRMTAP_MAX_FB_BYTES);
         }
-        ctx->deswizzle_buf_size = size;
+        return br;
     }
 
     /* --- EGL path: import DMA-BUF, GPU renders to linear RGBA ---
