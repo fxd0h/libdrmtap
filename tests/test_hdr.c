@@ -89,7 +89,11 @@ static void test_unsupported(void) {
     TEST_ASSERT(r == -ENOTSUP);
     /* Bad args. */
     TEST_ASSERT(drmtap_tonemap_hdr10(NULL, &b, 1, 1, 4, 4, 0x30335258u) == -EINVAL);
-    printf("  PASS: unsupported format / bad args rejected\n");
+    /* Strides that cannot hold a full row (2 px need 8 bytes). */
+    uint32_t row[2] = {0, 0};
+    TEST_ASSERT(drmtap_tonemap_hdr10(row, row, 2, 1, 4, 8, 0x30335258u) == -EINVAL);
+    TEST_ASSERT(drmtap_tonemap_hdr10(row, row, 2, 1, 8, 4, 0x30335258u) == -EINVAL);
+    printf("  PASS: unsupported format / bad args / bad stride rejected\n");
 }
 
 int main(void) {

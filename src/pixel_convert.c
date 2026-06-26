@@ -403,14 +403,14 @@ static uint8_t to_srgb8(double linear) {
 static void tonemap_ar30_pixel(uint32_t pixel,
                                uint8_t *r8, uint8_t *g8, uint8_t *b8) {
     /* 10-bit channels, ARGB2101010: R[29:20] G[19:10] B[9:0]. */
-    double Rl = g_pq_lut[(pixel >> 20) & 0x3FF];  /* BT.2020 linear nits */
-    double Gl = g_pq_lut[(pixel >> 10) & 0x3FF];
-    double Bl = g_pq_lut[(pixel)       & 0x3FF];
+    double r_lin = g_pq_lut[(pixel >> 20) & 0x3FF];  /* BT.2020 linear nits */
+    double g_lin = g_pq_lut[(pixel >> 10) & 0x3FF];
+    double b_lin = g_pq_lut[(pixel)       & 0x3FF];
 
     /* BT.2020 -> BT.709 in linear light. */
-    double r =  1.660491 * Rl - 0.587641 * Gl - 0.072850 * Bl;
-    double g = -0.124550 * Rl + 1.132900 * Gl - 0.008349 * Bl;
-    double b = -0.018151 * Rl - 0.100579 * Gl + 1.118730 * Bl;
+    double r =  1.660491 * r_lin - 0.587641 * g_lin - 0.072850 * b_lin;
+    double g = -0.124550 * r_lin + 1.132900 * g_lin - 0.008349 * b_lin;
+    double b = -0.018151 * r_lin - 0.100579 * g_lin + 1.118730 * b_lin;
     if (r < 0.0) r = 0.0;
     if (g < 0.0) g = 0.0;
     if (b < 0.0) b = 0.0;
@@ -431,6 +431,13 @@ int drmtap_tonemap_hdr10(const void *src, void *dst,
     /* XR30 = XRGB2101010 ('XR30'), AR30 = ARGB2101010 ('AR30'). */
     if (src_format != 0x30335258u && src_format != 0x30335241u) {
         return -ENOTSUP;
+    }
+    /* Both buffers are 4 bytes/pixel; a stride that cannot hold a full row
+     * would make the per-row indexing below over-read or over-write. */
+    size_t row_bytes = (size_t)width * 4u;
+    if (row_bytes > UINT32_MAX || src_stride < row_bytes ||
+        dst_stride < row_bytes) {
+        return -EINVAL;
     }
 
     pthread_once(&g_hdr_once, hdr_lut_init);
