@@ -129,9 +129,10 @@ endif
 
 # Exploit-mitigation hardening for the privileged (CAP_SYS_ADMIN) helper.
 helper_c_args += '-fstack-protector-strong'
-# _FORTIFY_SOURCE needs an optimized build; at -O0 it only warns, and the CI
-# build uses -Werror, so gate it on optimization being enabled.
-if get_option('optimization') not in ['0', 'g']
+# _FORTIFY_SOURCE needs an optimized build; at -O0 — and in 'plain' mode, where
+# Meson adds no -O flag at all — it only warns, and the CI build uses -Werror, so
+# enable it only when optimization is on. -Og ('g') satisfies Fortify, so keep it.
+if get_option('optimization') not in ['plain', '0']
     helper_c_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=2']
 endif
 helper_link_args = ['-Wl,-z,relro,-z,now']

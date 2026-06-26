@@ -468,6 +468,16 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
         return send_error(sock, "handles[0]==0 (CAP_SYS_ADMIN not set?)");
     }
 
+    /* Reject absurd geometry before any size computation: bound pitch*height so a
+     * hostile framebuffer cannot overflow size_t, and so the uint32 data_size we
+     * put on the wire cannot disagree with the size_t payload we send. Cap at one
+     * 8K BGRA frame (~126 MB, well under UINT32_MAX). */
+    if (fb2->pitches[0] == 0 || fb2->height == 0 ||
+        (size_t)fb2->height > ((size_t)7680 * 4320 * 4) / fb2->pitches[0]) {
+        drmModeFreeFB2(fb2);
+        return send_error(sock, "rejecting framebuffer geometry (too large)");
+    }
+
     uint32_t gem_handle = fb2->handles[0];
 
     /* virtio_gpu: transfer pixels from host GPU to guest RAM, then wait. */

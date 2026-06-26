@@ -73,6 +73,8 @@ typedef struct {
     uint32_t gem_handle;    /* GEM handle (needs close) */
     int used_dumb_map;      /* 1 if mapped via dumb buffer (virtio_gpu) */
     int is_heap_buf;        /* 1 if mapped is malloc'd (helper v2 pixel path) */
+    int sync_started;       /* 1 if dmabuf_sync_start succeeded — release issues
+                               the matching SYNC_END only then (no END w/o START) */
 } frame_priv_t;
 
 /* ========================================================================= */
@@ -280,6 +282,21 @@ static void *virtio_dumb_mmap(drmtap_ctx *ctx, uint32_t handle, size_t size) {
 /* Core capture logic                                                        */
 /* ========================================================================= */
 
+/* Reject framebuffer geometry whose byte size (stride * height) would overflow
+ * size_t (a concern on 32-bit builds) or exceed DRMTAP_MAX_FB_BYTES, before any
+ * downstream multiply feeds an allocation or mmap. stride/height come from
+ * drmModeGetFB2 or the helper wire and are not under our control, so validating
+ * once at each entry point keeps all later stride*height computations safe. */
+static int validate_fb_size(uint32_t stride, uint32_t height) {
+    if (stride == 0 || height == 0) {
+        return -EINVAL;
+    }
+    if ((size_t)height > DRMTAP_MAX_FB_BYTES / stride) {
+        return -EFBIG;
+    }
+    return 0;
+}
+
 // Internal capture that populates frame_info
 // If do_mmap is true, also maps the pixel data to frame->data
 static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
@@ -320,6 +337,14 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                      fb2->width, fb2->height,
                      (const char *)&fb2->pixel_format,
                      (unsigned long)fb2->modifier);
+
+    ret = validate_fb_size(fb2->pitches[0], fb2->height);
+    if (ret != 0) {
+        drmtap_set_error(ctx, "rejecting framebuffer geometry %ux%u stride=%u",
+                         fb2->width, fb2->height, fb2->pitches[0]);
+        drmModeFreeFB2(fb2);
+        return ret;
+    }
 
     /* Cache multi-plane info for EGL CCS import */
     ctx->fb2_num_planes = 0;
@@ -406,6 +431,17 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         frame->modifier = hresult.wire.modifier;
         frame->fb_id = hresult.wire.fb_id;
 
+        /* The helper validates its own geometry, but it sends stride/height over
+         * the wire — re-check before we mmap/size anything from those values. */
+        ret = validate_fb_size(frame->stride, frame->height);
+        if (ret != 0) {
+            drmtap_set_error(ctx, "helper sent invalid geometry %ux%u stride=%u",
+                             frame->width, frame->height, frame->stride);
+            free(priv);
+            drmModeFreeFB2(fb2);
+            return ret;
+        }
+
         /* V3: helper sent DMA-BUF fd via SCM_RIGHTS */
         if (hresult.dmabuf_fd >= 0) {
             /* The helper passed a DMA-BUF fd instead of pixels; ctx->pixel_buf
@@ -434,7 +470,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                  * cache-coherency is correct (stale pixels otherwise, notably on
                  * ARM/Jetson). The matching SYNC_END runs in the cleanup block. */
                 priv->used_dumb_map = 0;
-                dmabuf_sync_start(dmabuf_fd);
+                priv->sync_started = (dmabuf_sync_start(dmabuf_fd) == 0);
 
                 drmtap_debug_log(ctx,
                     "helper V3: mmap'd DMA-BUF fd=%d (%zu bytes), "
@@ -539,9 +575,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             drmtap_debug_log(ctx, "mmap failed, falling back to zero-copy");
             frame->data = NULL;
         } else {
-            /* Unconditionally invalidate CPU caches using SYNC_START */
-            /* Crucial for virtio_gpu where the transfer arrives in system RAM asynchronously */
-            dmabuf_sync_start(prime_fd);
+            /* Invalidate CPU caches with SYNC_START and remember it succeeded so
+             * release issues the matching SYNC_END (and only then). Crucial for
+             * virtio_gpu where the transfer arrives in system RAM asynchronously. */
+            priv->sync_started = (dmabuf_sync_start(prime_fd) == 0);
 
             priv->mapped = mapped;
             priv->mapped_size = size;
@@ -594,18 +631,21 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     #define DRM_FMT_AR30 0x30335241u  /* fourcc('A','R','3','0') */
     #define DRM_FMT_XR24 0x34325258u  /* fourcc('X','R','2','4') */
 
-    /* Ensure shadow buffer is allocated (grow-once, capped — see ensure_buf).
-     * This runs before both the EGL and CPU detile paths, so the cap also
-     * bounds the EGL output (width*4*height <= stride*height = size). */
+    /* Ensure the CPU-deswizzle shadow buffer is allocated (grow-once, capped —
+     * see ensure_buf). frame->stride/height are validated at every entry point
+     * (validate_fb_size), so this multiply cannot overflow. NOTE: this does NOT
+     * bound the EGL output, which is always 4-byte RGBA — a sub-4-byte source
+     * (e.g. RG16) can expand past stride*height, so the EGL path caps egl_size
+     * separately below. */
     size_t size = (size_t)frame->stride * frame->height;
-    int br = ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size, size);
-    if (br != 0) {
-        if (br == -EFBIG) {
+    int bres = ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size, size);
+    if (bres != 0) {
+        if (bres == -EFBIG) {
             drmtap_set_error(ctx,
                 "framebuffer too large for deswizzle: %zu bytes (max %zu)",
                 size, (size_t)DRMTAP_MAX_FB_BYTES);
         }
-        return br;
+        return bres;
     }
 
     /* --- EGL path: import DMA-BUF, GPU renders to linear RGBA ---
@@ -631,6 +671,15 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                                           modifier, &egl_data, &egl_size);
         drmtap_debug_log(ctx, "EGL convert: ret=%d data=%p", ret, egl_data);
         if (ret == 0 && egl_data) {
+            /* The EGL output is 4-byte RGBA and can exceed the source
+             * stride*height for sub-4-byte formats, so cap it independently
+             * before adopting it as the context buffer. */
+            if (egl_size > DRMTAP_MAX_FB_BYTES) {
+                free(egl_data);
+                drmtap_set_error(ctx, "EGL output too large: %zu bytes (max %zu)",
+                                 egl_size, (size_t)DRMTAP_MAX_FB_BYTES);
+                return -EFBIG;
+            }
             /* Store in ctx for reuse / cleanup */
             free(ctx->deswizzle_buf);
             ctx->deswizzle_buf = egl_data;
@@ -727,7 +776,7 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             if (priv->is_heap_buf) {
                 free(priv->mapped);
             } else if (priv->mapped != MAP_FAILED) {
-                if (!priv->used_dumb_map && priv->prime_fd >= 0) {
+                if (priv->sync_started && priv->prime_fd >= 0) {
                     dmabuf_sync_end(priv->prime_fd);
                 }
                 munmap(priv->mapped, priv->mapped_size);
@@ -922,6 +971,14 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         drmModeFreeFB2(fb2);
         drmtap_set_error(ctx, "fast2: handles[0]==0, no CAP_SYS_ADMIN");
         return -EACCES;
+    }
+
+    ret = validate_fb_size(fb2->pitches[0], fb2->height);
+    if (ret != 0) {
+        drmtap_set_error(ctx, "fast2: rejecting geometry %ux%u stride=%u",
+                         fb2->width, fb2->height, fb2->pitches[0]);
+        drmModeFreeFB2(fb2);
+        return ret;
     }
 
     /* Export DMA-BUF */
