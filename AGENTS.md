@@ -335,10 +335,12 @@ This is optional and has no effect on PR review.
 6. **EGL is the primary detile path** — tiled/compressed FBs (Intel CCS, AMD, Nvidia
    block-linear, vendor modifiers) go through `gpu_egl.c` (import DMA-BUF as EGLImage,
    draw, `glReadPixels` to linear RGBA). CPU deswizzle is only a fallback for some formats.
-7. **HDR10 / 10-bit is NOT done** — it is an open issue ([#16](https://github.com/fxd0h/libdrmtap/issues/16))
-   and the current top blocker. The AR30/XR30 path naively keeps the top 8 of 10 bits (no PQ
-   decode, no BT.2020, no tone-mapping); 16-bit and P010 are unhandled. Do **not** mark HDR or
-   10-bit as "implemented" or "verified" — describe it as in progress (#16).
+7. **HDR10 is tone-mapped to SDR** — when the connector reports HDR
+   (`HDR_OUTPUT_METADATA`, PQ), `AR30`/`XR30` and 16-bit `XR48`/`AR48`/`XB48`/`AB48`
+   scanouts are PQ-decoded, BT.2020 → BT.709 gamut-mapped, tone-mapped and
+   sRGB-encoded to 8-bit, in both the CPU and the EGL (tiled) paths. Plain SDR
+   10-bit gets a straight bit-depth reduction. `P010` (overlay-video YUV) and HLG
+   are **not** tone-mapped — don't claim those as HDR-supported.
 
 ### When Writing Tests
 

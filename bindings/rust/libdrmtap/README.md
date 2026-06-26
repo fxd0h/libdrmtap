@@ -4,6 +4,10 @@ Safe Rust wrapper for [libdrmtap](https://github.com/fxd0h/libdrmtap) — DRM/KM
 
 Capture the screen at the kernel level: login screens, Wayland, headless — no user prompts.
 
+Frames come back as 8-bit BGRA. Tiled/compressed framebuffers are GPU-detiled,
+and **HDR10** scanouts (PQ/BT.2020) are tone-mapped to SDR when the connector
+reports HDR (`P010` overlay-video and HLG excepted).
+
 ## ⚠️ Testing Status
 
 > **Verified on `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`,
