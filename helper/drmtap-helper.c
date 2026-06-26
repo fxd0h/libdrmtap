@@ -534,7 +534,7 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
      *     resource that a guest CPU mmap reads back black. We still export the
      *     DMA-BUF, but tag it FLAG_VIRGL so the parent reads it back on the GPU
      *     (EGL import + glReadPixels), which sees the real host-rendered pixels.
-     * virtio_plain stays 0 if detection is unavailable; that just means "treat
+     * If detection is unavailable, virtio_virgl stays 0; that just means "treat
      * like plain" (export + direct map), which is correct for 2D virtio. */
     static int virtio_detected = 0;  /* 1 once we've probed for 3D features */
     static int virtio_virgl = 0;     /* 1 = confirmed virgl (3D features present) */
@@ -605,7 +605,14 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
             close(prime_fd);
             return ret;
         }
-        /* Export failed — fall through to the dumb-map pixel path. */
+        /* Export failed. For a confirmed virgl scanout the dumb-map fallback
+         * below would read back black (host-side resource), so fail closed
+         * rather than send a bogus all-black frame. */
+        if (virtio_virgl) {
+            return send_error(sock, "virgl DMA-BUF export failed "
+                                    "(no usable CPU readback for a host scanout)");
+        }
+        /* Otherwise fall through to the dumb-map pixel path. */
         fprintf(stderr,
             "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
             prime_ret);
