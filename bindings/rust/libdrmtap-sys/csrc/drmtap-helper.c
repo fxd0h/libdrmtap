@@ -89,6 +89,19 @@ struct drm_virtgpu_3d_wait {
     DRM_IOW(DRM_COMMAND_BASE + DRM_VIRTGPU_WAIT, \
             struct drm_virtgpu_3d_wait)
 #endif
+/* GETPARAM (used to detect virgl 3D) lives in <drm/virtgpu_drm.h>, not in
+ * <linux/virtio_gpu.h>; provide the uapi definition if it's missing. */
+#ifndef DRM_IOCTL_VIRTGPU_GETPARAM
+struct drm_virtgpu_getparam {
+    __u64 param;
+    __u64 value;
+};
+#define VIRTGPU_PARAM_3D_FEATURES 1
+#define DRM_VIRTGPU_GETPARAM 0x03
+#define DRM_IOCTL_VIRTGPU_GETPARAM \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_VIRTGPU_GETPARAM, \
+             struct drm_virtgpu_getparam)
+#endif
 #endif
 
 /* Socket fd inherited from parent (via socketpair) */
@@ -197,9 +210,12 @@ static int install_seccomp(void) {
         perror("cap_set_proc failed"); return -1;
     }
 
+    /* NOTE: open/openat are deliberately NOT allowed. The DRM device is opened
+     * once in main() before this filter is installed, and the grab loop only
+     * ever reuses that fd — so a compromised helper cannot open arbitrary files
+     * even though it holds CAP_SYS_ADMIN. */
     int allowed[] = {
         SCMP_SYS(read), SCMP_SYS(write), SCMP_SYS(close),
-        SCMP_SYS(openat), SCMP_SYS(open),
         SCMP_SYS(ioctl),       /* DRM ioctls */
         SCMP_SYS(sendto),      /* send() */
         SCMP_SYS(sendmsg),     /* sendmsg() for SCM_RIGHTS */
@@ -452,9 +468,19 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
         return send_error(sock, "handles[0]==0 (CAP_SYS_ADMIN not set?)");
     }
 
+    /* Reject absurd geometry before any size computation: bound pitch*height so a
+     * hostile framebuffer cannot overflow size_t, and so the uint32 data_size we
+     * put on the wire cannot disagree with the size_t payload we send. Cap at one
+     * 8K BGRA frame (~126 MB, well under UINT32_MAX). */
+    if (fb2->pitches[0] == 0 || fb2->height == 0 ||
+        (size_t)fb2->height > ((size_t)7680 * 4320 * 4) / fb2->pitches[0]) {
+        drmModeFreeFB2(fb2);
+        return send_error(sock, "rejecting framebuffer geometry (too large)");
+    }
+
     uint32_t gem_handle = fb2->handles[0];
 
-    /* virtio_gpu: transfer pixels from host GPU to guest RAM */
+    /* virtio_gpu: transfer pixels from host GPU to guest RAM, then wait. */
     if (is_virtio) {
 #ifdef __linux__
         struct drm_virtgpu_3d_transfer_from_host xfer = {0};
@@ -470,29 +496,38 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 #endif
     }
 
-    /* dumb_mmap — map the framebuffer in THIS process */
-    mapped_size = (size_t)fb2->pitches[0] * fb2->height;
-    struct drm_mode_map_dumb map = {0};
-    map.handle = gem_handle;
-    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
-        drmModeFreeFB2(fb2);
-        return send_error(sock, "MODE_MAP_DUMB failed");
-    }
-    mapped = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED,
-                  drm_fd, map.offset);
-    if (mapped == MAP_FAILED) {
-        drmModeFreeFB2(fb2);
-        return send_error(sock, "mmap failed");
+    /* Decide once whether this virtio-gpu is "plain" (no virgl 3D). Without 3D
+     * the scanout is a 2D dumb buffer in guest RAM that we can export as a
+     * DMA-BUF and let the parent map directly (zero-copy), instead of copying
+     * the whole framebuffer over the socket every frame. With virgl the scanout
+     * can be a host-side 3D resource, so we keep the proven copy-after-transfer
+     * path there until the zero-copy path is validated on virgl. */
+    static int virtio_plain = -1;
+    if (is_virtio && virtio_plain < 0) {
+        virtio_plain = 0;
+#if defined(__linux__) && defined(DRM_IOCTL_VIRTGPU_GETPARAM)
+        uint64_t features = 0;
+        struct drm_virtgpu_getparam gp = {
+            .param = VIRTGPU_PARAM_3D_FEATURES,
+            .value = (uint64_t)(uintptr_t)&features,
+        };
+        if (drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_GETPARAM, &gp) == 0 && features == 0) {
+            virtio_plain = 1;
+        }
+        fprintf(stderr, "drmtap-helper: virtio 3D features=%llu -> %s path\n",
+                (unsigned long long)features,
+                virtio_plain ? "zero-copy DMA-BUF" : "pixel-copy");
+#endif
     }
 
-    /* Build metadata */
+    /* Build metadata from the framebuffer (independent of how we move pixels). */
+    mapped_size = (size_t)fb2->pitches[0] * fb2->height;
     struct grab_metadata meta = {0};
     meta.width = fb2->width;
     meta.height = fb2->height;
     meta.stride = fb2->pitches[0];
     meta.format = fb2->pixel_format;
     meta.fb_id = fb_id;
-    meta.data_size = (uint32_t)mapped_size;
     meta.modifier = fb2->modifier;
 
     drmModeFreeFB2(fb2);
@@ -504,6 +539,53 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     clock_gettime(CLOCK_REALTIME, &ts);
     meta.seq = seq_counter;
     meta.timestamp_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+
+    int ret;
+
+    /* Export the GEM buffer as a DMA-BUF fd and pass it via SCM_RIGHTS so the
+     * parent maps it directly — no per-frame pixel copy over the socket. Two
+     * cases take this path:
+     *   - tiled (non-linear) non-virtio framebuffers: the parent EGL-imports and
+     *     GPU-deswizzles. Done BEFORE any MODE_MAP_DUMB on purpose: scanout
+     *     buffers on some drivers are not dumb-mappable (nvidia-drm on Tegra
+     *     fails MODE_MAP_DUMB with "Failed to lookup gem object"), so requiring a
+     *     dumb map first would break capture there even though the export works.
+     *   - plain virtio-gpu (guest-rendered, no host transfer): a linear scanout
+     *     in guest RAM the parent maps directly (no detile). Replaces the V2
+     *     pixel copy, dropping the helper's per-frame CPU cost.
+     * Either way, if the export fails we fall through to the dumb-map pixel path. */
+    if ((meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio)
+        || (is_virtio && virtio_plain)) {
+        int prime_fd = -1;
+        int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
+                                            DRM_CLOEXEC | DRM_RDWR, &prime_fd);
+        if (prime_ret == 0 && prime_fd >= 0) {
+            meta.flags = FLAG_HAS_DMABUF;
+            meta.data_size = 0;  /* no pixel data follows */
+            ret = send_fd(sock, prime_fd, &meta, sizeof(meta));
+            close(prime_fd);
+            return ret;
+        }
+        /* Export failed — fall through to the dumb-map pixel path. */
+        fprintf(stderr,
+            "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
+            prime_ret);
+    }
+
+    /* Pixel-data path (linear modifier, virtio, or DMA-BUF export failed):
+     * dumb-map the framebuffer in this process and send the pixels directly. */
+    struct drm_mode_map_dumb map = {0};
+    map.handle = gem_handle;
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
+        return send_error(sock, "MODE_MAP_DUMB failed");
+    }
+    mapped = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED,
+                  drm_fd, map.offset);
+    if (mapped == MAP_FAILED) {
+        return send_error(sock, "mmap failed");
+    }
+    meta.flags = 0;
+    meta.data_size = (uint32_t)mapped_size;
 
     /* Debug: print pixel values to verify freshness */
     {
@@ -524,31 +606,6 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
         }
     }
 
-    int ret;
-
-    /* Non-linear modifier: export DMA-BUF fd via drmPrimeHandleToFD
-     * and send it via SCM_RIGHTS — the parent can then EGL-import it
-     * for GPU deswizzle. We still send the mmap'd pixels as fallback data. */
-    if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio) {
-        int prime_fd = -1;
-        int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
-                                            DRM_CLOEXEC | DRM_RDWR, &prime_fd);
-        if (prime_ret == 0 && prime_fd >= 0) {
-            meta.flags = FLAG_HAS_DMABUF;
-            meta.data_size = 0;  /* no pixel data follows */
-            ret = send_fd(sock, prime_fd, &meta, sizeof(meta));
-            close(prime_fd);
-            munmap(mapped, mapped_size);
-            return ret;
-        }
-        /* drmPrimeHandleToFD failed — fall through to pixel data path */
-        fprintf(stderr,
-            "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
-            prime_ret);
-    }
-
-    /* Linear modifier (or Prime failed): send pixel data directly */
-    meta.flags = 0;
     ret = send_all(sock, &meta, sizeof(meta));
     if (ret == 0) {
         ret = send_all(sock, mapped, mapped_size);
@@ -580,12 +637,34 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
-    /* Validate socket fd */
+    /* Validate socket fd. F_GETFD only tells us fd 3 is open; SO_PEERCRED
+     * additionally requires it to be a connected AF_UNIX socket and tells us who
+     * is on the other end. This is defense-in-depth, not access control: it
+     * rejects being exec'd with fd 3 pointing at an arbitrary open file, or by a
+     * different user. Real access control to DRM scanout is enforced by the
+     * helper's install permissions (root:rustdesk-capture 0750), not here. */
     if (fcntl(HELPER_SOCKET_FD, F_GETFD) < 0) {
         fprintf(stderr,
                 "drmtap-helper: fd %d not valid — must be spawned by "
                 "libdrmtap, not run directly\n", HELPER_SOCKET_FD);
         return 1;
+    }
+    {
+        struct ucred peer;
+        socklen_t plen = sizeof(peer);
+        if (getsockopt(HELPER_SOCKET_FD, SOL_SOCKET, SO_PEERCRED,
+                       &peer, &plen) != 0) {
+            fprintf(stderr,
+                    "drmtap-helper: fd %d is not a socket — must be spawned by "
+                    "libdrmtap, not run directly\n", HELPER_SOCKET_FD);
+            return 1;
+        }
+        if (peer.uid != getuid()) {
+            fprintf(stderr,
+                    "drmtap-helper: refusing to serve peer uid %u (expected %u)\n",
+                    (unsigned)peer.uid, (unsigned)getuid());
+            return 1;
+        }
     }
 
     int sock = HELPER_SOCKET_FD;
@@ -621,31 +700,18 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* The whole point of this helper is to run privileged but confined. If we
-     * cannot establish the confinement, refuse to serve rather than run with
-     * CAP_SYS_ADMIN unconfined. */
-#ifdef HAVE_LIBCAP
-    if (drop_caps() != 0) {
-        fprintf(stderr,
-                "drmtap-helper: refusing to run: could not drop capabilities\n");
-        return 1;
-    }
-#endif
-
-#ifdef HAVE_SECCOMP
-    if (install_seccomp() != 0) {
-        fprintf(stderr,
-                "drmtap-helper: refusing to run: could not install seccomp filter\n");
-        return 1;
-    }
-#endif
-
     /* ================================================================
      * Persistent DRM fd — opened ONCE, reused for all frames.
      * This is the key performance optimization: avoids the expensive
      * open()/close() + drmSetClientCap() on every frame.
+     *
+     * Opened BEFORE seccomp so the filter can forbid open/openat entirely: the
+     * grab loop never opens another path, it only reuses this fd. Opened
+     * read-only because we issue only read ioctls (GetFB2 / PrimeHandleToFD /
+     * SetClientCap) and never modify KMS state; on the DRM master / CAP_SYS_ADMIN
+     * path these all work on an O_RDONLY fd.
      * ================================================================ */
-    int drm_fd = open(device, O_RDWR | O_CLOEXEC);
+    int drm_fd = open(device, O_RDONLY | O_CLOEXEC);
     if (drm_fd < 0) {
         fprintf(stderr, "drmtap-helper: failed to open %s: %s\n",
                 device, strerror(errno));
@@ -665,6 +731,26 @@ int main(int argc, char *argv[]) {
     }
     fprintf(stderr, "drmtap-helper: persistent fd=%d device=%s virtio=%d\n",
             drm_fd, device, is_virtio);
+
+    /* The whole point of this helper is to run privileged but confined. With the
+     * device already open, drop everything but CAP_SYS_ADMIN and install the
+     * seccomp filter. If we cannot establish the confinement, refuse to serve
+     * rather than run with CAP_SYS_ADMIN unconfined. */
+#ifdef HAVE_LIBCAP
+    if (drop_caps() != 0) {
+        fprintf(stderr,
+                "drmtap-helper: refusing to run: could not drop capabilities\n");
+        return 1;
+    }
+#endif
+
+#ifdef HAVE_SECCOMP
+    if (install_seccomp() != 0) {
+        fprintf(stderr,
+                "drmtap-helper: refusing to run: could not install seccomp filter\n");
+        return 1;
+    }
+#endif
 
     /* Event loop: receive commands, process with persistent fd */
     while (1) {

@@ -292,6 +292,16 @@ void drmtap_close(drmtap_ctx *ctx) {
         ctx->drm_fd = -1;
     }
 
+    /* Context-owned, reused-across-frames buffers (the deswizzle/EGL shadow and
+     * the helper-mode pixel receive buffer) must be released here —
+     * frame_release only drops per-frame state. */
+    free(ctx->deswizzle_buf);
+    ctx->deswizzle_buf = NULL;
+    ctx->deswizzle_buf_size = 0;
+    free(ctx->pixel_buf);
+    ctx->pixel_buf = NULL;
+    ctx->pixel_buf_size = 0;
+
     pthread_mutex_destroy(&ctx->lock);
     free(ctx);
 }
