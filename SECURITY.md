@@ -30,8 +30,10 @@ support, that is a bug in this document — please report it.
 
 The library (linked into your unprivileged application) `fork()`/`execl()`s the
 helper, handing it one end of an anonymous `socketpair(2)` on fd 3
-(`HELPER_SOCKET_FD`). The helper refuses to run if fd 3 is not a valid socket,
-so it cannot be usefully invoked standalone. All capture requests go over that
+(`HELPER_SOCKET_FD`). The helper refuses to run if fd 3 is not a connected
+socket, **and** checks the peer's credentials via `SO_PEERCRED`, refusing to
+serve unless the peer uid matches its own — so it cannot be usefully invoked
+standalone or hijacked by another user. All capture requests go over that
 private inherited socket.
 
 ---
@@ -63,23 +65,38 @@ call `drmSetMaster`).
 
 At startup, in this order (`main()` in `helper/drmtap-helper.c`):
 
-1. **Refuses to run standalone** — validates that fd 3 is a socket; exits otherwise.
+1. **Refuses to run standalone** — validates that fd 3 is a connected socket and
+   that the peer uid (via `SO_PEERCRED`) matches its own uid; exits otherwise.
 2. **Restricts the device path** — the device comes from `argv[1]` or the
    `DRM_DEVICE` env var (both attacker-influenceable). The helper canonicalizes
    it with `realpath()` and **refuses any path that does not resolve under
    `/dev/dri/`** before opening it.
 3. **`PR_SET_NO_NEW_PRIVS`** — set via `prctl`, before seccomp; hard-fails if it
    cannot be set.
-4. **Drops all capabilities except `CAP_SYS_ADMIN`** — via libcap
+4. **Opens the DRM device once, read-only** — `open(..., O_RDONLY | O_CLOEXEC)`.
+   Only read ioctls are issued (`GetFB2` / `PrimeHandleToFD` / `SetClientCap`),
+   which all work on an `O_RDONLY` fd on the CAP_SYS_ADMIN path; the helper never
+   becomes DRM master and never modifies KMS state. Opening happens **before**
+   seccomp so the filter can forbid `open`/`openat` outright (next step).
+5. **Drops all capabilities except `CAP_SYS_ADMIN`** — via libcap
    (`cap_set_proc`). **Hard-fails** (refuses to serve) if it cannot.
-5. **Installs a seccomp filter** — `seccomp_init(SCMP_ACT_KILL_PROCESS)` (a
-   default-kill allowlist), allowing only: `read, write, close, openat, open,
-   ioctl, sendto, sendmsg, recvfrom, mmap, munmap, brk, fstat, newfstatat,
-   fcntl, exit_group, exit, rt_sigreturn, clock_gettime`. **Hard-fails** if it
+6. **Installs a seccomp filter** — `seccomp_init(SCMP_ACT_KILL_PROCESS)` (a
+   default-**KILL** allowlist), allowing only: `read, write, close, ioctl,
+   sendto, sendmsg, recvfrom, mmap, munmap, brk, fstat, newfstatat, fcntl,
+   exit_group, exit, rt_sigreturn, clock_gettime`. **`open`/`openat` are
+   deliberately NOT on the allowlist** — the device fd was already opened in
+   step 4 and the grab loop only ever reuses it, so a compromised helper cannot
+   open arbitrary files even while it holds `CAP_SYS_ADMIN`. **Hard-fails** if it
    cannot install.
-6. Opens the DRM device once and serves grab/cursor requests in a loop.
+7. Serves grab/cursor requests on the persistent fd in a loop.
 
-Both libcap and libseccomp are compiled in for the packaged (deb) build.
+The helper binary is also built with exploit-mitigation flags
+(`-fstack-protector-strong`, `_FORTIFY_SOURCE=2` on optimized builds, PIE, and
+full RELRO via `-z relro -z now`). libcap and libseccomp are compiled in for the
+packaged build; if either confinement step fails to take effect the helper
+refuses to serve rather than run unconfined. Failures along this path emit
+accurate, per-condition diagnostics to stderr (which hardening step failed and
+why).
 
 ### Request protocol / attack surface
 
@@ -90,6 +107,13 @@ CRTC id — a bad value yields "no active framebuffer", not memory unsafety. The
 request path carries no path or fd field. Fd passing (`SCM_RIGHTS`) is
 one-directional, **helper → main only** (the DMA-BUF export); the unprivileged
 side cannot hand the privileged side a path or fd to open.
+
+Before any size computation, the helper validates the framebuffer geometry
+(`pitch`/`height`) reported by the kernel: it rejects a zero pitch/height and
+caps `pitch * height` at one 8K BGRA frame (~126 MB). This guards against an
+integer-overflow of `size_t` and keeps the `u32 data_size` put on the wire from
+disagreeing with the payload actually sent, so a malformed scanout cannot drive
+an oversized allocation or a short write.
 
 ---
 
@@ -107,10 +131,16 @@ Do not read the above as more locked down than it is:
   case, but this is the loader's `AT_SECURE` behavior, not something the helper
   itself enforces.
 - **The seccomp filter has no per-argument filtering.** `ioctl` is allowed on
-  any fd; `open`/`openat` on any path. It blocks whole syscall classes, it does
-  not narrow the allowed ones.
-- **No `SO_PEERCRED` check.** Isolation rests on the private inherited
-  socketpair — no third party can connect to it — not on a peer-credential check.
+  any fd. It blocks whole syscall classes (including `open`/`openat` entirely),
+  but it does not narrow the argument values of the syscalls it does allow.
+- **A world-executable setcap helper on a multi-user host is a real
+  consideration.** Anyone who can execute the binary gets a process holding
+  `CAP_SYS_ADMIN` (confined by seccomp, and the `SO_PEERCRED` check stops them
+  driving *your* session's socket, but it is still a privileged process they can
+  spawn). The recommended packaging is therefore to install it owned
+  `root:<group>` mode `0750`, so only members of that group can execute it.
+  libdrmtap ships the hardened binary; this world-exec deployment decision is the
+  integrator's (e.g. RustDesk's) to make, not something libdrmtap enforces.
 - The helper does **not** sanitize its environment (`clearenv`), set
   `PR_SET_DUMPABLE`, detect/refuse containers, log to syslog, set rlimits, or
   emit desktop notifications. (Earlier versions of this document claimed some of
@@ -125,8 +155,10 @@ Do not read the above as more locked down than it is:
 | Threat | Protection |
 |---|---|
 | Unprivileged app reads the screen | Kernel blocks `drmModeGetFB2` without DRM master / CAP_SYS_ADMIN |
-| Unprivileged side points the helper at an arbitrary device | Device path must canonicalize under `/dev/dri/` |
-| Unprivileged side makes the helper open an arbitrary path/fd | The request protocol carries no path/fd; fd passing is helper -> main only |
+| Helper exec'd standalone or by a different user | Refuses unless fd 3 is a connected socket whose `SO_PEERCRED` peer uid matches its own |
+| Unprivileged side points the helper at an arbitrary device | Device path must canonicalize under `/dev/dri/`, and the node is opened `O_RDONLY` |
+| Unprivileged side makes the helper open an arbitrary path/fd | The request protocol carries no path/fd; fd passing is helper -> main only; `open`/`openat` are not on the seccomp allowlist after init |
+| Malformed scanout geometry drives an oversized allocation / overflow | Geometry guard rejects zero/absurd `pitch`/`height`, capping at one 8K BGRA frame |
 | Helper gains new privileges via exec | `PR_SET_NO_NEW_PRIVS` |
 | Helper runs unconfined if hardening fails | Hard-fails: refuses to serve if cap-drop or seccomp cannot be established |
 | Third party intercepts frames or connects to the helper | Anonymous inherited socketpair, not discoverable, no listening socket |
@@ -159,6 +191,11 @@ a user-visible indicator.
 ```bash
 # An administrator consciously grants the capability to the helper binary:
 sudo setcap cap_sys_admin+ep /usr/lib/rustdesk/drmtap-helper   # (path varies by integration)
+
+# Recommended on multi-user hosts: restrict who can execute the setcap helper
+# to a dedicated group rather than leaving it world-executable.
+sudo chown root:rustdesk-capture /usr/lib/rustdesk/drmtap-helper
+sudo chmod 0750 /usr/lib/rustdesk/drmtap-helper
 
 # Audit: find capability-bearing binaries
 sudo getcap -r / 2>/dev/null | grep drmtap

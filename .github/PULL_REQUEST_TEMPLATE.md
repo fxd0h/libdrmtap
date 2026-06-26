@@ -19,11 +19,12 @@ High-level explanation of the approach. Reference research docs if applicable.
 
 ## Checklist
 
-- [ ] Follows code style ([AGENTS.md](../../AGENTS.md))
+- [ ] Follows code style ([AGENTS.md](../AGENTS.md))
 - [ ] Error handling uses goto-cleanup pattern
 - [ ] Public API documented in header comments
 - [ ] No memory leaks (checked cleanup paths)
-- [ ] Gotcha checklist reviewed ([06_github_issues_analysis.md](../../docs/research/06_github_issues_analysis.md))
+- [ ] Gotcha checklist reviewed ([06_github_issues_analysis.md](../docs/research/06_github_issues_analysis.md))
+- [ ] CI green: Build & Test (Ubuntu 22.04 + 24.04), cppcheck, CodeQL, and CodeRabbit review
 
 ## AI Disclosure (optional)
 

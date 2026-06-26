@@ -26,7 +26,8 @@ Wayland (broken): App → xdg-desktop-portal → user prompt → PipeWire → GS
 DRM/KMS (our approach): App → drmModeGetFB2() → DMA-BUF → pixels
                                                    ↑
                                             Kernel-level, compositor-agnostic.
-                                            Controlled by admin (CAP_SYS_ADMIN).
+                                            Small privileged helper holds
+                                            CAP_SYS_ADMIN, not the whole app.
                                             No user prompt.
 ```
 
@@ -49,6 +50,8 @@ DRM/KMS (our approach): App → drmModeGetFB2() → DMA-BUF → pixels
 **Why they haven't used DRM/KMS**: Locked into PipeWire model. Single developer (`fufesou`) does 90% of Wayland work. No bandwidth to rethink architecture. No embeddable C library exists to make it easy (our niche).
 
 **What they'd need from libdrmtap**: C API → Rust `-sys` crate, privileged helper already solved, multi-GPU/multi-monitor, no compositor dependency.
+
+**Status (in progress)**: A DRM/KMS capture backend built on `libdrmtap-sys` is now proposed upstream in `rustdesk/rustdesk#15420` — under maintainer review, not yet merged.
 
 ---
 
@@ -118,7 +121,7 @@ FFmpeg has `kmsgrab` which does DRM/KMS capture correctly. But you can't embed F
 - No PipeWire, no portal, no user prompt
 - Works identically on GNOME, KDE, Sway, Cosmic, or any compositor
 - Works headless (DRM doesn't need a display server)
-- Cursor handled via DRM cursor planes (kernel-level)
+- Cursor handled via DRM cursor planes (kernel-level; hotspot is exact under virtualization, approximated on bare metal)
 - Immune to compositor updates
 
 ---

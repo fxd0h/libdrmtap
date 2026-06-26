@@ -19,7 +19,7 @@
 | VM | ✅ | ✅ | ❌ | **✅** |
 | Multi-monitor | ✅ (per CRTC) | ✅ (per CRTC) | ✅ | **✅** |
 | Cursor capture | ❌ | ✅ | ❌ | **✅** |
-| HDR | ❌ | ❌ | ✅ (tone-map) | **✅** |
+| HDR | ❌ | ❌ | ✅ (tone-map) | **🚧 in progress (#16)** |
 | Continuous capture | ✅ (frames/sec) | ✅ (VNC stream) | ❌ (1 shot) | **✅** |
 | Output formats | DRM_PRIME fd | RGBA buffer | PPM file | **DMA-BUF fd + mmap** |
 | Dependencies | libavutil,libdrm | libdrm,libva,libvncserver | libdrm,libamdgpu,vulkan | **libdrm, egl/glesv2(opt)** |
@@ -44,7 +44,7 @@
 │  │              │  │          │  │                   │  │
 │  │ Planes/CRTCs │  │ GetFB2   │  │ Tiling→Linear     │  │
 │  │ Connectors   │  │ Prime FD │  │ Format conversion │  │
-│  │ Capabilities │  │ DMA-BUF  │  │ HDR tone mapping  │  │
+│  │ Capabilities │  │ DMA-BUF  │  │ 10-bit→8-bit (#16)│  │
 │  └──────────────┘  └──────────┘  └───────────────────┘  │
 │                                                          │
 │  ┌──────────────┐  ┌──────────────────────────────────┐  │
@@ -61,6 +61,28 @@
 │              libdrm / kernel DRM/KMS                     │
 └─────────────────────────────────────────────────────────┘
 ```
+
+### Capture paths (as shipped)
+
+The library runs in **two processes**. When it already holds the rights it
+captures directly; otherwise it spawns a small privileged helper
+(`drmtap-helper`) that carries `CAP_SYS_ADMIN` via file capabilities (`setcap`)
+and talks to the library over a `socketpair`. DRM master / `CAP_SYS_ADMIN` is
+what lets it read *other clients'* framebuffers (`GetFB2` + `PrimeHandleToFD`).
+
+Two helper protocol paths exist:
+
+- **V3 (default, zero-copy)** — the helper exports the scanout as a DMA-BUF and
+  passes the fd back via `SCM_RIGHTS`; no full-frame copy crosses the socket.
+- **V2 (fallback)** — the helper dumb-maps the framebuffer and copies the pixels
+  over the socket, used when DMA-BUF export is not possible.
+
+Tiled/compressed framebuffers (Intel X/Y-tiled + CCS, AMD, Nvidia block-linear,
+vendor modifiers) are converted to linear by the **EGL/GLES2 detiling backend**
+(`gpu_egl.c`): import the DMA-BUF as an `EGLImage`, draw it, `glReadPixels` to
+linear RGBA. EGL is the **primary** detile path; a CPU deswizzle exists as a
+fallback for some formats. Plain linear framebuffers (virtio-gpu, simple VMs)
+are mapped directly with no detile.
 
 ### Proposed API (headers)
 
@@ -120,6 +142,11 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
 // Capture — with mmap: returns pointer to linear RGBA data
 int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
 
+// Capture — fast persistent-mmap path: keeps the mapping/fd alive between
+// calls and returns 1 (no copy) when fb_id shows the frame is unchanged.
+// Do NOT call drmtap_frame_release() on frames from this function.
+int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame);
+
 // Release
 void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame);
 
@@ -150,8 +177,13 @@ void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 // Returns 1 if display configuration changed since last call, 0 if unchanged.
 int drmtap_displays_changed(drmtap_ctx *ctx);
 
-// --- HDR Metadata (v2) ---
-// Available when the framebuffer uses a 10-bit or HDR format.
+// --- HDR Metadata (PROPOSED — NOT yet implemented, tracked in #16) ---
+// HDR10 is the current top blocker. The 10-bit AR30/XR30 path today only keeps
+// the top 8 of 10 bits (no PQ decode, no BT.2020, no tone-mapping) and the EGL
+// path outputs 8-bit; 16-bit (XR48/AR48) and 10-bit YUV (P010) are unhandled,
+// and HDR_OUTPUT_METADATA / connector Colorspace are not read. Capturing an HDR
+// scanout currently yields a truncated, SDR-ish frame. The struct below is the
+// intended future shape only.
 
 typedef struct {
     uint32_t colorspace;        // DRM_MODE_COLORIMETRY_*
@@ -170,7 +202,7 @@ typedef struct {
     int valid;                  // 0 = no HDR metadata available
 } drmtap_hdr_info;
 
-// Get HDR metadata for the current display
+// Get HDR metadata for the current display (PROPOSED — see #16, not yet shipped)
 // Returns 0 on success, -ENODATA if SDR, negative errno on error
 int drmtap_get_hdr_info(drmtap_ctx *ctx, drmtap_hdr_info *hdr);
 ```
@@ -359,7 +391,7 @@ libdrmtap/
 │   ├── cursor.c                 # Hardware cursor capture
 │   └── privilege_helper.c       # Helper spawn + communication
 ├── helper/
-│   └── drmtap-helper.c          # Privileged binary (~500 lines)
+│   └── drmtap-helper.c          # Privileged binary (~800 lines)
 ├── tests/
 │   ├── test_enumerate.c         # Tests with vkms
 │   ├── test_capture.c           # Frame capture integration tests
@@ -402,17 +434,21 @@ Three layers, published on crates.io:
 ├─────────────────────────────────────────────────┤
 │  Layer 2: libdrmtap-sys  (hand-written FFI)     │
 │  • Matches drmtap.h declarations                │
-│  • build.rs links to libdrmtap via pkg-config   │
+│  • build.rs compiles C sources + helper         │
+│  • statically, no system libdrmtap needed       │
 │  ✅ Published: crates.io/crates/libdrmtap-sys   │
 ├─────────────────────────────────────────────────┤
-│  Layer 1: libdrmtap  (C library + .so/.a)       │
-│  • Installed via meson install                  │
-│  • Provides drmtap.h + libdrmtap.so + .pc       │
+│  Layer 1: libdrmtap  (C sources, vendored)      │
+│  • -sys embeds + compiles them; no .so needed   │
+│  • Same C used by meson install (.so/.a/.pc)    │
 └─────────────────────────────────────────────────┘
 ```
 
-> ⚠️ **Testing status**: Both crates are published and verified to build/test
-> on Ubuntu 24.04 (virtio_gpu). Real GPU hardware testing pending.
+> ⚠️ **Testing status**: Both crates are published (libdrmtap-sys 0.4.3,
+> libdrmtap 0.3.2) and verified to build/test in CI on Ubuntu 22.04/24.04.
+> Capture is verified on Intel i915/xe (dual-4K Meteor Lake), Nvidia/Tegra
+> (Jetson Orin Nano, aarch64) and virtio-gpu. AMD amdgpu is implemented but
+> not yet verified on real hardware.
 
 ### Rust API Design
 
@@ -463,21 +499,22 @@ Adding `libdrmtap-sys` is standard practice for them. They `cargo add libdrmtap`
 
 | Language | Binding mechanism | Priority | Target project |
 |---|---|---|---|
-| **Rust** | `-sys` crate + safe wrapper | 🔴 High | RustDesk |
+| **Rust** | `-sys` crate + safe wrapper | ✅ Shipped | RustDesk |
 | **C++** | Direct `#include <drmtap.h>` (C compatible) | ✅ Already works | Sunshine, OBS |
 | **Python** | ctypes or cffi | 🟡 Medium | Testing, scripts, CI |
 | **Go** | cgo | 🟢 Low | Custom tools |
 
 ### Release Status
 
-| Phase | What shipped | Status |
+| Area | What shipped | Status |
 |---|---|---|
-| v0.1 | `libdrmtap.so` + `drmtap.h` + `pkg-config` | ✅ Done |
-| v0.1 | `libdrmtap-sys` crate (hand-written FFI) | ✅ Published on crates.io |
-| v0.1 | `libdrmtap` crate (safe wrapper) | ✅ Published on crates.io |
-| v0.1 | EGL/GLES2 GPU-universal detiling backend | ✅ Implemented |
-| Next | Hardware testing (Intel, AMD, Nvidia, RPi) | 🔜 Pending hardware access |
-| Next | PR to RustDesk with working example | 🔜 After hardware validation |
+| Core | `libdrmtap` C library 0.4.3 (`.so`/`.a` + `drmtap.h` + `pkg-config`) | ✅ Done |
+| Rust | `libdrmtap-sys` 0.4.3 (FFI; embeds + statically compiles C sources & helper) | ✅ Published on crates.io |
+| Rust | `libdrmtap` 0.3.2 (safe wrapper) | ✅ Published on crates.io |
+| GPU | EGL/GLES2 GPU-universal detiling backend | ✅ Implemented |
+| HW | Intel i915/xe + Nvidia/Tegra + virtio-gpu validation | ✅ Verified (AMD implemented, not yet verified) |
+| RustDesk | DRM capture backend PR (rustdesk/rustdesk#15420) | 🚧 Under maintainer review |
+| HDR10 | PQ / BT.2020 10-bit pipeline | 🚧 In progress (#16) |
 
 ---
 
@@ -590,7 +627,7 @@ Compositor (KDE/GNOME) ──► DRM Master ──► WRITES framebuffer
 
 Only **one process** can be DRM Master at a time (normally the compositor). libdrmtap never calls `drmSetMaster()` — it has no need to. We only read.
 
-If someone stops the compositor and starts another one, folibdrmtap will detect the new framebuffer on the next `drmModeGetPlane()` call (because we refresh `fb_id` every frame).
+If someone stops the compositor and starts another one, libdrmtap will detect the new framebuffer on the next `drmModeGetPlane()` call (because we refresh `fb_id` every frame).
 
 ---
 
@@ -601,7 +638,7 @@ If someone stops the compositor and starts another one, folibdrmtap will detect 
 | Nvidia changes its tiling | Broken capture on Nvidia | Dynamic modifier detection, updatable table |
 | Intel CCS can't be disabled | Unreadable buffer | Detect CCS and report clear error to user |
 | New kernel breaks API | Build fails | CI with multiple kernel versions, #ifdef guards |
-| VAAPI not available | No backend for Intel/AMD | Fallback to dumb buffer + CPU deswizzle |
+| EGL/GLES2 not available | No GPU detile for tiled buffers | Fallback to dumb buffer + CPU deswizzle |
 | RPi 5 restricts GetFB2 | Doesn't work on ARM | Investigate VC6 driver, low priority |
 | NixOS/Flatpak paths | Helper not found | Configurable helper path search |
 | DMA-BUF fd leak | Memory leak | Reference counting, mandatory frame_release |

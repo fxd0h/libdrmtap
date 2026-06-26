@@ -11,6 +11,8 @@
 
 The closest projects are **full applications** (kmsvnc, gpu-screen-recorder) that contain DRM capture logic but don't expose it as a reusable library.
 
+> **Update (libdrmtap 0.4.3)** — This snapshot's hypothesis held: the gap was real, and `libdrmtap` now fills it as the embeddable, MIT-licensed C library described here. It adopts the privileged-helper pattern first observed in gpu-screen-recorder (a small `drmtap-helper` carrying `CAP_SYS_ADMIN` via file capabilities, talking to the unprivileged library over a `socketpair`), and goes further with a zero-copy DMA-BUF + `SCM_RIGHTS` capture path (V3) and a GPU-universal EGL/GLES2 detiling backend. Verified on Intel i915/xe, Nvidia (incl. Tegra/Jetson, aarch64) and virtio-gpu; AMD `amdgpu` is implemented but not yet hardware-verified. HDR10 / 10-bit handling is still in progress ([#16](https://github.com/fxd0h/libdrmtap/issues/16)).
+
 ---
 
 ## Projects Using Direct DRM/KMS

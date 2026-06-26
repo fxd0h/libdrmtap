@@ -19,9 +19,11 @@ If you find a bug, please open a GitHub issue with:
 1. **Fork** the repository
 2. **Create a branch** (`git checkout -b feature/my-feature`)
 3. **Make your changes** — follow the code style (see below)
-4. **Test** if possible (see Testing section)
+4. **Test** if possible (see Testing section) — at minimum run the unit suite and `cppcheck` locally
 5. **Commit** with clear messages
 6. **Open a Pull Request** with a description of what and why
+
+Every PR is checked automatically by CI (see [Continuous Integration](#continuous-integration)). Running the sanitizer build and `cppcheck` locally first saves a round-trip.
 
 ### 📖 Contributing Documentation
 
@@ -72,33 +74,73 @@ libdrmtap/
 
 ## Building
 
+libdrmtap builds with **meson + C11**:
+
 ```bash
 meson setup build
 meson compile -C build
 ```
 
+Optional dependencies unlock optional features (meson auto-detects them):
+
+- **EGL + GLES2** — the GPU-universal EGL/GLES2 detiling backend (`gpu_egl.c`), the primary path for tiled/compressed framebuffers. Without it, only the CPU deswizzle fallback and plain-linear framebuffers work.
+- **libseccomp + libcap** — required by the privileged helper; the build hard-fails if they are missing when the helper is enabled.
+- **libvncserver** — the optional VNC demo in `examples/`.
+
+For an exploit-mitigation / sanitizer build (what CI runs), enable ASan + UBSan:
+
+```bash
+meson setup build-asan -Dbuildtype=debug -Db_sanitize=address,undefined
+meson compile -C build-asan
+```
+
 ## Testing
 
-### Without hardware (CI)
+Tests are split into two meson suites:
+
+- **`unit`** — no hardware needed (format math, deswizzle, helper protocol).
+- **`integration`** — needs a real DRM device; **vkms** (virtual KMS) provides a synthetic scanout that works in CI and headless VMs.
+
+### Unit tests (no hardware)
 ```bash
-sudo modprobe vkms
-DRM_DEVICE=/dev/dri/card1 meson test -C build
+meson test -C build --suite unit
 ```
 
-### With real GPU
+### Integration tests (vkms or real GPU)
 ```bash
-meson test -C build
+# Synthetic scanout via vkms:
+sudo modprobe vkms
+# point DRM_DEVICE at the vkms card (check /dev/dri/ — it is often card1)
+DRM_DEVICE=/dev/dri/card1 meson test -C build --suite integration
+
+# ...or against your real GPU:
+meson test -C build --suite integration
 ```
+
+Running the suites under the sanitizer build (`build-asan` above) is the recommended pre-submit check.
+
+## Continuous Integration
+
+Every push and pull request runs [GitHub Actions](.github/workflows/ci.yml):
+
+- **Build & Test** on Ubuntu **22.04** and **24.04** — debug build with ASan + UBSan, the `unit` suite, the `integration` suite against vkms when available, plus a clean release build.
+- **Rust crate** — builds and tests the `libdrmtap-sys` and `libdrmtap` workspace and verifies both crates still `cargo package`.
+- **Static analysis** — `cppcheck` over `src/` and `helper/`.
+- **CodeQL** and **CodeRabbit** review run on every PR.
+
+ASan/UBSan and `cppcheck` are the same checks you can run locally before pushing.
 
 ## AI-Assisted Development
 
-This project uses AI agents as development tools. If you use AI to help with your contributions, that's great — just make sure:
+This project is **openly built with AI coding agents** (Antigravity, Gemini, Claude) and proud of it. If you use AI to help with your contributions, that's great — just make sure:
 
 1. You **understand** the code you're submitting
 2. You've **tested** it (or clearly stated that you couldn't)
 3. The code is **correct** and follows our style guidelines
 
 We don't discriminate between human-written and AI-assisted code. What matters is quality.
+
+If you point an agent at this repo, see [`AGENTS.md`](AGENTS.md) for working conventions and [`docs/AI_DEVELOPMENT.md`](docs/AI_DEVELOPMENT.md) for how the project is built with AI.
 
 ## Code of Conduct
 

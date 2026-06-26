@@ -22,3 +22,6 @@ sandbox/
 # OS
 .DS_Store
 Thumbs.db
+
+# AI agent orchestration tooling config (local, not part of the project)
+.antigravity/
