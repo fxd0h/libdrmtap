@@ -337,12 +337,15 @@ int drmtap_convert_format(const void *src, void *dst,
  * @param src_stride Source stride (bytes per row)
  * @param dst_stride Destination stride (bytes per row)
  * @param src_format Source DRM fourcc (DRM_FORMAT_XRGB2101010 / ARGB2101010)
+ * @param max_nits   Content/mastering peak luminance for the highlight roll-off
+ *                   (0 = a sensible default). Brighter peaks spread highlights
+ *                   over more of the top range instead of clipping to white.
  * @return 0 on success, -ENOTSUP for an unsupported format, -EINVAL on bad args
  */
 int drmtap_tonemap_hdr10(const void *src, void *dst,
                          uint32_t width, uint32_t height,
                          uint32_t src_stride, uint32_t dst_stride,
-                         uint32_t src_format);
+                         uint32_t src_format, uint32_t max_nits);
 
 /* ========================================================================= */
 /* Frame Differencing (optional utility)                                     */

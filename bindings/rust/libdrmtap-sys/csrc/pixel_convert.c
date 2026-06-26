@@ -382,13 +382,18 @@ static void hdr_lut_init(void) {
 
 /* Highlight-preserving tone curve. Input x is linear light normalized so that
  * 1.0 == SDR diffuse white: x <= knee passes through (SDR content keeps its
- * brightness), and x above the knee rolls off smoothly toward 1.0 (HDR
- * highlights, which an SDR display cannot show brighter than white). */
-static double tonemap_softknee(double x) {
-    const double knee = 0.80;
+ * brightness), and x in (knee, peak_n] rolls off smoothly to 1.0 (HDR
+ * highlights, which an SDR display cannot show brighter than white). peak_n is
+ * the content peak luminance in the same SDR-white units, so a brighter
+ * mastering peak spreads the highlights over more of the top range instead of
+ * clipping them all to white. */
+static double tonemap_softknee(double x, double peak_n) {
+    const double knee = 0.90;
     if (x <= knee) return x;
-    if (x >= 100.0) return 1.0;
-    return knee + (1.0 - knee) * tanh((x - knee) / (1.0 - knee));
+    if (peak_n < knee + 0.5) peak_n = knee + 0.5;  /* sane minimum roll-off width */
+    if (x >= peak_n) return 1.0;
+    double t = (x - knee) / (peak_n - knee);        /* [0,1] across the highlights */
+    return knee + (1.0 - knee) * (t * (2.0 - t));   /* quadratic ease-out to 1.0 */
 }
 
 /* sRGB-encode a linear [0,inf) channel via the precomputed LUT. */
@@ -399,14 +404,11 @@ static uint8_t to_srgb8(double linear) {
     return g_srgb_lut[idx];
 }
 
-/* Map one HDR10 (PQ, BT.2020) ARGB2101010 pixel to SDR 8-bit R/G/B. */
-static void tonemap_ar30_pixel(uint32_t pixel,
+/* Map three BT.2020 linear-light (nits) channels through the gamut matrix, the
+ * tone curve and the sRGB OETF to SDR 8-bit. */
+static void tonemap_rgb_linear(double r_lin, double g_lin, double b_lin,
+                               double peak_n,
                                uint8_t *r8, uint8_t *g8, uint8_t *b8) {
-    /* 10-bit channels, ARGB2101010: R[29:20] G[19:10] B[9:0]. */
-    double r_lin = g_pq_lut[(pixel >> 20) & 0x3FF];  /* BT.2020 linear nits */
-    double g_lin = g_pq_lut[(pixel >> 10) & 0x3FF];
-    double b_lin = g_pq_lut[(pixel)       & 0x3FF];
-
     /* BT.2020 -> BT.709 in linear light. */
     double r =  1.660491 * r_lin - 0.587641 * g_lin - 0.072850 * b_lin;
     double g = -0.124550 * r_lin + 1.132900 * g_lin - 0.008349 * b_lin;
@@ -416,15 +418,21 @@ static void tonemap_ar30_pixel(uint32_t pixel,
     if (b < 0.0) b = 0.0;
 
     /* Normalize to SDR white, roll off highlights, sRGB-encode. */
-    *r8 = to_srgb8(tonemap_softknee(r / DRMTAP_SDR_WHITE_NITS));
-    *g8 = to_srgb8(tonemap_softknee(g / DRMTAP_SDR_WHITE_NITS));
-    *b8 = to_srgb8(tonemap_softknee(b / DRMTAP_SDR_WHITE_NITS));
+    *r8 = to_srgb8(tonemap_softknee(r / DRMTAP_SDR_WHITE_NITS, peak_n));
+    *g8 = to_srgb8(tonemap_softknee(g / DRMTAP_SDR_WHITE_NITS, peak_n));
+    *b8 = to_srgb8(tonemap_softknee(b / DRMTAP_SDR_WHITE_NITS, peak_n));
+}
+
+/* content peak (nits) -> tone-curve peak in SDR-white units (default 1000). */
+static double hdr_peak_units(uint32_t max_nits) {
+    double peak = (max_nits > 0) ? (double)max_nits : 1000.0;
+    return peak / DRMTAP_SDR_WHITE_NITS;
 }
 
 int drmtap_tonemap_hdr10(const void *src, void *dst,
                          uint32_t width, uint32_t height,
                          uint32_t src_stride, uint32_t dst_stride,
-                         uint32_t src_format) {
+                         uint32_t src_format, uint32_t max_nits) {
     if (!src || !dst || width == 0 || height == 0) {
         return -EINVAL;
     }
@@ -441,16 +449,74 @@ int drmtap_tonemap_hdr10(const void *src, void *dst,
     }
 
     pthread_once(&g_hdr_once, hdr_lut_init);
+    double peak_n = hdr_peak_units(max_nits);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint32_t *s = (const uint32_t *)
             ((const uint8_t *)src + (size_t)y * src_stride);
         uint32_t *d = (uint32_t *)((uint8_t *)dst + (size_t)y * dst_stride);
         for (uint32_t x = 0; x < width; x++) {
+            uint32_t pixel = s[x];
+            /* 10-bit channels, ARGB2101010: R[29:20] G[19:10] B[9:0]. */
             uint8_t r, g, b;
-            tonemap_ar30_pixel(s[x], &r, &g, &b);
+            tonemap_rgb_linear(g_pq_lut[(pixel >> 20) & 0x3FF],
+                               g_pq_lut[(pixel >> 10) & 0x3FF],
+                               g_pq_lut[(pixel)       & 0x3FF],
+                               peak_n, &r, &g, &b);
             d[x] = (0xFFu << 24) | ((uint32_t)r << 16) |
                    ((uint32_t)g << 8) | b;
+        }
+    }
+    return 0;
+}
+
+int drmtap_convert_rgb16(const void *src, void *dst,
+                         uint32_t width, uint32_t height,
+                         uint32_t src_stride, uint32_t dst_stride,
+                         int bgr, uint32_t eotf, uint32_t max_nits) {
+    if (!src || !dst || width == 0 || height == 0) {
+        return -EINVAL;
+    }
+    /* Source is 4x16-bit (8 B/px), destination is XRGB8888 (4 B/px). */
+    size_t src_row = (size_t)width * 8u;
+    size_t dst_row = (size_t)width * 4u;
+    if (src_row > UINT32_MAX || dst_row > UINT32_MAX ||
+        src_stride < src_row || dst_stride < dst_row) {
+        return -EINVAL;
+    }
+
+    int hdr = (eotf == 2 /* DRMTAP_EOTF_PQ */);
+    if (hdr) {
+        pthread_once(&g_hdr_once, hdr_lut_init);
+    }
+    double peak_n = hdr_peak_units(max_nits);
+    /* Memory order of the 16-bit quad is little-endian: XR48 (RGB) lays out
+     * B,G,R,X; XB48 (BGR) lays out R,G,B,X. */
+    int ri = bgr ? 0 : 2;
+    int bi = bgr ? 2 : 0;
+
+    for (uint32_t y = 0; y < height; y++) {
+        const uint16_t *s = (const uint16_t *)
+            ((const uint8_t *)src + (size_t)y * src_stride);
+        uint32_t *d = (uint32_t *)((uint8_t *)dst + (size_t)y * dst_stride);
+        for (uint32_t x = 0; x < width; x++) {
+            const uint16_t *px = s + (size_t)x * 4;
+            uint16_t cr = px[ri], cg = px[1], cb = px[bi];
+            uint8_t r8, g8, b8;
+            if (hdr) {
+                /* 16-bit PQ -> BT.2020 linear nits -> tone-map -> SDR. */
+                tonemap_rgb_linear(pq_eotf_nits((double)cr / 65535.0),
+                                   pq_eotf_nits((double)cg / 65535.0),
+                                   pq_eotf_nits((double)cb / 65535.0),
+                                   peak_n, &r8, &g8, &b8);
+            } else {
+                /* Plain SDR 16-bit -> 8-bit (keep the high byte). */
+                r8 = (uint8_t)(cr >> 8);
+                g8 = (uint8_t)(cg >> 8);
+                b8 = (uint8_t)(cb >> 8);
+            }
+            d[x] = (0xFFu << 24) | ((uint32_t)r8 << 16) |
+                   ((uint32_t)g8 << 8) | b8;
         }
     }
     return 0;

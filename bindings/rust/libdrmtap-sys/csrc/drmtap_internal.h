@@ -96,6 +96,13 @@ struct drmtap_ctx {
     uint32_t fb2_pitches[4];
     uint32_t fb2_offsets[4];
     int      fb2_num_planes;  /* number of active planes (1..4) */
+
+    /* HDR state of the frame currently being processed. Set per grab from the
+     * connector HDR_OUTPUT_METADATA (helper sends it on the wire; direct mode
+     * reads it itself) and consumed by the conversion path to decide whether to
+     * tone-map (DRMTAP_EOTF_PQ) or do a plain bit-depth reduction. */
+    uint32_t cur_hdr_eotf;     /* DRMTAP_EOTF_* */
+    uint32_t cur_hdr_max_nits; /* peak luminance, 0 = unknown */
 };
 
 /* ========================================================================= */
@@ -117,6 +124,13 @@ typedef struct {
 
 /* Result from helper v2 grab — helper reads pixels and sends via socket.
  * Must match struct grab_metadata in drmtap-helper.c */
+/* DRM EOTF values (from the connector HDR_OUTPUT_METADATA infoframe). These
+ * match the kernel/CTA-861 numbering. PQ means "tone-map this"; HLG currently
+ * falls back to the plain bit-depth reduction (PQ/HDR10 is the desktop norm). */
+#define DRMTAP_EOTF_SDR  0  /* traditional gamma SDR (or no HDR metadata) */
+#define DRMTAP_EOTF_PQ   2  /* SMPTE ST 2084 (HDR10) */
+#define DRMTAP_EOTF_HLG  3  /* Hybrid Log-Gamma (BT.2100) */
+
 /* Flags for helper_grab_result_t.flags */
 #define HELPER_FLAG_HAS_DMABUF  0x01  /* DMA-BUF fd follows via SCM_RIGHTS */
 #define HELPER_FLAG_VIRGL       0x02  /* DMA-BUF is a host-rendered virgl scanout:
@@ -134,7 +148,8 @@ typedef struct {
     uint32_t seq;           /* frame sequence number from helper */
     uint64_t timestamp_ms;  /* unix ms when helper read the frame */
     uint32_t flags;         /* HELPER_FLAG_* bits */
-    uint32_t _pad;          /* alignment padding */
+    uint32_t hdr_eotf;      /* DRM EOTF of the scanout: 0=SDR, 2=PQ (ST2084), 3=HLG */
+    uint32_t hdr_max_nits;  /* mastering/content peak luminance (cd/m2), 0=unknown */
 } helper_grab_wire_t;  /* wire-format: this is what goes over the socket */
 
 typedef struct {
@@ -201,5 +216,14 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
                             uint32_t stride, uint32_t fourcc,
                             uint64_t modifier,
                             void **out_data, size_t *out_size);
+
+/* Convert a 16-bit/channel scanout (XR48/AR48/XB48/AB48) to XRGB8888.
+ * bgr selects channel order (0 = XR48/AR48, 1 = XB48/AB48). When eotf is
+ * DRMTAP_EOTF_PQ the 16-bit values are PQ-decoded and tone-mapped to SDR;
+ * otherwise they are reduced to 8-bit directly. (pixel_convert.c) */
+int drmtap_convert_rgb16(const void *src, void *dst,
+                         uint32_t width, uint32_t height,
+                         uint32_t src_stride, uint32_t dst_stride,
+                         int bgr, uint32_t eotf, uint32_t max_nits);
 
 #endif /* DRMTAP_INTERNAL_H */

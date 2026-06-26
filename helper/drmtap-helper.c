@@ -142,8 +142,8 @@ struct grab_metadata {
     uint32_t seq;
     uint64_t timestamp_ms;
     uint32_t flags;
-    /* cppcheck-suppress unusedStructMember ; explicit wire-format padding */
-    uint32_t _pad;
+    uint32_t hdr_eotf;      /* DRM EOTF of the scanout: 0=SDR, 2=PQ (ST2084), 3=HLG */
+    uint32_t hdr_max_nits;  /* mastering/content peak luminance (cd/m2), 0=unknown */
 };
 
 /* Send a file descriptor via SCM_RIGHTS */
@@ -417,6 +417,79 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
 /* DRM capture (privileged) — reads pixels, sends via socket                 */
 /* ========================================================================= */
 
+/* Read the HDR transfer function + peak luminance advertised on the connector
+ * driving `crtc_id`. Sets *eotf to the DRM EOTF (0 = SDR / none) and *max_nits
+ * to the content/mastering peak (0 = unknown). Best-effort: any failure is
+ * treated as SDR, so a missing property or a non-HDR display just means no
+ * tone-mapping (the common case). */
+static void read_hdr_metadata(int drm_fd, uint32_t crtc_id,
+                              uint32_t *eotf, uint32_t *max_nits) {
+    *eotf = 0;
+    *max_nits = 0;
+    if (crtc_id == 0) {
+        return;
+    }
+
+    drmModeRes *res = drmModeGetResources(drm_fd);
+    if (!res) {
+        return;
+    }
+    /* Map the CRTC back to its connected connector via the encoder. */
+    uint32_t conn_id = 0;
+    for (int i = 0; i < res->count_connectors && conn_id == 0; i++) {
+        drmModeConnector *conn = drmModeGetConnector(drm_fd, res->connectors[i]);
+        if (!conn) {
+            continue;
+        }
+        if (conn->connection == DRM_MODE_CONNECTED && conn->encoder_id) {
+            drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
+            if (enc) {
+                if (enc->crtc_id == crtc_id) {
+                    conn_id = conn->connector_id;
+                }
+                drmModeFreeEncoder(enc);
+            }
+        }
+        drmModeFreeConnector(conn);
+    }
+    drmModeFreeResources(res);
+    if (conn_id == 0) {
+        return;
+    }
+
+    drmModeObjectProperties *props = drmModeObjectGetProperties(
+        drm_fd, conn_id, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        return;
+    }
+    for (uint32_t p = 0; p < props->count_props; p++) {
+        drmModePropertyRes *prop = drmModeGetProperty(drm_fd, props->props[p]);
+        if (!prop) {
+            continue;
+        }
+        if (strcmp(prop->name, "HDR_OUTPUT_METADATA") == 0 &&
+            props->prop_values[p] != 0) {
+            drmModePropertyBlobRes *blob = drmModeGetPropertyBlob(
+                drm_fd, (uint32_t)props->prop_values[p]);
+            if (blob && blob->data &&
+                blob->length >= sizeof(struct hdr_output_metadata)) {
+                const struct hdr_output_metadata *m = blob->data;
+                const struct hdr_metadata_infoframe *inf =
+                    &m->hdmi_metadata_type1;
+                *eotf = inf->eotf;
+                /* Prefer content light level, fall back to mastering peak. */
+                *max_nits = inf->max_cll ? inf->max_cll
+                            : inf->max_display_mastering_luminance;
+            }
+            if (blob) {
+                drmModeFreePropertyBlob(blob);
+            }
+        }
+        drmModeFreeProperty(prop);
+    }
+    drmModeFreeObjectProperties(props);
+}
+
 // Grab current framebuffer. Helper reads pixels in its own process
 // (where dumb_mmap returns fresh data) and sends them via the socket.
 static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virtio) {
@@ -431,6 +504,7 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 
     /* Search for the plane currently bound to the target CRTC */
     uint32_t fb_id = 0;
+    uint32_t matched_crtc = 0;  /* actual CRTC of the matched plane (for HDR meta) */
     for (uint32_t i = 0; i < planes->count_planes; i++) {
         drmModePlane *plane = drmModeGetPlane(drm_fd, planes->planes[i]);
         if (!plane) continue;
@@ -466,6 +540,7 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 
             if (is_primary || fb_id == 0) {
                 fb_id = plane->fb_id;
+                matched_crtc = plane->crtc_id;
                 fprintf(stderr, "drmtap-helper: matched plane=%u to crtc=%u (fb=%u, %s)\n",
                         plane->plane_id, target_crtc, fb_id, is_primary ? "PRIMARY" : "overlay");
                 if (is_primary) {
@@ -565,6 +640,14 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     meta.format = fb2->pixel_format;
     meta.fb_id = fb_id;
     meta.modifier = fb2->modifier;
+
+    /* HDR transfer + peak from the connector, so the library can decide whether
+     * to tone-map (vs a plain bit-depth reduction for SDR 10-bit). */
+    read_hdr_metadata(drm_fd, matched_crtc, &meta.hdr_eotf, &meta.hdr_max_nits);
+    if (meta.hdr_eotf == 2 || meta.hdr_eotf == 3) {
+        fprintf(stderr, "drmtap-helper: HDR scanout eotf=%u peak=%u nits\n",
+                meta.hdr_eotf, meta.hdr_max_nits);
+    }
 
     drmModeFreeFB2(fb2);
 

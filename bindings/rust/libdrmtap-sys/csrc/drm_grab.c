@@ -81,6 +81,79 @@ typedef struct {
 /* Plane discovery                                                           */
 /* ========================================================================= */
 
+/* Read the HDR transfer + peak luminance from the connector driving `crtc_id`
+ * into ctx->cur_hdr_eotf / cur_hdr_max_nits, for the direct (no-helper) capture
+ * path. Mirrors read_hdr_metadata in the helper. Best-effort: any failure leaves
+ * it SDR (0), so a non-HDR display just means no tone-mapping. */
+static void read_hdr_metadata_direct(drmtap_ctx *ctx, uint32_t crtc_id) {
+    ctx->cur_hdr_eotf = 0;
+    ctx->cur_hdr_max_nits = 0;
+    if (crtc_id == 0) {
+        return;
+    }
+    drmModeRes *res = drmModeGetResources(ctx->drm_fd);
+    if (!res) {
+        return;
+    }
+    uint32_t conn_id = 0;
+    for (int i = 0; i < res->count_connectors && conn_id == 0; i++) {
+        drmModeConnector *conn =
+            drmModeGetConnector(ctx->drm_fd, res->connectors[i]);
+        if (!conn) {
+            continue;
+        }
+        if (conn->connection == DRM_MODE_CONNECTED && conn->encoder_id) {
+            drmModeEncoder *enc =
+                drmModeGetEncoder(ctx->drm_fd, conn->encoder_id);
+            if (enc) {
+                if (enc->crtc_id == crtc_id) {
+                    conn_id = conn->connector_id;
+                }
+                drmModeFreeEncoder(enc);
+            }
+        }
+        drmModeFreeConnector(conn);
+    }
+    drmModeFreeResources(res);
+    if (conn_id == 0) {
+        return;
+    }
+    drmModeObjectProperties *props = drmModeObjectGetProperties(
+        ctx->drm_fd, conn_id, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        return;
+    }
+    for (uint32_t p = 0; p < props->count_props; p++) {
+        drmModePropertyRes *prop = drmModeGetProperty(ctx->drm_fd, props->props[p]);
+        if (!prop) {
+            continue;
+        }
+        if (strcmp(prop->name, "HDR_OUTPUT_METADATA") == 0 &&
+            props->prop_values[p] != 0) {
+            drmModePropertyBlobRes *blob = drmModeGetPropertyBlob(
+                ctx->drm_fd, (uint32_t)props->prop_values[p]);
+            if (blob && blob->data &&
+                blob->length >= sizeof(struct hdr_output_metadata)) {
+                const struct hdr_output_metadata *m = blob->data;
+                const struct hdr_metadata_infoframe *inf =
+                    &m->hdmi_metadata_type1;
+                ctx->cur_hdr_eotf = inf->eotf;
+                ctx->cur_hdr_max_nits = inf->max_cll
+                    ? inf->max_cll : inf->max_display_mastering_luminance;
+            }
+            if (blob) {
+                drmModeFreePropertyBlob(blob);
+            }
+        }
+        drmModeFreeProperty(prop);
+    }
+    drmModeFreeObjectProperties(props);
+    if (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) {
+        drmtap_debug_log(ctx, "direct: HDR scanout eotf=%u peak=%u nits",
+                         ctx->cur_hdr_eotf, ctx->cur_hdr_max_nits);
+    }
+}
+
 // Find the primary plane attached to the target CRTC
 // Returns the plane_id or 0 on failure
 static uint32_t find_primary_plane(drmtap_ctx *ctx) {
@@ -173,6 +246,12 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
     }
 
     drmModeFreePlaneResources(planes);
+
+    /* Direct (no-helper) path: read the connector HDR metadata for this CRTC so
+     * the conversion path can tone-map. In helper mode this comes over the wire
+     * instead (drmtap_helper_grab sets ctx->cur_hdr_eotf). */
+    read_hdr_metadata_direct(ctx, ctx->crtc_id);
+
     return result;
 }
 
@@ -430,6 +509,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         frame->format = hresult.wire.format;
         frame->modifier = hresult.wire.modifier;
         frame->fb_id = hresult.wire.fb_id;
+        /* HDR transfer the helper read from the connector — drives tone-mapping. */
+        ctx->cur_hdr_eotf = hresult.wire.hdr_eotf;
+        ctx->cur_hdr_max_nits = hresult.wire.hdr_max_nits;
 
         /* The helper validates its own geometry, but it sends stride/height over
          * the wire — re-check before we mmap/size anything from those values. */
@@ -632,6 +714,65 @@ cleanup:
 /* Auto-process: deswizzle + format convert based on GPU driver              */
 /* ========================================================================= */
 
+/* DRM fourccs for the high-bit-depth scanout formats we reduce to 8-bit. */
+#define DRMTAP_FMT_XR30 0x30335258u  /* XRGB2101010 */
+#define DRMTAP_FMT_AR30 0x30335241u  /* ARGB2101010 */
+#define DRMTAP_FMT_XR48 0x38345258u  /* XRGB16161616 */
+#define DRMTAP_FMT_AR48 0x38345241u  /* ARGB16161616 */
+#define DRMTAP_FMT_XB48 0x38344258u  /* XBGR16161616 */
+#define DRMTAP_FMT_AB48 0x38344241u  /* ABGR16161616 */
+#define DRMTAP_FMT_XR24 0x34325258u  /* XRGB8888 */
+
+/* Reduce a LINEAR high-bit-depth scanout (10-bit AR30/XR30 or 16-bit
+ * XR48/AR48/XB48/AB48) to 8-bit XRGB8888, tone-mapping when the connector
+ * reports HDR (PQ). Output lands in ctx->deswizzle_buf and frame is repointed
+ * at it. Returns 1 if it converted, 0 if the format is already 8-bit (caller
+ * returns the data as-is), <0 on error. P010 (10-bit YUV overlay video, not the
+ * primary desktop scanout) is intentionally not handled — documented limitation. */
+static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
+                                     drmtap_frame_info *frame) {
+    uint32_t fmt = frame->format;
+    int is_ar30 = (fmt == DRMTAP_FMT_XR30 || fmt == DRMTAP_FMT_AR30);
+    int is_rgb16 = (fmt == DRMTAP_FMT_XR48 || fmt == DRMTAP_FMT_AR48 ||
+                    fmt == DRMTAP_FMT_XB48 || fmt == DRMTAP_FMT_AB48);
+    if (!is_ar30 && !is_rgb16) {
+        return 0;  /* 8-bit RGB (or unknown): leave as-is */
+    }
+
+    size_t out_size = (size_t)frame->width * frame->height * 4u;
+    int b = ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size, out_size);
+    if (b != 0) return b;
+    uint32_t dst_stride = frame->width * 4u;
+    int hdr = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ);
+    int ret;
+
+    if (is_ar30) {
+        if (hdr) {
+            ret = drmtap_tonemap_hdr10(data, ctx->deswizzle_buf,
+                    frame->width, frame->height, frame->stride, dst_stride,
+                    fmt, ctx->cur_hdr_max_nits);
+        } else {
+            ret = drmtap_convert_format(data, ctx->deswizzle_buf,
+                    frame->width, frame->height, frame->stride, dst_stride,
+                    fmt, DRMTAP_FMT_XR24);
+        }
+    } else {
+        int bgr = (fmt == DRMTAP_FMT_XB48 || fmt == DRMTAP_FMT_AB48);
+        ret = drmtap_convert_rgb16(data, ctx->deswizzle_buf,
+                frame->width, frame->height, frame->stride, dst_stride,
+                bgr, ctx->cur_hdr_eotf, ctx->cur_hdr_max_nits);
+    }
+    if (ret != 0) return ret;
+
+    drmtap_debug_log(ctx, "auto-process: linear %s -> XRGB8888 (%s)",
+                     is_ar30 ? "10-bit" : "16-bit",
+                     hdr ? "HDR tone-mapped" : "SDR");
+    frame->data = ctx->deswizzle_buf;
+    frame->format = DRMTAP_FMT_XR24;
+    frame->stride = dst_stride;
+    return 1;
+}
+
 static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                             drmtap_frame_info *frame, int force_egl) {
     /* force_egl is set for a virgl scanout: the DMA-BUF holds host-rendered
@@ -641,10 +782,20 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     if (!data && !force_egl) return 0;
 
     uint64_t modifier = frame->modifier;
+    int is_linear = (modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0);
 
-    /* Linear framebuffer: no deswizzle needed (unless a virgl readback is
+    /* A linear high-bit-depth / HDR scanout still needs reduction to 8-bit
+     * (the early-return below is only safe for 8-bit RGB). */
+    if (data && is_linear && !force_egl) {
+        int red = reduce_linear_to_xrgb8888(ctx, data, frame);
+        if (red < 0) return red;
+        if (red == 1) return 0;
+        /* red == 0: already 8-bit -> fall through to the early-return. */
+    }
+
+    /* Linear 8-bit framebuffer: no deswizzle needed (unless a virgl readback is
      * forced — see force_egl above). */
-    if ((modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0) && !force_egl) {
+    if (is_linear && !force_egl) {
         return 0;
     }
 
@@ -655,10 +806,6 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
      * always deswizzle into a separate buffer (ctx->deswizzle_buf).
      */
 
-    /* Format conversion constants */
-    #define DRM_FMT_XR30 0x30335258u  /* fourcc('X','R','3','0') */
-    #define DRM_FMT_AR30 0x30335241u  /* fourcc('A','R','3','0') */
-    #define DRM_FMT_XR24 0x34325258u  /* fourcc('X','R','2','4') */
 
     /* Ensure the CPU-deswizzle shadow buffer is allocated (grow-once, capped —
      * see ensure_buf). frame->stride/height are validated at every entry point
@@ -762,17 +909,37 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
             frame->data = ctx->deswizzle_buf;
             drmtap_debug_log(ctx, "auto-process: CPU deswizzled to linear");
 
-            /* Convert 10-bit XR30/AR30 → 8-bit XRGB8888 if needed */
-            if (frame->format == DRM_FMT_XR30 ||
-                frame->format == DRM_FMT_AR30) {
-                drmtap_debug_log(ctx,
-                    "auto-process: converting XR30 10-bit → XRGB8888 8-bit");
-                drmtap_convert_format(
-                    ctx->deswizzle_buf, ctx->deswizzle_buf,
-                    frame->width, frame->height,
-                    frame->stride, frame->stride,
-                    frame->format, DRM_FMT_XR24);
-                frame->format = DRM_FMT_XR24;
+            /* Reduce 10-bit XR30/AR30 to 8-bit XRGB8888. An HDR10 (PQ) scanout
+             * needs a real tone-map — the naive bit-shift would wash it out; a
+             * plain SDR 10-bit scanout (same fourcc) just gets truncated. */
+            if (frame->format == DRMTAP_FMT_XR30 ||
+                frame->format == DRMTAP_FMT_AR30) {
+                int conv;
+                if (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) {
+                    drmtap_debug_log(ctx,
+                        "auto-process: HDR10 AR30 -> tone-map to SDR (peak=%u)",
+                        ctx->cur_hdr_max_nits);
+                    conv = drmtap_tonemap_hdr10(
+                        ctx->deswizzle_buf, ctx->deswizzle_buf,
+                        frame->width, frame->height,
+                        frame->stride, frame->stride,
+                        frame->format, ctx->cur_hdr_max_nits);
+                } else {
+                    drmtap_debug_log(ctx,
+                        "auto-process: SDR 10-bit AR30 -> 8-bit XRGB8888");
+                    conv = drmtap_convert_format(
+                        ctx->deswizzle_buf, ctx->deswizzle_buf,
+                        frame->width, frame->height,
+                        frame->stride, frame->stride,
+                        frame->format, DRMTAP_FMT_XR24);
+                }
+                /* Only relabel the frame as 8-bit if the conversion succeeded;
+                 * otherwise leave the original format so the caller doesn't read
+                 * unconverted 10-bit data as XRGB8888. */
+                if (conv != 0) {
+                    return conv;
+                }
+                frame->format = DRMTAP_FMT_XR24;
             }
         }
         return ret;
