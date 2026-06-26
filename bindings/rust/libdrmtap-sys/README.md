@@ -46,10 +46,11 @@ framebuffers, returning the scanout as a zero-copy DMA-BUF fd via `SCM_RIGHTS`.
 Frames are returned as 8-bit `XRGB8888` (BGRA in memory). Tiled and compressed
 framebuffers (Intel X/Y-tiled + CCS, AMD, Nvidia block-linear, virtio/virgl) are
 GPU-detiled through an EGL/GLES2 backend, and **HDR10** scanouts (PQ / BT.2020 —
-`AR30`/`XR30` and 16-bit `XR48`/`AR48`) are tone-mapped to SDR when the connector
-advertises HDR (`HDR_OUTPUT_METADATA`): PQ decode, BT.2020 → BT.709 gamut, a
-highlight-preserving curve, then sRGB. Plain SDR 10-bit gets a straight bit-depth
-reduction; `P010` (overlay-video YUV) and HLG are not tone-mapped.
+`AR30`/`XR30` and 16-bit `XR48`/`AR48`/`XB48`/`AB48`) are tone-mapped to SDR when
+the connector advertises HDR (`HDR_OUTPUT_METADATA`): PQ decode, BT.2020 → BT.709
+gamut, a highlight-preserving curve, then sRGB. Plain SDR 10-bit gets a straight
+bit-depth reduction; HLG falls back to that reduction and `P010` (overlay-video
+YUV) is not handled.
 
 ## Usage
 
