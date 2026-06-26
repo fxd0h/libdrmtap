@@ -40,7 +40,7 @@ capture. This means:
 1. Add the crate to `libs/scrap/Cargo.toml`:
 
    ```toml
-   libdrmtap-sys = { version = "0.4.2", optional = true }
+   libdrmtap-sys = { version = "0.4.3", optional = true }
    ```
 
    It embeds and statically compiles the C sources **and** builds the
