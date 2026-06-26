@@ -25,6 +25,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <math.h>
+#include <pthread.h>
 
 #include "drmtap.h"
 
@@ -323,6 +325,129 @@ int drmtap_deswizzle(const void *src, void *dst,
 /* ========================================================================= */
 /* Public API — Format Conversion                                            */
 /* ========================================================================= */
+
+/* ========================================================================= */
+/* HDR10 (PQ / BT.2020) -> SDR (BT.709 / sRGB) tone mapping                  */
+/* ========================================================================= */
+
+/* BT.2408 reference graphics/diffuse white. HDR diffuse white sits here; this
+ * is the luminance we map to SDR "1.0" so SDR-range content keeps its normal
+ * brightness and only true highlights above it get rolled off. */
+#define DRMTAP_SDR_WHITE_NITS 203.0
+
+#define DRMTAP_PQ_LUT_N   1024    /* one entry per 10-bit code value */
+#define DRMTAP_SRGB_LUT_N 4096    /* linear [0,1] -> 8-bit sRGB */
+
+static float   g_pq_lut[DRMTAP_PQ_LUT_N];      /* code -> luminance (nits) */
+static uint8_t g_srgb_lut[DRMTAP_SRGB_LUT_N];  /* linear [0,1] -> 8-bit sRGB */
+static pthread_once_t g_hdr_once = PTHREAD_ONCE_INIT;
+
+/* SMPTE ST 2084 (PQ) EOTF. Input: normalized code value [0,1].
+ * Output: absolute display luminance in nits (cd/m^2), 0..10000. */
+static double pq_eotf_nits(double e) {
+    const double m1 = 2610.0 / 16384.0;
+    const double m2 = 2523.0 / 4096.0 * 128.0;
+    const double c1 = 3424.0 / 4096.0;
+    const double c2 = 2413.0 / 4096.0 * 32.0;
+    const double c3 = 2392.0 / 4096.0 * 32.0;
+    if (e <= 0.0) return 0.0;
+    double ep = pow(e, 1.0 / m2);
+    double num = ep - c1;
+    if (num < 0.0) num = 0.0;
+    double den = c2 - c3 * ep;
+    if (den <= 0.0) return 10000.0;
+    return 10000.0 * pow(num / den, 1.0 / m1);
+}
+
+/* sRGB OETF: linear [0,1] -> non-linear sRGB [0,1]. */
+static double srgb_oetf(double c) {
+    if (c <= 0.0) return 0.0;
+    if (c >= 1.0) return 1.0;
+    if (c <= 0.0031308) return 12.92 * c;
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+static void hdr_lut_init(void) {
+    for (int i = 0; i < DRMTAP_PQ_LUT_N; i++) {
+        g_pq_lut[i] = (float)pq_eotf_nits((double)i / (DRMTAP_PQ_LUT_N - 1));
+    }
+    for (int i = 0; i < DRMTAP_SRGB_LUT_N; i++) {
+        double s = srgb_oetf((double)i / (DRMTAP_SRGB_LUT_N - 1));
+        int v = (int)(s * 255.0 + 0.5);
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        g_srgb_lut[i] = (uint8_t)v;
+    }
+}
+
+/* Highlight-preserving tone curve. Input x is linear light normalized so that
+ * 1.0 == SDR diffuse white: x <= knee passes through (SDR content keeps its
+ * brightness), and x above the knee rolls off smoothly toward 1.0 (HDR
+ * highlights, which an SDR display cannot show brighter than white). */
+static double tonemap_softknee(double x) {
+    const double knee = 0.80;
+    if (x <= knee) return x;
+    if (x >= 100.0) return 1.0;
+    return knee + (1.0 - knee) * tanh((x - knee) / (1.0 - knee));
+}
+
+/* sRGB-encode a linear [0,inf) channel via the precomputed LUT. */
+static uint8_t to_srgb8(double linear) {
+    if (linear <= 0.0) return g_srgb_lut[0];
+    if (linear >= 1.0) return g_srgb_lut[DRMTAP_SRGB_LUT_N - 1];
+    int idx = (int)(linear * (DRMTAP_SRGB_LUT_N - 1) + 0.5);
+    return g_srgb_lut[idx];
+}
+
+/* Map one HDR10 (PQ, BT.2020) ARGB2101010 pixel to SDR 8-bit R/G/B. */
+static void tonemap_ar30_pixel(uint32_t pixel,
+                               uint8_t *r8, uint8_t *g8, uint8_t *b8) {
+    /* 10-bit channels, ARGB2101010: R[29:20] G[19:10] B[9:0]. */
+    double Rl = g_pq_lut[(pixel >> 20) & 0x3FF];  /* BT.2020 linear nits */
+    double Gl = g_pq_lut[(pixel >> 10) & 0x3FF];
+    double Bl = g_pq_lut[(pixel)       & 0x3FF];
+
+    /* BT.2020 -> BT.709 in linear light. */
+    double r =  1.660491 * Rl - 0.587641 * Gl - 0.072850 * Bl;
+    double g = -0.124550 * Rl + 1.132900 * Gl - 0.008349 * Bl;
+    double b = -0.018151 * Rl - 0.100579 * Gl + 1.118730 * Bl;
+    if (r < 0.0) r = 0.0;
+    if (g < 0.0) g = 0.0;
+    if (b < 0.0) b = 0.0;
+
+    /* Normalize to SDR white, roll off highlights, sRGB-encode. */
+    *r8 = to_srgb8(tonemap_softknee(r / DRMTAP_SDR_WHITE_NITS));
+    *g8 = to_srgb8(tonemap_softknee(g / DRMTAP_SDR_WHITE_NITS));
+    *b8 = to_srgb8(tonemap_softknee(b / DRMTAP_SDR_WHITE_NITS));
+}
+
+int drmtap_tonemap_hdr10(const void *src, void *dst,
+                         uint32_t width, uint32_t height,
+                         uint32_t src_stride, uint32_t dst_stride,
+                         uint32_t src_format) {
+    if (!src || !dst || width == 0 || height == 0) {
+        return -EINVAL;
+    }
+    /* XR30 = XRGB2101010 ('XR30'), AR30 = ARGB2101010 ('AR30'). */
+    if (src_format != 0x30335258u && src_format != 0x30335241u) {
+        return -ENOTSUP;
+    }
+
+    pthread_once(&g_hdr_once, hdr_lut_init);
+
+    for (uint32_t y = 0; y < height; y++) {
+        const uint32_t *s = (const uint32_t *)
+            ((const uint8_t *)src + (size_t)y * src_stride);
+        uint32_t *d = (uint32_t *)((uint8_t *)dst + (size_t)y * dst_stride);
+        for (uint32_t x = 0; x < width; x++) {
+            uint8_t r, g, b;
+            tonemap_ar30_pixel(s[x], &r, &g, &b);
+            d[x] = (0xFFu << 24) | ((uint32_t)r << 16) |
+                   ((uint32_t)g << 8) | b;
+        }
+    }
+    return 0;
+}
 
 int drmtap_convert_format(const void *src, void *dst,
                           uint32_t width, uint32_t height,

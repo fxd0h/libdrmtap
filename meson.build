@@ -59,6 +59,9 @@ seccomp_dep = dependency('libseccomp', required: false)
 # Optional: libcap for capability management
 libcap_dep = dependency('libcap', required: false)
 
+# libm: HDR tone-mapping in pixel_convert.c uses pow() (PQ EOTF / sRGB OETF).
+m_dep = meson.get_compiler('c').find_library('m', required: false)
+
 # ============================================================================
 # Library sources
 # ============================================================================
@@ -72,7 +75,7 @@ lib_sources = files(
     'src/privilege_helper.c',
 )
 
-lib_deps = [libdrm_dep, threads_dep]
+lib_deps = [libdrm_dep, threads_dep, m_dep]
 
 # GPU backends: Intel and AMD (always compiled — match functions needed by drm_grab.c)
 lib_sources += files(
@@ -205,11 +208,17 @@ test_helper = executable('test_helper',
     dependencies: [libdrmtap_dep],
     include_directories: lib_include,
 )
+test_hdr = executable('test_hdr',
+    'tests/test_hdr.c',
+    dependencies: [libdrmtap_dep, m_dep],
+    include_directories: lib_include,
+)
 
 # Unit tests (no hardware needed)
 test('formats', test_formats, suite: 'unit')
 test('deswizzle', test_deswizzle, suite: 'unit')
 test('helper', test_helper, suite: 'unit')
+test('hdr', test_hdr, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
 # LSan: suppress the deliberate process-lifetime EGL/Mesa display allocation
