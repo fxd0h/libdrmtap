@@ -376,6 +376,12 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         /* V3: helper sent DMA-BUF fd via SCM_RIGHTS */
         if (hresult.dmabuf_fd >= 0) {
             free(pixel_buf);  /* Don't need pixel buffer */
+            /* priv->mapped aliased pixel_buf (set above for the heap-buffer
+             * path); it is now dangling. Clear it before the cleanup block so we
+             * don't munmap a freed pointer. priv is freshly calloc'd, so there
+             * is no real previous-frame mmap to release here anyway. */
+            priv->mapped = MAP_FAILED;
+            priv->is_heap_buf = 0;
 
             int dmabuf_fd = hresult.dmabuf_fd;
             size_t mmap_size = (size_t)frame->stride * frame->height;
