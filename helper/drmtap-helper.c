@@ -473,29 +473,14 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 #endif
     }
 
-    /* dumb_mmap — map the framebuffer in THIS process */
+    /* Build metadata from the framebuffer (independent of how we move pixels). */
     mapped_size = (size_t)fb2->pitches[0] * fb2->height;
-    struct drm_mode_map_dumb map = {0};
-    map.handle = gem_handle;
-    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
-        drmModeFreeFB2(fb2);
-        return send_error(sock, "MODE_MAP_DUMB failed");
-    }
-    mapped = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED,
-                  drm_fd, map.offset);
-    if (mapped == MAP_FAILED) {
-        drmModeFreeFB2(fb2);
-        return send_error(sock, "mmap failed");
-    }
-
-    /* Build metadata */
     struct grab_metadata meta = {0};
     meta.width = fb2->width;
     meta.height = fb2->height;
     meta.stride = fb2->pitches[0];
     meta.format = fb2->pixel_format;
     meta.fb_id = fb_id;
-    meta.data_size = (uint32_t)mapped_size;
     meta.modifier = fb2->modifier;
 
     drmModeFreeFB2(fb2);
@@ -507,6 +492,46 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     clock_gettime(CLOCK_REALTIME, &ts);
     meta.seq = seq_counter;
     meta.timestamp_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+
+    int ret;
+
+    /* Preferred path for tiled (non-linear) framebuffers: export the GEM buffer
+     * as a DMA-BUF fd and pass it via SCM_RIGHTS so the parent can EGL-import and
+     * GPU-deswizzle it. Done BEFORE any MODE_MAP_DUMB on purpose: scanout buffers
+     * on some drivers are not dumb-mappable (nvidia-drm on Tegra fails
+     * MODE_MAP_DUMB with "Failed to lookup gem object"), so requiring a dumb map
+     * first would break capture on those GPUs even though the export works. */
+    if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio) {
+        int prime_fd = -1;
+        int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
+                                            DRM_CLOEXEC | DRM_RDWR, &prime_fd);
+        if (prime_ret == 0 && prime_fd >= 0) {
+            meta.flags = FLAG_HAS_DMABUF;
+            meta.data_size = 0;  /* no pixel data follows */
+            ret = send_fd(sock, prime_fd, &meta, sizeof(meta));
+            close(prime_fd);
+            return ret;
+        }
+        /* Export failed — fall through to the dumb-map pixel path. */
+        fprintf(stderr,
+            "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
+            prime_ret);
+    }
+
+    /* Pixel-data path (linear modifier, virtio, or DMA-BUF export failed):
+     * dumb-map the framebuffer in this process and send the pixels directly. */
+    struct drm_mode_map_dumb map = {0};
+    map.handle = gem_handle;
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
+        return send_error(sock, "MODE_MAP_DUMB failed");
+    }
+    mapped = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED,
+                  drm_fd, map.offset);
+    if (mapped == MAP_FAILED) {
+        return send_error(sock, "mmap failed");
+    }
+    meta.flags = 0;
+    meta.data_size = (uint32_t)mapped_size;
 
     /* Debug: print pixel values to verify freshness */
     {
@@ -527,31 +552,6 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
         }
     }
 
-    int ret;
-
-    /* Non-linear modifier: export DMA-BUF fd via drmPrimeHandleToFD
-     * and send it via SCM_RIGHTS — the parent can then EGL-import it
-     * for GPU deswizzle. We still send the mmap'd pixels as fallback data. */
-    if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ && !is_virtio) {
-        int prime_fd = -1;
-        int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
-                                            DRM_CLOEXEC | DRM_RDWR, &prime_fd);
-        if (prime_ret == 0 && prime_fd >= 0) {
-            meta.flags = FLAG_HAS_DMABUF;
-            meta.data_size = 0;  /* no pixel data follows */
-            ret = send_fd(sock, prime_fd, &meta, sizeof(meta));
-            close(prime_fd);
-            munmap(mapped, mapped_size);
-            return ret;
-        }
-        /* drmPrimeHandleToFD failed — fall through to pixel data path */
-        fprintf(stderr,
-            "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
-            prime_ret);
-    }
-
-    /* Linear modifier (or Prime failed): send pixel data directly */
-    meta.flags = 0;
     ret = send_all(sock, &meta, sizeof(meta));
     if (ret == 0) {
         ret = send_all(sock, mapped, mapped_size);
