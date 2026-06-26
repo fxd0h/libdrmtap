@@ -317,6 +317,33 @@ int drmtap_convert_format(const void *src, void *dst,
                           uint32_t src_stride, uint32_t dst_stride,
                           uint32_t src_format, uint32_t dst_format);
 
+/**
+ * @brief Tone-map an HDR10 (PQ, BT.2020) framebuffer to SDR 8-bit XRGB8888.
+ *
+ * Unlike drmtap_convert_format()'s naive bit-shift (which is only correct for
+ * SDR 10-bit), this applies the real HDR10 transfer: PQ (SMPTE ST 2084) EOTF
+ * to linear light, BT.2020 -> BT.709 gamut mapping, a highlight-preserving
+ * tone-map down to the SDR range, and the sRGB OETF back to 8-bit. Use it only
+ * when the scanout is actually HDR (decided from the connector Colorspace /
+ * HDR_OUTPUT_METADATA, not from the pixel format alone — XR30/AR30 is also used
+ * for plain SDR 10-bit).
+ *
+ * Supported src_format: XR30/AR30 (ARGB2101010). Others return -ENOTSUP.
+ *
+ * @param src        Source pixel data
+ * @param dst        Destination buffer (XRGB8888)
+ * @param width      Frame width in pixels
+ * @param height     Frame height in pixels
+ * @param src_stride Source stride (bytes per row)
+ * @param dst_stride Destination stride (bytes per row)
+ * @param src_format Source DRM fourcc (DRM_FORMAT_XRGB2101010 / ARGB2101010)
+ * @return 0 on success, -ENOTSUP for an unsupported format, -EINVAL on bad args
+ */
+int drmtap_tonemap_hdr10(const void *src, void *dst,
+                         uint32_t width, uint32_t height,
+                         uint32_t src_stride, uint32_t dst_stride,
+                         uint32_t src_format);
+
 /* ========================================================================= */
 /* Frame Differencing (optional utility)                                     */
 /* ========================================================================= */
