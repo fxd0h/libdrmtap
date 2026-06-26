@@ -102,6 +102,7 @@ struct drm_virtgpu_3d_wait {
 /* Command structure for CMD_GRAB (client to helper) */
 struct helper_cmd_grab {
     uint8_t  cmd;           /* CMD_GRAB (0x01) */
+    /* cppcheck-suppress unusedStructMember ; explicit wire-format padding */
     uint8_t  _pad1[3];      /* align to 4 bytes */
     uint32_t crtc_id;       /* target CRTC id (0 = auto-select first active) */
 };
@@ -124,6 +125,7 @@ struct grab_metadata {
     uint32_t seq;
     uint64_t timestamp_ms;
     uint32_t flags;
+    /* cppcheck-suppress unusedStructMember ; explicit wire-format padding */
     uint32_t _pad;
 };
 
