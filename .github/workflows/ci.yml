@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-${{ matrix.ubuntu }}
     strategy:
       matrix:
-        ubuntu: ['24.04']
+        ubuntu: ['22.04', '24.04']
 
     steps:
       - name: Checkout
@@ -101,3 +101,36 @@ jobs:
             --inline-suppr \
             -I include/ \
             src/ helper/
+
+  rust-crate:
+    name: Rust crate (libdrmtap-sys + libdrmtap)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc pkg-config \
+            libdrm-dev libcap-dev libseccomp-dev \
+            libegl-dev libgles2-mesa-dev
+
+      - name: Build workspace
+        working-directory: bindings/rust
+        run: cargo build --workspace --verbose
+
+      - name: Test workspace
+        working-directory: bindings/rust
+        run: cargo test --workspace --verbose
+
+      # The published crates are the actual distributed artifact (libdrmtap-sys
+      # statically embeds the C sources and builds the privileged helper). Verify
+      # they stay buildable-from-package and publishable.
+      - name: Package check (libdrmtap-sys)
+        working-directory: bindings/rust
+        run: cargo package -p libdrmtap-sys
+
+      - name: Package check (libdrmtap)
+        working-directory: bindings/rust
+        run: cargo package -p libdrmtap
