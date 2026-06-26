@@ -197,9 +197,12 @@ static int install_seccomp(void) {
         perror("cap_set_proc failed"); return -1;
     }
 
+    /* NOTE: open/openat are deliberately NOT allowed. The DRM device is opened
+     * once in main() before this filter is installed, and the grab loop only
+     * ever reuses that fd — so a compromised helper cannot open arbitrary files
+     * even though it holds CAP_SYS_ADMIN. */
     int allowed[] = {
         SCMP_SYS(read), SCMP_SYS(write), SCMP_SYS(close),
-        SCMP_SYS(openat), SCMP_SYS(open),
         SCMP_SYS(ioctl),       /* DRM ioctls */
         SCMP_SYS(sendto),      /* send() */
         SCMP_SYS(sendmsg),     /* sendmsg() for SCM_RIGHTS */
@@ -580,12 +583,34 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
-    /* Validate socket fd */
+    /* Validate socket fd. F_GETFD only tells us fd 3 is open; SO_PEERCRED
+     * additionally requires it to be a connected AF_UNIX socket and tells us who
+     * is on the other end. This is defense-in-depth, not access control: it
+     * rejects being exec'd with fd 3 pointing at an arbitrary open file, or by a
+     * different user. Real access control to DRM scanout is enforced by the
+     * helper's install permissions (root:rustdesk-capture 0750), not here. */
     if (fcntl(HELPER_SOCKET_FD, F_GETFD) < 0) {
         fprintf(stderr,
                 "drmtap-helper: fd %d not valid — must be spawned by "
                 "libdrmtap, not run directly\n", HELPER_SOCKET_FD);
         return 1;
+    }
+    {
+        struct ucred peer;
+        socklen_t plen = sizeof(peer);
+        if (getsockopt(HELPER_SOCKET_FD, SOL_SOCKET, SO_PEERCRED,
+                       &peer, &plen) != 0) {
+            fprintf(stderr,
+                    "drmtap-helper: fd %d is not a socket — must be spawned by "
+                    "libdrmtap, not run directly\n", HELPER_SOCKET_FD);
+            return 1;
+        }
+        if (peer.uid != getuid()) {
+            fprintf(stderr,
+                    "drmtap-helper: refusing to serve peer uid %u (expected %u)\n",
+                    (unsigned)peer.uid, (unsigned)getuid());
+            return 1;
+        }
     }
 
     int sock = HELPER_SOCKET_FD;
@@ -621,31 +646,18 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* The whole point of this helper is to run privileged but confined. If we
-     * cannot establish the confinement, refuse to serve rather than run with
-     * CAP_SYS_ADMIN unconfined. */
-#ifdef HAVE_LIBCAP
-    if (drop_caps() != 0) {
-        fprintf(stderr,
-                "drmtap-helper: refusing to run: could not drop capabilities\n");
-        return 1;
-    }
-#endif
-
-#ifdef HAVE_SECCOMP
-    if (install_seccomp() != 0) {
-        fprintf(stderr,
-                "drmtap-helper: refusing to run: could not install seccomp filter\n");
-        return 1;
-    }
-#endif
-
     /* ================================================================
      * Persistent DRM fd — opened ONCE, reused for all frames.
      * This is the key performance optimization: avoids the expensive
      * open()/close() + drmSetClientCap() on every frame.
+     *
+     * Opened BEFORE seccomp so the filter can forbid open/openat entirely: the
+     * grab loop never opens another path, it only reuses this fd. Opened
+     * read-only because we issue only read ioctls (GetFB2 / PrimeHandleToFD /
+     * SetClientCap) and never modify KMS state; on the DRM master / CAP_SYS_ADMIN
+     * path these all work on an O_RDONLY fd.
      * ================================================================ */
-    int drm_fd = open(device, O_RDWR | O_CLOEXEC);
+    int drm_fd = open(device, O_RDONLY | O_CLOEXEC);
     if (drm_fd < 0) {
         fprintf(stderr, "drmtap-helper: failed to open %s: %s\n",
                 device, strerror(errno));
@@ -665,6 +677,26 @@ int main(int argc, char *argv[]) {
     }
     fprintf(stderr, "drmtap-helper: persistent fd=%d device=%s virtio=%d\n",
             drm_fd, device, is_virtio);
+
+    /* The whole point of this helper is to run privileged but confined. With the
+     * device already open, drop everything but CAP_SYS_ADMIN and install the
+     * seccomp filter. If we cannot establish the confinement, refuse to serve
+     * rather than run with CAP_SYS_ADMIN unconfined. */
+#ifdef HAVE_LIBCAP
+    if (drop_caps() != 0) {
+        fprintf(stderr,
+                "drmtap-helper: refusing to run: could not drop capabilities\n");
+        return 1;
+    }
+#endif
+
+#ifdef HAVE_SECCOMP
+    if (install_seccomp() != 0) {
+        fprintf(stderr,
+                "drmtap-helper: refusing to run: could not install seccomp filter\n");
+        return 1;
+    }
+#endif
 
     /* Event loop: receive commands, process with persistent fd */
     while (1) {
