@@ -376,8 +376,14 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         /* V3: helper sent DMA-BUF fd via SCM_RIGHTS */
         if (hresult.dmabuf_fd >= 0) {
             free(pixel_buf);  /* Don't need pixel buffer */
+            /* priv->mapped aliased pixel_buf (set above for the heap-buffer
+             * path); it is now dangling. Clear it before the cleanup block so we
+             * don't munmap a freed pointer. priv is freshly calloc'd, so there
+             * is no real previous-frame mmap to release here anyway. */
+            priv->mapped = MAP_FAILED;
+            priv->is_heap_buf = 0;
 
-            int prime_fd = hresult.dmabuf_fd;
+            int dmabuf_fd = hresult.dmabuf_fd;
             size_t mmap_size = (size_t)frame->stride * frame->height;
 
             /* Clean up previous frame's DMA-BUF resources (they change every frame
@@ -386,28 +392,28 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                 munmap(priv->mapped, priv->mapped_size);
                 priv->mapped = MAP_FAILED;
             }
-            if (priv->prime_fd >= 0 && priv->prime_fd != prime_fd) {
+            if (priv->prime_fd >= 0 && priv->prime_fd != dmabuf_fd) {
                 close(priv->prime_fd);
             }
 
             /* mmap the DMA-BUF in the parent */
             void *mapped = mmap(NULL, mmap_size, PROT_READ, MAP_SHARED,
-                                prime_fd, 0);
+                                dmabuf_fd, 0);
 
-            priv->prime_fd = prime_fd;
+            priv->prime_fd = dmabuf_fd;
             priv->is_heap_buf = 0;
 
             if (mapped != MAP_FAILED) {
                 priv->mapped = mapped;
                 priv->mapped_size = mmap_size;
                 frame->data = mapped;
-                frame->dma_buf_fd = prime_fd;
+                frame->dma_buf_fd = dmabuf_fd;
                 frame->_priv = priv;
 
                 drmtap_debug_log(ctx,
                     "helper V3: mmap'd DMA-BUF fd=%d (%zu bytes), "
                     "EGL deswizzle available",
-                    prime_fd, mmap_size);
+                    dmabuf_fd, mmap_size);
 
                 if (do_mmap) {
                     gpu_auto_process(ctx, mapped, frame);
@@ -417,12 +423,12 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                 priv->mapped = MAP_FAILED;
                 priv->mapped_size = 0;
                 frame->data = NULL;
-                frame->dma_buf_fd = prime_fd;
+                frame->dma_buf_fd = dmabuf_fd;
                 frame->_priv = priv;
 
                 drmtap_debug_log(ctx,
                     "helper V3: mmap failed but DMA-BUF fd=%d available "
-                    "for EGL zero-copy", prime_fd);
+                    "for EGL zero-copy", dmabuf_fd);
 
                 if (do_mmap) {
                     gpu_auto_process(ctx, NULL, frame);

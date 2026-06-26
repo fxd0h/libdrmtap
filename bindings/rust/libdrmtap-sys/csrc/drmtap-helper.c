@@ -102,6 +102,7 @@ struct drm_virtgpu_3d_wait {
 /* Command structure for CMD_GRAB (client to helper) */
 struct helper_cmd_grab {
     uint8_t  cmd;           /* CMD_GRAB (0x01) */
+    /* cppcheck-suppress unusedStructMember ; explicit wire-format padding */
     uint8_t  _pad1[3];      /* align to 4 bytes */
     uint32_t crtc_id;       /* target CRTC id (0 = auto-select first active) */
 };
@@ -124,6 +125,7 @@ struct grab_metadata {
     uint32_t seq;
     uint64_t timestamp_ms;
     uint32_t flags;
+    /* cppcheck-suppress unusedStructMember ; explicit wire-format padding */
     uint32_t _pad;
 };
 
@@ -507,14 +509,14 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     {
         static int frame_num = 0;
         frame_num++;
-        uint32_t *pixels = (uint32_t *)mapped;
-        uint32_t stride_px = meta.stride / 4;
-        uint32_t p_top = pixels[960 < (meta.stride/4) ? 960 : 0];
-        uint32_t p_clock = (94 * stride_px + 960 < mapped_size/4) ?
-                           pixels[94 * stride_px + 960] : 0;
-        uint32_t p_mid = (500 * stride_px + 960 < mapped_size/4) ?
-                         pixels[500 * stride_px + 960] : 0;
         if (frame_num <= 5 || frame_num % 60 == 0) {
+            uint32_t *pixels = (uint32_t *)mapped;
+            uint32_t stride_px = meta.stride / 4;
+            uint32_t p_top = pixels[960 < (meta.stride/4) ? 960 : 0];
+            uint32_t p_clock = (94 * stride_px + 960 < mapped_size/4) ?
+                               pixels[94 * stride_px + 960] : 0;
+            uint32_t p_mid = (500 * stride_px + 960 < mapped_size/4) ?
+                             pixels[500 * stride_px + 960] : 0;
             fprintf(stderr,
                 "drmtap-helper: frame=%d fb=%u mod=0x%lx top=%08x clock=%08x mid=%08x\n",
                 frame_num, meta.fb_id, (unsigned long)meta.modifier,

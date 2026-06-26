@@ -8,6 +8,7 @@
 [![crates.io](https://img.shields.io/crates/v/libdrmtap.svg)](https://crates.io/crates/libdrmtap)
 [![Built with AI](https://img.shields.io/badge/Built%20with-AI%20Agents-blueviolet)](docs/AI_DEVELOPMENT.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/fxd0h/libdrmtap?utm_source=oss&utm_medium=github&utm_campaign=fxd0h%2Flibdrmtap&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 *Capture any Linux display — no Wayland, no PipeWire, no user prompts.*
 
