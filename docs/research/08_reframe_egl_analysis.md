@@ -3,7 +3,7 @@
 > **Date**: 2026-03-14  
 > **Source**: [AlynxZhou/reframe](https://github.com/AlynxZhou/reframe) — 36 releases, C++, LGPL-3.0  
 > **Relevance**: Shows that a single EGL import + `glReadPixels` path handles tiled and compressed scanout formats across GPU vendors (the Intel/AMD/Nvidia modifiers we tested), instead of a per-GPU CPU deswizzler  
-> **Status**: Shipped — this analysis became `src/gpu_egl.c`, the **primary** detile path in libdrmtap 0.4.3. The per-GPU CPU deswizzle backends were kept as a fallback.
+> **Status**: Shipped — this analysis became `src/gpu_egl.c`, the **primary** detile path in libdrmtap 0.4.4. The per-GPU CPU deswizzle backends were kept as a fallback.
 
 ---
 
