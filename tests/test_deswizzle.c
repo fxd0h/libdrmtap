@@ -145,7 +145,7 @@ static void test_deswizzle_nvidia_x_tiled_roundtrip(void) {
 
     uint8_t *linear = calloc(1, stride * h);
     /* Tiled size: tiles_x tiles × (tile_w_bytes × tile_h) bytes */
-    size_t tiled_size = tiles_x * tile_w_bytes * tile_h;
+    size_t tiled_size = (size_t)tiles_x * tile_w_bytes * tile_h;
     uint8_t *tiled = calloc(1, tiled_size);
     uint8_t *result = calloc(1, stride * h);
     TEST_ASSERT(linear && tiled && result);
