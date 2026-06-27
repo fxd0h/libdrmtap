@@ -12,6 +12,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege GITHUB_TOKEN: these jobs only check out and build/test.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build & Test (Ubuntu ${{ matrix.ubuntu }})
