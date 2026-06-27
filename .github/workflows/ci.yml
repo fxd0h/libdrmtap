@@ -141,15 +141,21 @@ jobs:
         working-directory: bindings/rust
         # The wrapper pins the exact libdrmtap-sys version, so on a release that
         # bumps sys this can only resolve once sys is on crates.io (the -sys crate
-        # is always published first). Treat that one "sys version not yet on the
-        # registry" case as a deferral; any other packaging error still fails.
+        # is always published first). Defer ONLY when the missing version is the
+        # one this workspace is releasing (wrapper pin == local sys crate version
+        # AND that exact requirement is what cargo could not resolve); any other
+        # packaging or resolution error still fails the job.
         run: |
+          sys_ver=$(sed -n 's/^version = "\([0-9][0-9.]*\)".*/\1/p' libdrmtap-sys/Cargo.toml | head -1)
+          pin_ver=$(sed -n 's/.*libdrmtap-sys = { version = "\([0-9][0-9.]*\)".*/\1/p' libdrmtap/Cargo.toml | head -1)
           if out=$(cargo package -p libdrmtap 2>&1); then
             echo "$out"
           else
             echo "$out"
-            if echo "$out" | grep -q 'failed to select a version for the requirement .libdrmtap-sys'; then
-              echo "::notice::libdrmtap-sys not yet on crates.io; wrapper package check deferred until after the sys publish"
+            if [ -n "$sys_ver" ] && [ "$pin_ver" = "$sys_ver" ] \
+               && echo "$out" | grep -qF 'failed to select a version for the requirement' \
+               && echo "$out" | grep -qF "libdrmtap-sys = \"^${sys_ver}\""; then
+              echo "::notice::libdrmtap-sys ${sys_ver} not yet on crates.io; wrapper package check deferred until after the sys publish"
             else
               exit 1
             fi
