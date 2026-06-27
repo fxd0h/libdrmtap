@@ -139,4 +139,18 @@ jobs:
 
       - name: Package check (libdrmtap)
         working-directory: bindings/rust
-        run: cargo package -p libdrmtap
+        # The wrapper pins the exact libdrmtap-sys version, so on a release that
+        # bumps sys this can only resolve once sys is on crates.io (the -sys crate
+        # is always published first). Treat that one "sys version not yet on the
+        # registry" case as a deferral; any other packaging error still fails.
+        run: |
+          if out=$(cargo package -p libdrmtap 2>&1); then
+            echo "$out"
+          else
+            echo "$out"
+            if echo "$out" | grep -q 'failed to select a version for the requirement .libdrmtap-sys'; then
+              echo "::notice::libdrmtap-sys not yet on crates.io; wrapper package check deferred until after the sys publish"
+            else
+              exit 1
+            fi
+          fi
