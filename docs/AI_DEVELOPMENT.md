@@ -45,7 +45,7 @@ A single developer researching all of this manually would take weeks. With AI ag
 5. **API design** — Compared 3 implementations, proposed unified API
 6. **Architecture** — Designed the helper binary pattern based on gpu-screen-recorder's approach
 
-### Implementation Phase (shipped — C library 0.4.3)
+### Implementation Phase (shipped — C library 0.4.4)
 Guided by the research findings, the agents went on to build the library itself. Every architectural decision is traceable to a specific finding in the research docs. What shipped:
 
 - 🧩 **Two-process architecture** — an unprivileged library plus a small privileged `drmtap-helper` that carries `CAP_SYS_ADMIN` via file capabilities and talks over a socketpair, so the main process never has to run privileged.
@@ -81,7 +81,7 @@ If you use AI tools (Copilot, ChatGPT, Claude, Gemini, or others) to help with y
 
 > A single developer with AI agents can produce research and code that would traditionally require a team of specialists.
 
-This project is living proof of that thesis. The entire research corpus (9 documents, ~1,900 lines of technical analysis) was produced by one human + AI agents, and the shipped 0.4.3 library grew directly out of it.
+This project is living proof of that thesis. The entire research corpus (9 documents, ~1,900 lines of technical analysis) was produced by one human + AI agents, and the shipped 0.4.4 library grew directly out of it.
 
 We hope this inspires other open-source developers to embrace AI as a tool — not a replacement, but an amplifier of human capability.
 
