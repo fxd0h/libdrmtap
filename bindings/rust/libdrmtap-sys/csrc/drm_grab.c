@@ -132,6 +132,7 @@ static void read_hdr_metadata_direct(drmtap_ctx *ctx, uint32_t crtc_id) {
             props->prop_values[p] != 0) {
             drmModePropertyBlobRes *blob = drmModeGetPropertyBlob(
                 ctx->drm_fd, (uint32_t)props->prop_values[p]);
+#if HAVE_HDR_METADATA
             if (blob && blob->data &&
                 blob->length >= sizeof(struct hdr_output_metadata)) {
                 const struct hdr_output_metadata *m = blob->data;
@@ -141,6 +142,7 @@ static void read_hdr_metadata_direct(drmtap_ctx *ctx, uint32_t crtc_id) {
                 ctx->cur_hdr_max_nits = inf->max_cll
                     ? inf->max_cll : inf->max_display_mastering_luminance;
             }
+#endif
             if (blob) {
                 drmModeFreePropertyBlob(blob);
             }

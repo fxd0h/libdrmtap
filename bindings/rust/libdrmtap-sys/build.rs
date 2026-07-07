@@ -40,15 +40,22 @@ fn main() {
 
     // libdrm headers (xf86drm.h, xf86drmMode.h) live in a libdrm subdir. Find
     // them portably via pkg-config, falling back to the common Debian path.
-    match pkg_config::Config::new().cargo_metadata(false).probe("libdrm") {
-        Ok(lib) => {
-            for inc in &lib.include_paths {
-                build.include(inc);
-            }
-        }
-        Err(_) => {
-            build.include("/usr/include/libdrm");
-        }
+    let drm_includes: Vec<std::path::PathBuf> =
+        match pkg_config::Config::new().cargo_metadata(false).probe("libdrm") {
+            Ok(lib) => lib.include_paths,
+            Err(_) => vec![std::path::PathBuf::from("/usr/include/libdrm")],
+        };
+    for inc in &drm_includes {
+        build.include(inc);
+    }
+
+    // Feature-detect HDR metadata: old libdrm (e.g. Ubuntu 18.04) lacks
+    // `struct hdr_output_metadata` in drm_mode.h. drm_grab.c / drmtap-helper.c
+    // guard the HDR readout behind HAVE_HDR_METADATA so they still build there
+    // (HDR is simply skipped when the struct is unavailable).
+    let have_hdr = probe_hdr_metadata(&build, &drm_includes);
+    if have_hdr {
+        build.define("HAVE_HDR_METADATA", "1");
     }
 
     build.compile("drmtap");
@@ -88,6 +95,10 @@ fn main() {
         .arg("-pie")
         .arg("-Wl,-z,relro,-z,now");
 
+    if have_hdr {
+        cmd.arg("-DHAVE_HDR_METADATA=1");
+    }
+
     // Include libdrm headers for drmtap-helper.c (same probe as the library).
     match pkg_config::Config::new().cargo_metadata(false).probe("libdrm") {
         Ok(lib) => {
@@ -106,4 +117,35 @@ fn main() {
     println!("cargo:rerun-if-changed={}", csrc.join("drmtap-helper.c").display());
     // Expose the compiled helper path to downstream crates via DEP_DRMTAP_HELPER_BIN.
     println!("cargo:HELPER_BIN={}", helper_out.display());
+}
+
+// Probe whether the available libdrm defines `struct hdr_output_metadata`
+// (added in a newer libdrm than some LTS bases ship). True if a tiny snippet
+// using the struct compiles; drives the HAVE_HDR_METADATA guard in the C.
+fn probe_hdr_metadata(build: &cc::Build, drm_includes: &[std::path::PathBuf]) -> bool {
+    let out_dir = match std::env::var("OUT_DIR") {
+        Ok(d) => std::path::PathBuf::from(d),
+        Err(_) => return false,
+    };
+    let test_c = out_dir.join("hdr_probe.c");
+    let src = concat!(
+        "#include <xf86drmMode.h>\n",
+        "#include <drm_mode.h>\n",
+        "int main(void) {\n",
+        "    struct hdr_output_metadata m;\n",
+        "    const struct hdr_metadata_infoframe *inf = &m.hdmi_metadata_type1;\n",
+        "    (void)sizeof(m); (void)inf;\n",
+        "    return 0;\n",
+        "}\n",
+    );
+    if std::fs::write(&test_c, src).is_err() {
+        return false;
+    }
+    let mut cmd = build.get_compiler().to_command();
+    cmd.arg("-fsyntax-only");
+    for inc in drm_includes {
+        cmd.arg("-I").arg(inc);
+    }
+    cmd.arg(&test_c);
+    matches!(cmd.status(), Ok(s) if s.success())
 }

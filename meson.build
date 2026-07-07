@@ -43,6 +43,15 @@ assert(_hdr_version == meson.project_version(),
 # ============================================================================
 
 libdrm_dep = dependency('libdrm', version: '>= 2.4.113')
+# HDR metadata (struct hdr_output_metadata) came in a newer libdrm than some
+# bases ship; drm_grab.c / helper guard it behind HAVE_HDR_METADATA.
+cc = meson.get_compiler('c')
+have_hdr_metadata = cc.has_type('struct hdr_output_metadata',
+    prefix: '#include <xf86drmMode.h>\n#include <drm_mode.h>',
+    dependencies: libdrm_dep)
+if have_hdr_metadata
+    add_project_arguments('-DHAVE_HDR_METADATA=1', language: 'c')
+endif
 threads_dep = dependency('threads')
 
 # Optional: libva for GPU-accelerated backends
@@ -155,6 +164,10 @@ endif
 if libcap_dep.found()
     helper_deps += libcap_dep
     helper_c_args += '-DHAVE_LIBCAP=1'
+endif
+
+if have_hdr_metadata
+    helper_c_args += '-DHAVE_HDR_METADATA=1'
 endif
 
 # Exploit-mitigation hardening for the privileged (CAP_SYS_ADMIN) helper.
