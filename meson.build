@@ -42,9 +42,12 @@ assert(_hdr_version == meson.project_version(),
 # Dependencies
 # ============================================================================
 
-libdrm_dep = dependency('libdrm', version: '>= 2.4.113')
-# HDR metadata (struct hdr_output_metadata) came in a newer libdrm than some
-# bases ship; drm_grab.c / helper guard it behind HAVE_HDR_METADATA.
+# The real floor is the FB2 GEM API (drmModeGetFB2), which landed in libdrm
+# 2.4.95. HDR metadata (struct hdr_output_metadata) came in a newer libdrm than
+# some bases ship, but it is optional and guarded behind HAVE_HDR_METADATA (the
+# has_type probe below), so it must not raise the hard floor. Requiring 2.4.113
+# needlessly broke builds on common LTS bases (e.g. ubuntu 18.04 ships 2.4.101).
+libdrm_dep = dependency('libdrm', version: '>= 2.4.95')
 cc = meson.get_compiler('c')
 have_hdr_metadata = cc.has_type('struct hdr_output_metadata',
     prefix: '#include <xf86drmMode.h>\n#include <drm_mode.h>',
