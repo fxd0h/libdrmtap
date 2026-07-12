@@ -46,6 +46,7 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/un.h>
+#include "../src/wire.h"
 #include <sys/prctl.h>
 #include <limits.h>
 
@@ -146,46 +147,9 @@ struct grab_metadata {
     uint32_t hdr_max_nits;  /* mastering/content peak luminance (cd/m2), 0=unknown */
 };
 
-static int send_all(int sock, const void *buf, size_t len);
-
-/* Send a file descriptor via SCM_RIGHTS */
+/* Send a file descriptor via SCM_RIGHTS (shared framing; see src/wire.h). */
 static int send_fd(int sock, int fd, const void *meta, size_t meta_len) {
-    struct msghdr msg = {0};
-    struct iovec iov;
-    union {
-        struct cmsghdr align;
-        char buf[CMSG_SPACE(sizeof(int))];
-    } cmsg_buf;
-
-    iov.iov_base = (void *)meta;
-    iov.iov_len = meta_len;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    msg.msg_control = cmsg_buf.buf;
-    msg.msg_controllen = sizeof(cmsg_buf.buf);
-
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
-
-    ssize_t n;
-    do {
-        n = sendmsg(sock, &msg, MSG_NOSIGNAL);
-    } while (n < 0 && errno == EINTR);
-    if (n < 0) {
-        perror("sendmsg SCM_RIGHTS");
-        return -1;
-    }
-    /* sendmsg attaches the fd once (to the first byte) but may write fewer than
-     * meta_len metadata bytes. Send any remainder so the receiver does not wait
-     * forever on a partial frame while we return success. */
-    if ((size_t)n < meta_len) {
-        return send_all(sock, (const uint8_t *)meta + (size_t)n, meta_len - (size_t)n);
-    }
-    return 0;
+    return wire_send_fd(sock, fd, meta, meta_len);
 }
 
 /* ========================================================================= */
@@ -282,42 +246,14 @@ static int install_seccomp(void) {
 /* Socket helpers                                                            */
 /* ========================================================================= */
 
-// Send all bytes, handling partial writes and EINTR.
+// Exact-length framing lives in src/wire.h so the helper, the library client,
+// and the wire-protocol tests share one implementation. These thin wrappers keep
+// the existing call sites unchanged.
 static int send_all(int sock, const void *buf, size_t len) {
-    const uint8_t *p = (const uint8_t *)buf;
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n = send(sock, p + sent, len - sent, MSG_NOSIGNAL);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            perror("drmtap-helper: send failed"); return -1;
-        }
-        if (n == 0) {
-            return -1;  /* peer gone */
-        }
-        sent += (size_t)n;
-    }
-    return 0;
+    return wire_send_all(sock, buf, len);
 }
-
-// Receive exactly len bytes, handling partial reads and EINTR. Returns 0 on a
-// complete read, -1 on EOF/error/partial — so a truncated command frame is
-// rejected rather than acted on with uninitialized fields.
 static int recv_all(int sock, void *buf, size_t len) {
-    uint8_t *p = (uint8_t *)buf;
-    size_t got = 0;
-    while (got < len) {
-        ssize_t n = recv(sock, p + got, len - got, 0);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (n == 0) {
-            return -1;  /* peer closed (clean at a boundary, or mid-frame) */
-        }
-        got += (size_t)n;
-    }
-    return 0;
+    return wire_recv_all(sock, buf, len);
 }
 
 // Send error: metadata with data_size=0. For logical/validation failures where

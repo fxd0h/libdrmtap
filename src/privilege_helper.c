@@ -36,6 +36,7 @@
 #include <sys/wait.h>
 
 #include "drmtap_internal.h"
+#include "wire.h"
 
 /* Must match values in drmtap-helper.c */
 #define HELPER_SOCKET_FD 3
@@ -194,75 +195,19 @@ void drmtap_helper_stop(drmtap_ctx *ctx) {
 /* SCM_RIGHTS fd receiving                                                   */
 /* ========================================================================= */
 
-// Receive exactly len bytes from socket, handling partial reads and EINTR.
+// Exact-length framing + SCM_RIGHTS handling live in wire.h so the helper, this
+// client, and the wire-protocol tests share one implementation. Thin wrappers
+// keep the existing call sites unchanged.
 static int recv_all(int sock, void *buf, size_t len) {
-    uint8_t *p = (uint8_t *)buf;
-    size_t received = 0;
-    while (received < len) {
-        ssize_t n = recv(sock, p + received, len - received, 0);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (n == 0) {
-            return -1;  /* peer closed mid-frame */
-        }
-        received += (size_t)n;
-    }
-    return 0;
+    return wire_recv_all(sock, buf, len);
 }
 
 /* Receive metadata + optional DMA-BUF fd via SCM_RIGHTS (V3 protocol).
  * When helper sends FLAG_HAS_DMABUF, the metadata arrives via sendmsg
  * with the DMA-BUF fd attached as ancillary data. */
 static int recv_fd_and_meta(int sock, void *meta_buf, size_t meta_len, int *out_fd) {
-    struct msghdr msg = {0};
-    struct iovec iov;
-    union {
-        struct cmsghdr align;
-        char buf[CMSG_SPACE(sizeof(int))];
-    } cmsg_buf;
-
-    *out_fd = -1;
-
-    iov.iov_base = meta_buf;
-    iov.iov_len = meta_len;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.buf;
-    msg.msg_controllen = sizeof(cmsg_buf.buf);
-
-    /* MSG_CMSG_CLOEXEC sets FD_CLOEXEC on any received descriptor ATOMICALLY, so
-     * it cannot be leaked to an unrelated program the application later execs (a
-     * plain recvmsg + fcntl(F_SETFD) would race in a multithreaded process). */
-    ssize_t n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
-    if (n <= 0) {
+    if (wire_recv_fd(sock, meta_buf, meta_len, out_fd) < 0) {
         return -1;
-    }
-    /* Reject a truncated control message: MSG_CTRUNC means the ancillary buffer
-     * was too small and descriptors may have been silently dropped by the kernel
-     * (or an unexpected extra descriptor was sent). Do not proceed with a
-     * possibly-mismatched fd/metadata pair. */
-    if (msg.msg_flags & MSG_CTRUNC) {
-        return -1;
-    }
-
-    /* Extract the single expected fd from ancillary data if present. */
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
-        cmsg->cmsg_type == SCM_RIGHTS &&
-        cmsg->cmsg_len == CMSG_LEN(sizeof(int))) {
-        memcpy(out_fd, CMSG_DATA(cmsg), sizeof(int));
-    }
-
-    /* We may have received less than meta_len in the first recvmsg.
-     * Read the rest with plain recv. */
-    if ((size_t)n < meta_len) {
-        if (recv_all(sock, (uint8_t *)meta_buf + n, meta_len - n) < 0) {
-            if (*out_fd >= 0) close(*out_fd);
-            *out_fd = -1;
-            return -1;
-        }
     }
 
     return 0;
