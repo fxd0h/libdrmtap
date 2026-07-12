@@ -1,0 +1,10 @@
+# The privileged drmtap-helper is opt-out: it is built by default, but ONLY with
+# its confinement in place. Its two confinement dependencies (libseccomp for the
+# seccomp allowlist, libcap for dropping all caps but CAP_SYS_ADMIN) are therefore
+# mandatory whenever the helper is built — an unconfined helper is never produced.
+#   'enabled' : build the helper; hard-fail if libseccomp/libcap are missing.
+#   'auto'    : build the helper if libseccomp/libcap are present; otherwise skip
+#               it (build the library only) rather than ship it unconfined.
+#   'disabled': do not build the helper at all.
+option('helper', type: 'feature', value: 'auto',
+    description: 'Build the privileged drmtap-helper (requires libseccomp + libcap)')

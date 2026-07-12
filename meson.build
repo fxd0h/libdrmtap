@@ -65,11 +65,10 @@ libva_drm_dep = dependency('libva-drm', required: false)
 egl_dep = dependency('egl', required: false)
 glesv2_dep = dependency('glesv2', required: false)
 
-# Optional: libseccomp for the helper binary
-seccomp_dep = dependency('libseccomp', required: false)
-
-# Optional: libcap for capability management
-libcap_dep = dependency('libcap', required: false)
+# libseccomp (seccomp allowlist) and libcap (capability drop) confine the
+# privileged helper. They are NOT optional when the helper is built — they are
+# resolved as mandatory in the helper section below so an unconfined helper is
+# never produced. Building the library alone does not need them.
 
 # libm: HDR tone-mapping in pixel_convert.c uses pow() (PQ EOTF / sRGB OETF).
 m_dep = meson.get_compiler('c').find_library('m', required: false)
@@ -156,18 +155,31 @@ libdrmtap_dep = declare_dependency(
 # Helper binary (privileged)
 # ============================================================================
 
-helper_deps = [libdrm_dep]
-helper_c_args = []
-
-if seccomp_dep.found()
-    helper_deps += seccomp_dep
-    helper_c_args += '-DHAVE_SECCOMP=1'
+# Fail closed: the helper is confined by seccomp + a capability drop, so both
+# libseccomp and libcap are MANDATORY whenever it is built. With the feature
+# 'enabled' a missing dependency hard-errors; with 'auto' it degrades to
+# library-only (helper skipped) rather than shipping an unconfined helper; with
+# 'disabled' the helper is not built at all.
+helper_feature = get_option('helper')
+build_helper = false
+if not helper_feature.disabled()
+    # 'enabled' -> hard require (error if missing); 'auto' -> allow graceful skip.
+    confine_required = helper_feature.enabled()
+    seccomp_dep = dependency('libseccomp', required: confine_required)
+    libcap_dep = dependency('libcap', required: confine_required)
+    if seccomp_dep.found() and libcap_dep.found()
+        build_helper = true
+    elif helper_feature.enabled()
+        # Unreachable (required:true already errored), kept as a defensive guard.
+        error('drmtap-helper requires libseccomp and libcap for confinement')
+    else
+        message('drmtap-helper: libseccomp/libcap not found; building library only')
+    endif
 endif
 
-if libcap_dep.found()
-    helper_deps += libcap_dep
-    helper_c_args += '-DHAVE_LIBCAP=1'
-endif
+if build_helper
+helper_deps = [libdrm_dep, seccomp_dep, libcap_dep]
+helper_c_args = ['-DHAVE_SECCOMP=1', '-DHAVE_LIBCAP=1']
 
 if have_hdr_metadata
     helper_c_args += '-DHAVE_HDR_METADATA=1'
@@ -192,6 +204,7 @@ executable('drmtap-helper',
     install: true,
     install_dir: get_option('libexecdir'),
 )
+endif # build_helper
 
 # ============================================================================
 # Tests
@@ -229,12 +242,19 @@ test_hdr = executable('test_hdr',
     dependencies: [libdrmtap_dep, m_dep],
     include_directories: lib_include,
 )
+# Wire-protocol tests are self-contained (socketpair + fake peer, no DRM, no
+# libdrmtap link): they guard the helper IPC's fd-access-mode / CLOEXEC /
+# ancillary-truncation / fixed-frame-reassembly invariants.
+test_wire = executable('test_wire',
+    'tests/test_wire.c',
+)
 
 # Unit tests (no hardware needed)
 test('formats', test_formats, suite: 'unit')
 test('deswizzle', test_deswizzle, suite: 'unit')
 test('helper', test_helper, suite: 'unit')
 test('hdr', test_hdr, suite: 'unit')
+test('wire', test_wire, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
 # LSan: suppress the deliberate process-lifetime EGL/Mesa display allocation

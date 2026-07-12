@@ -131,6 +131,22 @@ int drmtap_helper_spawn(drmtap_ctx *ctx) {
         /* Clear CLOEXEC on the helper socket so it survives exec */
         fcntl(HELPER_SOCKET_FD, F_SETFD, 0);
 
+        /* Close every other inherited descriptor before the exec. After exec the
+         * helper holds CAP_SYS_ADMIN and its seccomp policy permits read/write/
+         * sendmsg/ioctl without pinning them to expected fds, so any leaked
+         * socket/file/device fd would needlessly widen a helper compromise. Keep
+         * only std{in,out,err} and the helper socket. (A bounded close loop is
+         * used rather than close_range() so the oldest supported bases build.) */
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0 || maxfd > 65536) {
+            maxfd = 65536;
+        }
+        for (int fd = 3; fd < (int)maxfd; fd++) {
+            if (fd != HELPER_SOCKET_FD) {
+                close(fd);
+            }
+        }
+
         /* Pass device path as argv[1] */
         execl(helper_path, "drmtap-helper", ctx->device_path, NULL);
 
@@ -151,9 +167,11 @@ int drmtap_helper_spawn(drmtap_ctx *ctx) {
 // Kill the helper process
 void drmtap_helper_stop(drmtap_ctx *ctx) {
     if (ctx->helper_fd >= 0) {
-        /* Send quit command (best effort) */
-        uint8_t cmd = CMD_QUIT;
-        ssize_t n = send(ctx->helper_fd, &cmd, 1, MSG_NOSIGNAL);
+        /* Send a full-size quit command (best effort). The helper reads one whole
+         * fixed-size command frame per iteration, so a 1-byte quit would be a
+         * short read that the helper now rejects; send the complete struct. */
+        helper_cmd_grab_t hcmd = { .cmd = CMD_QUIT, .crtc_id = 0 };
+        ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
         (void)n;
 
         close(ctx->helper_fd);
@@ -176,14 +194,18 @@ void drmtap_helper_stop(drmtap_ctx *ctx) {
 /* SCM_RIGHTS fd receiving                                                   */
 /* ========================================================================= */
 
-// Receive exactly len bytes from socket, handling partial reads
+// Receive exactly len bytes from socket, handling partial reads and EINTR.
 static int recv_all(int sock, void *buf, size_t len) {
     uint8_t *p = (uint8_t *)buf;
     size_t received = 0;
     while (received < len) {
         ssize_t n = recv(sock, p + received, len - received, 0);
-        if (n <= 0) {
+        if (n < 0) {
+            if (errno == EINTR) continue;
             return -1;
+        }
+        if (n == 0) {
+            return -1;  /* peer closed mid-frame */
         }
         received += (size_t)n;
     }
@@ -210,12 +232,22 @@ static int recv_fd_and_meta(int sock, void *meta_buf, size_t meta_len, int *out_
     msg.msg_control = cmsg_buf.buf;
     msg.msg_controllen = sizeof(cmsg_buf.buf);
 
-    ssize_t n = recvmsg(sock, &msg, 0);
+    /* MSG_CMSG_CLOEXEC sets FD_CLOEXEC on any received descriptor ATOMICALLY, so
+     * it cannot be leaked to an unrelated program the application later execs (a
+     * plain recvmsg + fcntl(F_SETFD) would race in a multithreaded process). */
+    ssize_t n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
     if (n <= 0) {
         return -1;
     }
+    /* Reject a truncated control message: MSG_CTRUNC means the ancillary buffer
+     * was too small and descriptors may have been silently dropped by the kernel
+     * (or an unexpected extra descriptor was sent). Do not proceed with a
+     * possibly-mismatched fd/metadata pair. */
+    if (msg.msg_flags & MSG_CTRUNC) {
+        return -1;
+    }
 
-    /* Extract fd from ancillary data if present */
+    /* Extract the single expected fd from ancillary data if present. */
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
     if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
         cmsg->cmsg_type == SCM_RIGHTS &&

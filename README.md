@@ -145,9 +145,23 @@ sudo meson install -C build
 
 ### Set up privileged helper (for capture without root)
 
+A Meson install leaves the helper world-executable. Do **not** apply the
+capability to it in that state: a file capability applies to every user who can
+`exec` the binary, so `cap_sys_admin+ep` on a `0755` helper lets any local user
+read the DRM scanout (login screen, lock screen, other users' sessions). Restrict
+who can run it FIRST — `root:<capture-group>`, mode `0750` — then apply the
+capability. The `SO_PEERCRED` check inside the helper is defense-in-depth, not an
+access-control boundary; the file mode is. This mirrors the procedure in
+[`SECURITY.md`](SECURITY.md).
+
 ```bash
-# Install the helper with CAP_SYS_ADMIN
-sudo setcap cap_sys_admin+ep /usr/local/libexec/drmtap-helper
+# Restrict execution to a trusted group, THEN grant the capability.
+sudo groupadd -f drmtap-capture
+sudo chown root:drmtap-capture /usr/local/libexec/drmtap-helper
+sudo chmod 0750               /usr/local/libexec/drmtap-helper
+sudo setcap cap_sys_admin+ep  /usr/local/libexec/drmtap-helper
+# Add each user who is allowed to capture to the group:
+sudo usermod -aG drmtap-capture "$USER"
 ```
 
 ### Take a screenshot

@@ -146,6 +146,8 @@ struct grab_metadata {
     uint32_t hdr_max_nits;  /* mastering/content peak luminance (cd/m2), 0=unknown */
 };
 
+static int send_all(int sock, const void *buf, size_t len);
+
 /* Send a file descriptor via SCM_RIGHTS */
 static int send_fd(int sock, int fd, const void *meta, size_t meta_len) {
     struct msghdr msg = {0};
@@ -169,10 +171,19 @@ static int send_fd(int sock, int fd, const void *meta, size_t meta_len) {
     cmsg->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
 
-    ssize_t n = sendmsg(sock, &msg, MSG_NOSIGNAL);
+    ssize_t n;
+    do {
+        n = sendmsg(sock, &msg, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
     if (n < 0) {
         perror("sendmsg SCM_RIGHTS");
         return -1;
+    }
+    /* sendmsg attaches the fd once (to the first byte) but may write fewer than
+     * meta_len metadata bytes. Send any remainder so the receiver does not wait
+     * forever on a partial frame while we return success. */
+    if ((size_t)n < meta_len) {
+        return send_all(sock, (const uint8_t *)meta + (size_t)n, meta_len - (size_t)n);
     }
     return 0;
 }
@@ -271,16 +282,40 @@ static int install_seccomp(void) {
 /* Socket helpers                                                            */
 /* ========================================================================= */
 
-// Send all bytes, handling partial writes
+// Send all bytes, handling partial writes and EINTR.
 static int send_all(int sock, const void *buf, size_t len) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t sent = 0;
     while (sent < len) {
         ssize_t n = send(sock, p + sent, len - sent, MSG_NOSIGNAL);
-        if (n <= 0) {
+        if (n < 0) {
+            if (errno == EINTR) continue;
             perror("drmtap-helper: send failed"); return -1;
         }
+        if (n == 0) {
+            return -1;  /* peer gone */
+        }
         sent += (size_t)n;
+    }
+    return 0;
+}
+
+// Receive exactly len bytes, handling partial reads and EINTR. Returns 0 on a
+// complete read, -1 on EOF/error/partial — so a truncated command frame is
+// rejected rather than acted on with uninitialized fields.
+static int recv_all(int sock, void *buf, size_t len) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = recv(sock, p + got, len - got, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) {
+            return -1;  /* peer closed (clean at a boundary, or mid-frame) */
+        }
+        got += (size_t)n;
     }
     return 0;
 }
@@ -678,8 +713,15 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
      * Either way, if the export fails we fall through to the dumb-map pixel path. */
     if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ || is_virtio) {
         int prime_fd = -1;
+        /* Export the scanout DMA-BUF READ-ONLY. Capture only ever reads the
+         * framebuffer, and the fd is passed to an unprivileged process over
+         * SCM_RIGHTS; DRM_RDWR (== O_RDWR) would let that process create a
+         * writable mapping of the active scanout on drivers that honor it,
+         * turning a read-only capture into scanout tampering. Dropping DRM_RDWR
+         * yields an O_RDONLY descriptor (matches the in-library direct path in
+         * drm_grab.c). */
         int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
-                                            DRM_CLOEXEC | DRM_RDWR, &prime_fd);
+                                            DRM_CLOEXEC, &prime_fd);
         if (prime_ret == 0 && prime_fd >= 0) {
             meta.flags = FLAG_HAS_DMABUF;
             if (virtio_virgl) {
@@ -886,19 +928,14 @@ int main(int argc, char *argv[]) {
     /* Event loop: receive commands, process with persistent fd */
     while (1) {
         struct helper_cmd_grab hcmd;
-        ssize_t n = recv(sock, &hcmd, sizeof(hcmd), 0);
-
-        if (n <= 0) {
+        /* Read the whole fixed-size command frame. A clean disconnect (EOF at a
+         * boundary) or a truncated/partial frame both end the loop; we never act
+         * on a short read with an uninitialized crtc_id. */
+        if (recv_all(sock, &hcmd, sizeof(hcmd)) != 0) {
             break;
         }
 
-        uint8_t cmd = hcmd.cmd;
-        if (n < (ssize_t)sizeof(hcmd)) {
-            /* Fallback or partial read — can happen if client still uses old 1-byte protocol
-             * but for now we expect the full struct. */
-        }
-
-        switch (cmd) {
+        switch (hcmd.cmd) {
             case CMD_GRAB:
                 grab_and_send(sock, drm_fd, hcmd.crtc_id, is_virtio);
                 break;
