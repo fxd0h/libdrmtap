@@ -203,6 +203,12 @@ executable('drmtap-helper',
     pie: true,
     install: true,
     install_dir: get_option('libexecdir'),
+    # Install NON-world-executable (0750, owner root). A file capability applies
+    # to everyone who can exec the binary, so a world-exec cap_sys_admin helper
+    # would let any local user read the DRM scanout. A bare `meson install` must
+    # therefore not leave it 0755; the packager/admin then chowns it to a trusted
+    # capture group and applies the capability (see README.md / SECURITY.md).
+    install_mode: ['rwxr-x---', 'root', 'root'],
 )
 endif # build_helper
 
