@@ -19,7 +19,7 @@
 **Language:** C11  
 **License:** MIT  
 **Tests:** unit (no hardware) + integration via VKMS (Virtual KMS) or a real GPU  
-**Version:** C library `0.4.4` · Rust crates `libdrmtap-sys 0.4.4` / `libdrmtap 0.3.3`  
+**Version:** C library `0.4.6` · Rust crates `libdrmtap-sys 0.4.6` / `libdrmtap 0.3.3`  
 
 ---
 
