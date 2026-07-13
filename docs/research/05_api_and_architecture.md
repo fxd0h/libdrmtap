@@ -546,25 +546,19 @@ Process B (NoMachine)  ──► drmModeGetFB2() ──┘
 
 ### Library-Level Thread Safety (Within One Process)
 
-The `drmtap_ctx` struct holds mutable internal state (cached plane IDs, error messages, DMA-BUF references). This state must be protected when shared between threads.
+The `drmtap_ctx` struct holds mutable internal state (cached plane IDs, error messages, reused scratch buffers, DMA-BUF references). This state is **not** internally synchronized.
 
-**Strategy**: `pthread_mutex_t` inside `drmtap_ctx`
+**Contract (as shipped)**: one `drmtap_ctx` per thread. A single context is single-threaded — do not call the capture APIs on the same `drmtap_ctx` from two threads at once; give each thread its own context (they are cheap), or serialize access with your own lock:
 
 ```c
-struct drmtap_ctx {
-    int drm_fd;
-    uint32_t plane_id;
-    char error_msg[256];
-    pthread_mutex_t lock;       // protects all mutable state
-    // ...
-};
+// Each capture thread owns its context:
+drmtap_ctx *ctx = drmtap_open(&cfg);   // per-thread
+// ... grab loop on this thread only ...
 
-int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame) {
-    pthread_mutex_lock(&ctx->lock);
-    // ... capture logic ...
-    pthread_mutex_unlock(&ctx->lock);
-    return ret;
-}
+// Or, to share ONE context, lock externally:
+pthread_mutex_lock(&my_lock);
+drmtap_grab_mapped(shared_ctx, &frame);
+pthread_mutex_unlock(&my_lock);
 ```
 
 **Usage patterns:**

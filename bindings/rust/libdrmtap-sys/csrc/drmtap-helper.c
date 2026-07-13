@@ -359,15 +359,27 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
     }
     meta.width = fb2->width;
     meta.height = fb2->height;
+    uint32_t cw = fb2->width, ch = fb2->height, cstride = fb2->pitches[0];
+    uint32_t chandle = fb2->handles[0];
+    drmModeFreeFB2(fb2);
+
+    /* A hardware cursor is tiny (<= 256x256 ARGB on Linux DRM). Cap the
+     * geometry so a bogus cursor fb can never make the CAP_SYS_ADMIN helper
+     * mmap/send an unbounded size, and honor the source stride (pitches[0]) so
+     * a padded cursor is not sent sheared. The width cap precedes width*4 so
+     * that product cannot overflow. */
+    if (!(cw <= 256 && ch <= 256 && cstride != 0 && cstride >= cw * 4)) {
+        send_all(sock, &meta, sizeof(meta));  /* visible=0 */
+        return 0;
+    }
 
     int prime_fd = -1;
     void *mapped = MAP_FAILED;
-    size_t size = (size_t)fb2->width * fb2->height * 4;
-    if (drmPrimeHandleToFD(drm_fd, fb2->handles[0], O_RDONLY | O_CLOEXEC,
+    size_t map_size = (size_t)cstride * ch;
+    if (drmPrimeHandleToFD(drm_fd, chandle, O_RDONLY | O_CLOEXEC,
                            &prime_fd) == 0 && prime_fd >= 0) {
-        mapped = mmap(NULL, size, PROT_READ, MAP_SHARED, prime_fd, 0);
+        mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, prime_fd, 0);
     }
-    drmModeFreeFB2(fb2);
 
     if (mapped == MAP_FAILED) {
         if (prime_fd >= 0) close(prime_fd);
@@ -375,12 +387,24 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
         return 0;
     }
 
-    meta.visible = 1;
-    meta.data_size = (uint32_t)size;
-    send_all(sock, &meta, sizeof(meta));
-    send_all(sock, mapped, size);
-    munmap(mapped, size);
+    /* Repack into tightly-packed width*4 rows (what the client expects) into a
+     * fixed preallocated buffer — the helper is single-threaded and keeping the
+     * privileged path malloc-free avoids both allocator syscalls under seccomp
+     * and heap churn. */
+    static uint8_t packed[256 * 256 * 4];
+    size_t tight = (size_t)cw * ch * 4;
+    for (uint32_t y = 0; y < ch; y++) {
+        memcpy(packed + (size_t)y * cw * 4,
+               (const uint8_t *)mapped + (size_t)y * cstride,
+               (size_t)cw * 4);
+    }
+    munmap(mapped, map_size);
     close(prime_fd);
+
+    meta.visible = 1;
+    meta.data_size = (uint32_t)tight;
+    send_all(sock, &meta, sizeof(meta));
+    send_all(sock, packed, tight);
     return 0;
 }
 

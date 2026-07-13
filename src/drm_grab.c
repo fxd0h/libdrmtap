@@ -495,6 +495,11 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         /* Allocate private state */
         priv = calloc(1, sizeof(frame_priv_t));
         if (!priv) {
+            /* The helper may already have handed us a DMA-BUF fd over
+             * SCM_RIGHTS; close it on every pre-adoption error return. */
+            if (hresult.dmabuf_fd >= 0) {
+                close(hresult.dmabuf_fd);
+            }
             drmModeFreeFB2(fb2);
             return -ENOMEM;
         }
@@ -525,6 +530,11 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         if (ret != 0) {
             drmtap_set_error(ctx, "helper sent invalid geometry %ux%u stride=%u",
                              frame->width, frame->height, frame->stride);
+            /* Release the SCM_RIGHTS fd the helper already sent before we
+             * reject its geometry, or it leaks toward RLIMIT_NOFILE. */
+            if (hresult.dmabuf_fd >= 0) {
+                close(hresult.dmabuf_fd);
+            }
             free(priv);
             drmModeFreeFB2(fb2);
             return ret;
@@ -595,6 +605,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
              * caller a black frame. Non-virgl frames keep the prior best-effort
              * behaviour (pret is ignored). */
             if (is_virgl && pret != 0) {
+                /* Release everything this frame acquired (the DMA-BUF fd, the
+                 * mmap and priv) — a failed grab is not released by the caller,
+                 * so returning here without cleanup would leak them each grab. */
+                drmtap_frame_release(ctx, frame);
                 return pret;
             }
             return 0;
@@ -933,7 +947,8 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                          driver, (unsigned long)modifier);
         int ret = drmtap_deswizzle(data, ctx->deswizzle_buf,
                                    frame->width, frame->height,
-                                   frame->stride, frame->stride, modifier);
+                                   frame->stride, frame->stride, modifier,
+                                   (size_t)frame->stride * frame->height);
         if (ret == -ENOTSUP) {
             /* CCS-compressed modifier — CPU deswizzle impossible.
              * This happens in helper mode where dma_buf_fd is unavailable
@@ -1012,8 +1027,6 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame) {
 }
 
 void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
-    (void)ctx;
-
     if (!frame) {
         return;
     }
@@ -1042,6 +1055,17 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             close(priv->helper_drm_fd);
         }
 
+        /* Close the GEM handle drmModeGetFB2 handed us on the direct path.
+         * Not closing it leaks a kernel GEM handle / BO reference on every
+         * grab (the handle is separate from the prime fd). The helper path
+         * leaves gem_handle == 0. Needs the ctx's DRM fd. */
+        if (priv->gem_handle != 0 && ctx) {
+            struct drm_gem_close gc;
+            memset(&gc, 0, sizeof(gc));
+            gc.handle = priv->gem_handle;
+            drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
+        }
+
         free(priv);
     }
 
@@ -1063,6 +1087,12 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx) {
         }
         if (ctx->fast_slots[i].prime_fd >= 0) {
             close(ctx->fast_slots[i].prime_fd);
+        }
+        if (ctx->fast_slots[i].gem_handle != 0) {
+            struct drm_gem_close gc;
+            memset(&gc, 0, sizeof(gc));
+            gc.handle = ctx->fast_slots[i].gem_handle;
+            drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
         }
         memset(&ctx->fast_slots[i], 0, sizeof(ctx->fast_slots[i]));
         ctx->fast_slots[i].prime_fd = -1;
@@ -1094,6 +1124,12 @@ static int find_or_alloc_slot(drmtap_ctx *ctx, uint32_t fb_id) {
     }
     if (ctx->fast_slots[0].prime_fd >= 0) {
         close(ctx->fast_slots[0].prime_fd);
+    }
+    if (ctx->fast_slots[0].gem_handle != 0) {
+        struct drm_gem_close gc;
+        memset(&gc, 0, sizeof(gc));
+        gc.handle = ctx->fast_slots[0].gem_handle;
+        drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
     }
     memset(&ctx->fast_slots[0], 0, sizeof(ctx->fast_slots[0]));
     ctx->fast_slots[0].prime_fd = -1;
@@ -1158,6 +1194,11 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 frame->modifier = ctx->fast_slots[i].modifier;
                 frame->fb_id = fb_id;
                 frame->_priv = NULL;
+                /* Deswizzle/format-convert like the acquire path does — the
+                 * cached mmap is the raw scanout, so a tiled buffer must be
+                 * detiled here too (no-op for a linear one). Without this the
+                 * unchanged-fb fast path returns raw tiled pixels. */
+                gpu_auto_process(ctx, frame->data, frame, 0);
                 return 0;   /* always return as new frame */
             }
         }

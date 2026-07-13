@@ -75,7 +75,7 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
         }
 
         int ret = drmtap_deswizzle(data, tmp, width, height,
-                                    stride, stride, modifier);
+                                    stride, stride, modifier, size);
         if (ret == 0) {
             memcpy(data, tmp, size);
         }

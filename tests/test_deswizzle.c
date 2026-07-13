@@ -45,7 +45,7 @@ static void test_deswizzle_linear(void) {
         src[i] = (uint8_t)(i & 0xFF);
     }
 
-    int ret = drmtap_deswizzle(src, dst, w, h, stride, stride, 0);
+    int ret = drmtap_deswizzle(src, dst, w, h, stride, stride, 0, (size_t)stride * h);
     TEST_ASSERT(ret == 0);
     TEST_ASSERT(memcmp(src, dst, stride * h) == 0);
 
@@ -55,7 +55,7 @@ static void test_deswizzle_linear(void) {
 }
 
 static void test_deswizzle_null_safety(void) {
-    int ret = drmtap_deswizzle(NULL, NULL, 64, 64, 256, 256, 0);
+    int ret = drmtap_deswizzle(NULL, NULL, 64, 64, 256, 256, 0, 0);
     TEST_ASSERT(ret == -22);  /* -EINVAL */
     printf("  PASS: deswizzle NULL safety\n");
 }
@@ -106,7 +106,7 @@ static void test_deswizzle_intel_x_tiled_roundtrip(void) {
 
     /* Deswizzle: I915_FORMAT_MOD_X_TILED = 0x0100000000000001 */
     uint64_t mod_x_tiled = 0x0100000000000001ULL;
-    int ret = drmtap_deswizzle(tiled, result, w, h, stride, stride, mod_x_tiled);
+    int ret = drmtap_deswizzle(tiled, result, w, h, stride, stride, mod_x_tiled, (size_t)stride * h);
     TEST_ASSERT(ret == 0);
 
     /* Verify result matches original linear */
@@ -175,7 +175,7 @@ static void test_deswizzle_nvidia_x_tiled_roundtrip(void) {
 
     /* Deswizzle: Nvidia vendor = 0x10 */
     uint64_t mod_nvidia = 0x1000000000000000ULL;
-    int ret = drmtap_deswizzle(tiled, result, w, h, stride, stride, mod_nvidia);
+    int ret = drmtap_deswizzle(tiled, result, w, h, stride, stride, mod_nvidia, (size_t)stride * h);
     TEST_ASSERT(ret == 0);
 
     /* Verify */

@@ -45,7 +45,8 @@
 
 static int deswizzle_intel_x_tiled(const void *src, void *dst,
                                    uint32_t width, uint32_t height,
-                                   uint32_t src_stride, uint32_t dst_stride) {
+                                   uint32_t src_stride, uint32_t dst_stride,
+                                   size_t src_size) {
     uint32_t bpp = 4;  /* bytes per pixel (XRGB8888) */
     uint32_t tile_w_bytes = INTEL_X_TILE_WIDTH;
     uint32_t tile_h = INTEL_X_TILE_HEIGHT;
@@ -69,9 +70,15 @@ static int deswizzle_intel_x_tiled(const void *src, void *dst,
             uint32_t src_off = tile_idx * tile_size +
                                tile_y * tile_w_bytes + tile_x_bytes;
 
-            /* Copy pixel */
-            memcpy(d + y * dst_stride + x * bpp,
-                   s + src_off, bpp);
+            /* The tiled footprint assumes ceil(height/tile_h) FULL tile rows,
+             * but the source is only src_size bytes (stride*height). Bound every
+             * read so a scanout whose height is not a tile multiple can never
+             * read past the source; zero-fill the unbacked bottom pixels. */
+            if ((size_t)src_off + bpp <= src_size) {
+                memcpy(d + y * dst_stride + x * bpp, s + src_off, bpp);
+            } else {
+                memset(d + y * dst_stride + x * bpp, 0, bpp);
+            }
         }
     }
 
@@ -90,7 +97,8 @@ static int deswizzle_intel_x_tiled(const void *src, void *dst,
 
 static int deswizzle_intel_y_tiled(const void *src, void *dst,
                                    uint32_t width, uint32_t height,
-                                   uint32_t src_stride, uint32_t dst_stride) {
+                                   uint32_t src_stride, uint32_t dst_stride,
+                                   size_t src_size) {
     uint32_t bpp = 4;
     uint32_t tile_w_bytes = INTEL_Y_TILE_WIDTH;
     uint32_t tile_h = INTEL_Y_TILE_HEIGHT;
@@ -121,8 +129,14 @@ static int deswizzle_intel_y_tiled(const void *src, void *dst,
                                tile_y * oword +
                                column_offset;
 
-            memcpy(d + y * dst_stride + x * bpp,
-                   s + src_off, bpp);
+            /* Bound the read: the tiled footprint rounds height up to tile_h,
+             * but the source is only src_size bytes. Zero-fill anything past it
+             * rather than reading out of bounds. */
+            if ((size_t)src_off + bpp <= src_size) {
+                memcpy(d + y * dst_stride + x * bpp, s + src_off, bpp);
+            } else {
+                memset(d + y * dst_stride + x * bpp, 0, bpp);
+            }
         }
     }
 
@@ -145,7 +159,8 @@ static int deswizzle_intel_y_tiled(const void *src, void *dst,
 
 static int deswizzle_nvidia_x_tiled(const void *src, void *dst,
                                     uint32_t width, uint32_t height,
-                                    uint32_t src_stride, uint32_t dst_stride) {
+                                    uint32_t src_stride, uint32_t dst_stride,
+                                    size_t src_size) {
     uint32_t bpp = 4;
     uint32_t tile_w = NV_TILE_WIDTH;
     uint32_t tile_h = NV_TILE_HEIGHT;
@@ -170,8 +185,22 @@ static int deswizzle_nvidia_x_tiled(const void *src, void *dst,
             uint32_t copy_w = (dst_x + tile_w > width)
                               ? width - dst_x : tile_w;
 
-            memcpy(d + y * dst_stride + dst_x * bpp,
-                   s + src_off, copy_w * bpp);
+            /* Bound the row copy by the real source size (the block-linear
+             * footprint rounds height up to tile_h): copy only what is backed,
+             * zero-fill the rest, never read past src_size. */
+            uint8_t *drow = d + y * dst_stride + dst_x * bpp;
+            size_t want = (size_t)copy_w * bpp;
+            if ((size_t)src_off >= src_size) {
+                memset(drow, 0, want);
+            } else {
+                size_t avail = src_size - (size_t)src_off;
+                if (avail >= want) {
+                    memcpy(drow, s + src_off, want);
+                } else {
+                    memcpy(drow, s + src_off, avail);
+                    memset(drow + avail, 0, want - avail);
+                }
+            }
         }
     }
 
@@ -246,7 +275,7 @@ static void convert_abgr_to_argb(const void *src, void *dst,
 int drmtap_deswizzle(const void *src, void *dst,
                      uint32_t width, uint32_t height,
                      uint32_t src_stride, uint32_t dst_stride,
-                     uint64_t modifier) {
+                     uint64_t modifier, size_t src_size) {
     if (!src || !dst || width == 0 || height == 0) {
         return -EINVAL;
     }
@@ -261,11 +290,16 @@ int drmtap_deswizzle(const void *src, void *dst,
      * We detect the vendor from the modifier's vendor bits.
      */
 
-    /* Linear — just memcpy row by row */
+    /* Linear — just memcpy row by row (bounded by src_size; a full row always
+     * fits since width*4 <= src_stride, but guard the last rows defensively). */
     if (modifier == 0 /* DRM_FORMAT_MOD_LINEAR */) {
         for (uint32_t y = 0; y < height; y++) {
+            size_t row_off = (size_t)y * src_stride;
+            if (row_off + (size_t)width * 4 > src_size) {
+                break;
+            }
             memcpy((uint8_t *)dst + y * dst_stride,
-                   (const uint8_t *)src + y * src_stride,
+                   (const uint8_t *)src + row_off,
                    width * 4);
         }
         return 0;
@@ -279,14 +313,14 @@ int drmtap_deswizzle(const void *src, void *dst,
         if (mod_type == 0x01) {
             /* I915_FORMAT_MOD_X_TILED */
             return deswizzle_intel_x_tiled(src, dst, width, height,
-                                           src_stride, dst_stride);
+                                           src_stride, dst_stride, src_size);
         } else if (mod_type == 0x02 || mod_type == 0x03) {
             /* I915_FORMAT_MOD_Y_TILED (0x02)
              * I915_FORMAT_MOD_Yf_TILED (0x03)
              *
              * Pure Y-tiled without compression — CPU deswizzle works. */
             return deswizzle_intel_y_tiled(src, dst, width, height,
-                                           src_stride, dst_stride);
+                                           src_stride, dst_stride, src_size);
         } else if (mod_type == 0x05 || mod_type == 0x06 ||
                    mod_type == 0x07 || mod_type == 0x08) {
             /* I915_FORMAT_MOD_Y_TILED_CCS (0x05)
@@ -310,13 +344,17 @@ int drmtap_deswizzle(const void *src, void *dst,
     /* Nvidia modifier: vendor = 0x10 (NVIDIA) */
     if (vendor == 0x10) {
         return deswizzle_nvidia_x_tiled(src, dst, width, height,
-                                         src_stride, dst_stride);
+                                         src_stride, dst_stride, src_size);
     }
 
-    /* Unknown modifier — try linear copy as fallback */
+    /* Unknown modifier — try linear copy as fallback (bounded by src_size). */
     for (uint32_t y = 0; y < height; y++) {
+        size_t row_off = (size_t)y * src_stride;
+        if (row_off + (size_t)width * 4 > src_size) {
+            break;
+        }
         memcpy((uint8_t *)dst + y * dst_stride,
-               (const uint8_t *)src + y * src_stride,
+               (const uint8_t *)src + row_off,
                width * 4);
     }
     return 0;

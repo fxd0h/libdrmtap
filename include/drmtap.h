@@ -287,12 +287,15 @@ int drmtap_drm_fd(drmtap_ctx *ctx);
  * @param src_stride Source stride (bytes per row in tiled data)
  * @param dst_stride Destination stride (bytes per row)
  * @param modifier   DRM format modifier (e.g., I915_FORMAT_MOD_X_TILED)
+ * @param src_size   Size of the source buffer in bytes; reads are bounded by it
+ *                   (a scanout whose height is not a tile multiple would
+ *                   otherwise index past stride*height)
  * @return 0 on success, negative errno on error
  */
 int drmtap_deswizzle(const void *src, void *dst,
                      uint32_t width, uint32_t height,
                      uint32_t src_stride, uint32_t dst_stride,
-                     uint64_t modifier);
+                     uint64_t modifier, size_t src_size);
 
 /**
  * @brief Convert between pixel formats.

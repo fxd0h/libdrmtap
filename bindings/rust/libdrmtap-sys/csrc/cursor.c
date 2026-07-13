@@ -80,27 +80,21 @@ static uint32_t find_cursor_plane(drmtap_ctx *ctx) {
     uint32_t target_crtc = ctx->crtc_id;
     uint32_t result = 0;
 
-    /* Get CRTC index */
-    uint32_t crtc_index = 0;
-    drmModeRes *res = drmModeGetResources(ctx->drm_fd);
-    if (res) {
-        for (int i = 0; i < res->count_crtcs; i++) {
-            if (res->crtcs[i] == target_crtc) {
-                crtc_index = (uint32_t)i;
-                break;
-            }
-        }
-        drmModeFreeResources(res);
-    }
-
     for (uint32_t i = 0; i < planes->count_planes; i++) {
         drmModePlane *plane = drmModeGetPlane(ctx->drm_fd, planes->planes[i]);
         if (!plane) {
             continue;
         }
 
-        /* Check if plane can drive our CRTC */
-        if (!(plane->possible_crtcs & (1u << crtc_index))) {
+        /* Select the cursor plane by its CURRENT binding, not merely by the
+         * possible_crtcs capability: on multi-monitor several cursor planes can
+         * drive the same CRTC index, but only one is actually bound to our
+         * target CRTC. Match plane->crtc_id == target_crtc (target_crtc == 0
+         * means "the first currently-bound cursor plane"). This mirrors the
+         * helper and avoids returning another monitor's cursor. */
+        int crtc_ok = (target_crtc != 0) ? (plane->crtc_id == target_crtc)
+                                         : (plane->crtc_id != 0);
+        if (!crtc_ok) {
             drmModeFreePlane(plane);
             continue;
         }
@@ -199,16 +193,32 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
         int ret = drmPrimeHandleToFD(ctx->drm_fd, fb2->handles[0],
                                      O_RDONLY | O_CLOEXEC, &prime_fd);
         if (ret == 0 && prime_fd >= 0) {
-            size_t size = (size_t)fb2->width * fb2->height * 4;
-            void *mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
-                                prime_fd, 0);
-            if (mapped != MAP_FAILED) {
-                /* Copy cursor pixels (cursor is small, ~64×64) */
-                cursor->pixels = malloc(size);
-                if (cursor->pixels) {
-                    memcpy(cursor->pixels, mapped, size);
+            uint32_t stride = fb2->pitches[0];
+            /* A hardware cursor is tiny (e.g. 64x64 or 256x256 ARGB). Cap the
+             * geometry so we never mmap/alloc an absurd size, and honor the
+             * source stride (pitches[0]) instead of assuming stride == width*4
+             * — a padded cursor fb would otherwise come out sheared. The width
+             * cap is checked before width*4 so that product cannot overflow. */
+            if (fb2->width <= 256 && fb2->height <= 256 &&
+                stride != 0 && stride >= fb2->width * 4) {
+                size_t map_size = (size_t)stride * fb2->height;
+                void *mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED,
+                                    prime_fd, 0);
+                if (mapped != MAP_FAILED) {
+                    size_t tight = (size_t)fb2->width * fb2->height * 4;
+                    cursor->pixels = malloc(tight);
+                    if (cursor->pixels) {
+                        /* Repack into tightly-packed width*4 rows (the API
+                         * contract) honoring the source stride. */
+                        for (uint32_t y = 0; y < fb2->height; y++) {
+                            memcpy((uint8_t *)cursor->pixels +
+                                       (size_t)y * fb2->width * 4,
+                                   (const uint8_t *)mapped + (size_t)y * stride,
+                                   (size_t)fb2->width * 4);
+                        }
+                    }
+                    munmap(mapped, map_size);
                 }
-                munmap(mapped, size);
             }
             close(prime_fd);
         }

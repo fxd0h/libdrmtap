@@ -54,9 +54,6 @@ struct drmtap_ctx {
     /* Error handling */
     char error_msg[512];
 
-    /* Thread safety */
-    pthread_mutex_t lock;
-
     /* Debug */
     int debug;
 

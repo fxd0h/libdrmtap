@@ -84,7 +84,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU fallback |
 | HDR10 → SDR tone-map (AR30/XR30, XR48/AR48/XB48/AB48) | ✅ Implemented (P010 not yet) |
 | Frame differencing (dirty rects) | ✅ Implemented |
-| Thread-safe (`pthread_mutex`) | ✅ Implemented |
+| Thread-safe (one `drmtap_ctx` per thread) | ✅ By design |
 | Coexists with NoMachine/Sunshine | ✅ By design |
 | Rust bindings ([crates.io](https://crates.io/crates/libdrmtap)) | ✅ Published |
 | MIT License | ✅ |

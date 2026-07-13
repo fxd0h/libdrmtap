@@ -29,8 +29,9 @@
 
 #include "drmtap_internal.h"
 
-/* Static error for when ctx is NULL (from failed drmtap_open) */
-static char g_static_error[512] = "";
+/* Error string for when ctx is NULL (from failed drmtap_open). Thread-local so
+ * concurrent NULL-ctx failures on different threads don't race on one buffer. */
+static _Thread_local char g_static_error[512] = "";
 
 /* ========================================================================= */
 /* Internal helpers (exported via drmtap_internal.h)                         */
@@ -186,12 +187,6 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
         ctx->fast_slots[i].prime_fd = -1;
     }
 
-    if (pthread_mutex_init(&ctx->lock, NULL) != 0) {
-        drmtap_set_error(NULL, "Failed to init mutex: %s", strerror(errno));
-        free(ctx);
-        return NULL;
-    }
-
     /* Parse config */
     if (config) {
         ctx->debug = config->debug;
@@ -269,7 +264,6 @@ fail:
     if (ctx->drm_fd >= 0) {
         close(ctx->drm_fd);
     }
-    pthread_mutex_destroy(&ctx->lock);
     free(ctx);
     return NULL;
 }
@@ -302,7 +296,6 @@ void drmtap_close(drmtap_ctx *ctx) {
     ctx->pixel_buf = NULL;
     ctx->pixel_buf_size = 0;
 
-    pthread_mutex_destroy(&ctx->lock);
     free(ctx);
 }
 
