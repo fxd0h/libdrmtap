@@ -25,3 +25,6 @@ Thumbs.db
 
 # AI agent orchestration tooling config (local, not part of the project)
 .antigravity/
+
+# Rust build artifacts
+bindings/rust/target/
