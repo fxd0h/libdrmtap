@@ -117,7 +117,11 @@ pub struct DrmTap {
     ctx: *mut ffi::drmtap_ctx,
 }
 
-// SAFETY: The C library uses pthread_mutex for thread safety
+// SAFETY: `DrmTap` owns its `drmtap_ctx` exclusively and the context has no
+// thread affinity, so moving ownership to another thread is sound. It is
+// deliberately NOT `Sync`: the context is not internally synchronized, so it
+// must not be shared across threads (use one `DrmTap` per thread, or guard a
+// shared one with your own lock).
 unsafe impl Send for DrmTap {}
 
 impl DrmTap {

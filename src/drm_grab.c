@@ -1199,8 +1199,12 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 /* Deswizzle/format-convert like the acquire path does — the
                  * cached mmap is the raw scanout, so a tiled buffer must be
                  * detiled here too (no-op for a linear one). Without this the
-                 * unchanged-fb fast path returns raw tiled pixels. */
-                gpu_auto_process(ctx, frame->data, frame, 0);
+                 * unchanged-fb fast path returns raw tiled pixels. Propagate a
+                 * processing failure instead of returning unprocessed pixels. */
+                int pr = gpu_auto_process(ctx, frame->data, frame, 0);
+                if (pr != 0) {
+                    return pr;
+                }
                 return 0;   /* always return as new frame */
             }
         }

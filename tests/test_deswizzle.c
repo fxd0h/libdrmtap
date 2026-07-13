@@ -281,12 +281,43 @@ static void test_convert_unsupported(void) {
 /* Main                                                                      */
 /* ========================================================================= */
 
+/* Height not a multiple of the tile height WITH more than one tile column: the
+ * tiled footprint (ceil(h/tile_h) full tile rows) exceeds the stride*height
+ * source, so the bottom-right pixels index past it. drmtap_deswizzle must
+ * zero-fill those instead of reading out of bounds. The source is allocated at
+ * EXACTLY src_size so ASan (the CI debug build) aborts on any over-read. */
+static void test_deswizzle_bounds_non_tile_multiple(void) {
+    uint32_t w = 256, h = 13;          /* 2 X-tile columns, partial last row */
+    uint32_t stride = w * 4;           /* 1024 = two 512-byte tile columns */
+    size_t src_size = (size_t)stride * h;
+    uint8_t *src = malloc(src_size);   /* exact size: ASan red-zones catch OOB */
+    uint8_t *dst = malloc((size_t)stride * h);
+    TEST_ASSERT(src && dst);
+    memset(src, 0xCD, src_size);       /* non-zero, so a zero-filled px stands out */
+    memset(dst, 0xAB, (size_t)stride * h);
+
+    uint64_t mod_x_tiled = 0x0100000000000001ULL;
+    int ret = drmtap_deswizzle(src, dst, w, h, stride, stride, mod_x_tiled, src_size);
+    TEST_ASSERT(ret == 0);             /* completed without an OOB read */
+
+    /* Bottom-right pixel maps into the unbacked second tile row/column, so it
+     * must be zero-filled — neither the 0xAB sentinel (unwritten) nor 0xCDCDCDCD
+     * (would mean it was read from the source). */
+    uint32_t last = *(uint32_t *)(dst + (size_t)(h - 1) * stride + (w - 1) * 4);
+    TEST_ASSERT(last == 0);
+
+    free(src);
+    free(dst);
+    printf("  PASS: deswizzle bounds (non-tile-multiple height, zero-filled, no OOB)\n");
+}
+
 int main(void) {
     printf("Running deswizzle/conversion tests...\n");
     test_deswizzle_null_safety();
     test_deswizzle_linear();
     test_deswizzle_intel_x_tiled_roundtrip();
     test_deswizzle_nvidia_x_tiled_roundtrip();
+    test_deswizzle_bounds_non_tile_multiple();
     test_convert_ar30_to_xrgb8888();
     test_convert_abgr_to_argb();
     test_convert_same_format();

@@ -563,12 +563,12 @@ pthread_mutex_unlock(&my_lock);
 
 **Usage patterns:**
 
-| Scenario | Mutex needed? | Performance | Recommendation |
+| Scenario | Locking | Performance | Recommendation |
 |---|---|---|---|
-| 1 process, 1 ctx, 1 thread | No (but harmless) | Best | Simple use case |
-| 1 process, 1 ctx, N threads | Yes (internal) | Good (serialized captures) | Convenience |
-| 1 process, N ctx (one per thread) | No | **Best** (zero contention) | **Recommended for high perf** |
-| N processes, N ctx | No (kernel handles) | Best | Independent processes |
+| 1 process, 1 ctx, 1 thread | None needed | Best | Simple use case |
+| 1 process, 1 ctx, N threads | **External** (caller-provided) — the ctx is not internally synchronized | Good (serialized captures) | Only if you must share a ctx |
+| 1 process, N ctx (one per thread) | None | **Best** (zero contention) | **Recommended** |
+| N processes, N ctx | None (kernel handles) | Best | Independent processes |
 
 **Recommendation for users**: For maximum throughput (e.g., multi-monitor capture), create one `drmtap_ctx` per thread. Each context opens its own DRM fd and has independent state — zero lock contention.
 

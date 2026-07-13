@@ -307,9 +307,10 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
             size_t chunk = remaining < sizeof(drain) ? remaining : sizeof(drain);
             ssize_t got = recv(ctx->helper_fd, drain, chunk, 0);
             if (got <= 0) {
-                /* Error/EOF mid-drain: the stream can no longer be resynced,
-                 * so fail hard rather than decrement by the requested (not the
-                 * received) count and leave the socket desynced for next grab. */
+                /* Error/EOF mid-drain: the stream can no longer be resynced.
+                 * Tear the helper connection down so the next grab respawns a
+                 * clean one instead of reusing a desynchronized socket. */
+                drmtap_helper_stop(ctx);
                 return -EIO;
             }
             remaining -= (size_t)got;

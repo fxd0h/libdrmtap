@@ -296,7 +296,10 @@ int drmtap_deswizzle(const void *src, void *dst,
         for (uint32_t y = 0; y < height; y++) {
             size_t row_off = (size_t)y * src_stride;
             if (row_off + (size_t)width * 4 > src_size) {
-                break;
+                /* Zero-fill unbacked rows instead of leaving the dst buffer
+                 * (malloc'd, not zeroed) with stale/uninitialized bytes. */
+                memset((uint8_t *)dst + y * dst_stride, 0, (size_t)width * 4);
+                continue;
             }
             memcpy((uint8_t *)dst + y * dst_stride,
                    (const uint8_t *)src + row_off,
@@ -351,7 +354,9 @@ int drmtap_deswizzle(const void *src, void *dst,
     for (uint32_t y = 0; y < height; y++) {
         size_t row_off = (size_t)y * src_stride;
         if (row_off + (size_t)width * 4 > src_size) {
-            break;
+            /* Zero-fill unbacked rows rather than leaking uninitialized dst. */
+            memset((uint8_t *)dst + y * dst_stride, 0, (size_t)width * 4);
+            continue;
         }
         memcpy((uint8_t *)dst + y * dst_stride,
                (const uint8_t *)src + row_off,

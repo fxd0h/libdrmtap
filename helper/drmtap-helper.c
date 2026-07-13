@@ -382,7 +382,9 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
     }
 
     if (mapped == MAP_FAILED) {
-        if (prime_fd >= 0) close(prime_fd);
+        if (prime_fd >= 0) {
+            close(prime_fd);
+        }
         send_all(sock, &meta, sizeof(meta));  /* visible=0 (couldn't read) */
         return 0;
     }
