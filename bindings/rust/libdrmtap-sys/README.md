@@ -17,8 +17,8 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
 > (`i915`, dual 3840x2160, EGL CCS detiling of the tiled/compressed framebuffer),
 > and NVIDIA Jetson Orin Nano (`nvidia-drm`, Wayland).
 >
-> The AMD (`amdgpu`) backend is implemented but **not yet validated on real
-> hardware**.
+> The AMD (`amdgpu`) backend is **validated on real hardware** (RX Vega 64,
+> gfx9, via EGL detile).
 >
 > If you test AMD or other configurations, please report results via
 > [GitHub Issues](https://github.com/fxd0h/libdrmtap/issues).

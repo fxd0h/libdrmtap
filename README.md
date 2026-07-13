@@ -92,7 +92,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > ⚠️ **Testing status**: Capture pipeline verified with the V3 zero-copy path on
 > `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`, dual 3840x2160,
 > EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64, Wayland).
-> The AMD (`amdgpu`) backend is implemented but still awaits real hardware testing.
+> The AMD (`amdgpu`) backend is verified on real hardware (RX Vega 64, gfx9, via the EGL detile path).
 > If you test on real hardware, please [report results](https://github.com/fxd0h/libdrmtap/issues).
 >
 > ℹ️ **virgl note**: Plain `virtio-gpu` is captured with a direct linear map. A

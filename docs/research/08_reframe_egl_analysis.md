@@ -90,7 +90,7 @@ glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
 | **Performance** | GPU-accelerated | CPU-bound |
 | **Dependencies** | libEGL, libGLESv2 | None |
 | **Headless/no-GPU** | ❌ Needs working EGL | ✅ Works with dumb mmap |
-| **Role in libdrmtap** | Primary detile path; verified on Intel i915/xe, Nvidia (incl. Tegra/Jetson), virtio-gpu | Fallback when EGL is unavailable; AMD path not yet verified on hardware |
+| **Role in libdrmtap** | Primary detile path; verified on Intel i915/xe, Nvidia (incl. Tegra/Jetson), AMD amdgpu (RX Vega 64, gfx9), virtio-gpu | Fallback when EGL is unavailable; the AMD CPU-deswizzle path is not exercised on hardware (AMD was verified via the EGL path) |
 
 ---
 

@@ -95,7 +95,7 @@ Projects with capture problems that libdrmtap solves:
 | Step | Action | Status |
 |---|---|---|
 | 1 | Publish `libdrmtap-sys` + `libdrmtap` on crates.io | ✅ Done |
-| 2 | Test on real hardware (Intel, Nvidia, virtio-gpu, AMD) | 🟡 In progress — Intel i915 (dual 4K Meteor Lake), Nvidia Jetson Orin Nano, and virtio-gpu verified; AMD amdgpu implemented but still untested |
+| 2 | Test on real hardware (Intel, Nvidia, virtio-gpu, AMD) | ✅ Done — Intel i915 (dual 4K Meteor Lake), Nvidia Jetson Orin Nano, virtio-gpu, and AMD amdgpu (RX Vega 64, gfx9) verified |
 | 3 | Post to r/linux, r/rustdesk, r/selfhosted, Hacker News | 🔜 After broader hardware validation |
 | 4 | Open issues / PRs on RustDesk and Sunshine repos proposing integration | 🟡 RustDesk PR [#15420](https://github.com/rustdesk/rustdesk/pull/15420) under maintainer review; Sunshine pending |
 | 5 | Create OBS plugin as proof of concept | 🔜 Future |

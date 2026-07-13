@@ -384,7 +384,7 @@ libdrmtap/
 │   ├── pixel_convert.c    ← CPU deswizzle + format conversion (fallback path)
 │   ├── gpu_egl.c          ← GPU-universal EGL/GLES2 detiler (PRIMARY detile path)
 │   ├── gpu_intel.c        ← Intel i915/xe tiling modifiers (CCS/X/Y-tiled)
-│   ├── gpu_amd.c          ← AMD amdgpu tiling (implemented, not yet HW-verified)
+│   ├── gpu_amd.c          ← AMD amdgpu tiling (verified on RX Vega 64, gfx9)
 │   ├── gpu_nvidia.c       ← Nvidia block-linear handling (incl. Tegra/Jetson)
 │   ├── gpu_generic.c      ← Generic/VM linear backend (virtio-gpu, simple VMs)
 │   └── privilege_helper.c ← Helper spawn + SCM_RIGHTS / DMA-BUF passing

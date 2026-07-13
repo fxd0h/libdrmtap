@@ -27,8 +27,8 @@ capture. This means:
 - **No user consent popup** (no "Select the screen to be shared")
 - **Works everywhere**: login screen, headless, VMs, kiosks, Wayland
 - **No PipeWire dependency**
-- **Handles GPU tiling** automatically (Intel i915 and Nvidia verified; AMD
-  amdgpu implemented but untested)
+- **Handles GPU tiling** automatically (Intel i915, Nvidia, and AMD amdgpu
+  verified — RX Vega 64, gfx9)
 
 ## Files
 

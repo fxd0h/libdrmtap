@@ -453,8 +453,8 @@ Three layers, published on crates.io:
 > ⚠️ **Testing status**: Both crates are published (libdrmtap-sys 0.4.6,
 > libdrmtap 0.3.3) and verified to build/test in CI on Ubuntu 22.04/24.04.
 > Capture is verified on Intel i915/xe (dual-4K Meteor Lake), Nvidia/Tegra
-> (Jetson Orin Nano, aarch64) and virtio-gpu. AMD amdgpu is implemented but
-> not yet verified on real hardware.
+> (Jetson Orin Nano, aarch64), virtio-gpu, and AMD amdgpu (RX Vega 64, gfx9,
+> via EGL detile).
 
 ### Rust API Design
 
@@ -518,7 +518,7 @@ Adding `libdrmtap-sys` is standard practice for them. They `cargo add libdrmtap`
 | Rust | `libdrmtap-sys` 0.4.6 (FFI; embeds + statically compiles C sources & helper) | ✅ Published on crates.io |
 | Rust | `libdrmtap` 0.3.3 (safe wrapper) | ✅ Published on crates.io |
 | GPU | EGL/GLES2 GPU-universal detiling backend | ✅ Implemented |
-| HW | Intel i915/xe + Nvidia/Tegra + virtio-gpu validation | ✅ Verified (AMD implemented, not yet verified) |
+| HW | Intel i915/xe + Nvidia/Tegra + virtio-gpu + AMD amdgpu validation | ✅ Verified (AMD on RX Vega 64, gfx9) |
 | RustDesk | DRM capture backend PR (rustdesk/rustdesk#15420) | 🚧 Under maintainer review |
 | HDR10 | PQ / BT.2020 → SDR tone-map | ✅ Done (#16) |
 
