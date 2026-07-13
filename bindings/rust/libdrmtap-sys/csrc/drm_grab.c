@@ -680,15 +680,21 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         if (mapped == MAP_FAILED) {
             /* A tiled scanout (notably amdgpu GFX9+) commonly refuses a CPU
              * mmap. The DMA-BUF fd (frame->dma_buf_fd) is still valid, so detile
-             * on the GPU via EGL instead of handing back a black frame. */
+             * on the GPU via EGL instead of handing back a black frame. Save the
+             * mmap errno first: gpu_auto_process below makes syscalls that clobber
+             * errno, so it can no longer describe this failure afterwards. */
+            int mmap_errno = errno;
             drmtap_debug_log(ctx,
                 "mmap failed (%zu bytes: %s), trying EGL detile via DMA-BUF fd",
-                size, strerror(errno));
+                size, strerror(mmap_errno));
             frame->data = NULL;
-            gpu_auto_process(ctx, NULL, frame, 0);
-            if (!frame->data) {
+            int rc = gpu_auto_process(ctx, NULL, frame, 0);
+            /* Only surface the generic mmap error if EGL produced no pixels AND
+             * gpu_auto_process set no more specific one (rc != 0 means it did —
+             * e.g. its "no CPU mapping and EGL unavailable" diagnosis). */
+            if (!frame->data && rc == 0) {
                 drmtap_set_error(ctx, "mmap failed (%zu bytes): %s",
-                                 size, strerror(errno));
+                                 size, strerror(mmap_errno));
             }
         } else {
             /* Invalidate CPU caches with SYNC_START and remember it succeeded so
