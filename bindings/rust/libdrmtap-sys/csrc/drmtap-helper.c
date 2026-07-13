@@ -46,6 +46,7 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/un.h>
+#include "wire.h"
 #include <sys/prctl.h>
 #include <limits.h>
 
@@ -146,35 +147,9 @@ struct grab_metadata {
     uint32_t hdr_max_nits;  /* mastering/content peak luminance (cd/m2), 0=unknown */
 };
 
-/* Send a file descriptor via SCM_RIGHTS */
+/* Send a file descriptor via SCM_RIGHTS (shared framing; see src/wire.h). */
 static int send_fd(int sock, int fd, const void *meta, size_t meta_len) {
-    struct msghdr msg = {0};
-    struct iovec iov;
-    union {
-        struct cmsghdr align;
-        char buf[CMSG_SPACE(sizeof(int))];
-    } cmsg_buf;
-
-    iov.iov_base = (void *)meta;
-    iov.iov_len = meta_len;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    msg.msg_control = cmsg_buf.buf;
-    msg.msg_controllen = sizeof(cmsg_buf.buf);
-
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
-
-    ssize_t n = sendmsg(sock, &msg, MSG_NOSIGNAL);
-    if (n < 0) {
-        perror("sendmsg SCM_RIGHTS");
-        return -1;
-    }
-    return 0;
+    return wire_send_fd(sock, fd, meta, meta_len);
 }
 
 /* ========================================================================= */
@@ -271,18 +246,14 @@ static int install_seccomp(void) {
 /* Socket helpers                                                            */
 /* ========================================================================= */
 
-// Send all bytes, handling partial writes
+// Exact-length framing lives in src/wire.h so the helper, the library client,
+// and the wire-protocol tests share one implementation. These thin wrappers keep
+// the existing call sites unchanged.
 static int send_all(int sock, const void *buf, size_t len) {
-    const uint8_t *p = (const uint8_t *)buf;
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n = send(sock, p + sent, len - sent, MSG_NOSIGNAL);
-        if (n <= 0) {
-            perror("drmtap-helper: send failed"); return -1;
-        }
-        sent += (size_t)n;
-    }
-    return 0;
+    return wire_send_all(sock, buf, len);
+}
+static int recv_all(int sock, void *buf, size_t len) {
+    return wire_recv_all(sock, buf, len);
 }
 
 // Send error: metadata with data_size=0. For logical/validation failures where
@@ -678,8 +649,15 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
      * Either way, if the export fails we fall through to the dumb-map pixel path. */
     if (meta.modifier != 0 /* DRM_FORMAT_MOD_LINEAR */ || is_virtio) {
         int prime_fd = -1;
+        /* Export the scanout DMA-BUF READ-ONLY. Capture only ever reads the
+         * framebuffer, and the fd is passed to an unprivileged process over
+         * SCM_RIGHTS; DRM_RDWR (== O_RDWR) would let that process create a
+         * writable mapping of the active scanout on drivers that honor it,
+         * turning a read-only capture into scanout tampering. Dropping DRM_RDWR
+         * yields an O_RDONLY descriptor (matches the in-library direct path in
+         * drm_grab.c). */
         int prime_ret = drmPrimeHandleToFD(drm_fd, gem_handle,
-                                            DRM_CLOEXEC | DRM_RDWR, &prime_fd);
+                                            DRM_CLOEXEC, &prime_fd);
         if (prime_ret == 0 && prime_fd >= 0) {
             meta.flags = FLAG_HAS_DMABUF;
             if (virtio_virgl) {
@@ -886,19 +864,14 @@ int main(int argc, char *argv[]) {
     /* Event loop: receive commands, process with persistent fd */
     while (1) {
         struct helper_cmd_grab hcmd;
-        ssize_t n = recv(sock, &hcmd, sizeof(hcmd), 0);
-
-        if (n <= 0) {
+        /* Read the whole fixed-size command frame. A clean disconnect (EOF at a
+         * boundary) or a truncated/partial frame both end the loop; we never act
+         * on a short read with an uninitialized crtc_id. */
+        if (recv_all(sock, &hcmd, sizeof(hcmd)) != 0) {
             break;
         }
 
-        uint8_t cmd = hcmd.cmd;
-        if (n < (ssize_t)sizeof(hcmd)) {
-            /* Fallback or partial read — can happen if client still uses old 1-byte protocol
-             * but for now we expect the full struct. */
-        }
-
-        switch (cmd) {
+        switch (hcmd.cmd) {
             case CMD_GRAB:
                 grab_and_send(sock, drm_fd, hcmd.crtc_id, is_virtio);
                 break;

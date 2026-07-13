@@ -36,6 +36,7 @@
 #include <sys/wait.h>
 
 #include "drmtap_internal.h"
+#include "wire.h"
 
 /* Must match values in drmtap-helper.c */
 #define HELPER_SOCKET_FD 3
@@ -131,6 +132,22 @@ int drmtap_helper_spawn(drmtap_ctx *ctx) {
         /* Clear CLOEXEC on the helper socket so it survives exec */
         fcntl(HELPER_SOCKET_FD, F_SETFD, 0);
 
+        /* Close every other inherited descriptor before the exec. After exec the
+         * helper holds CAP_SYS_ADMIN and its seccomp policy permits read/write/
+         * sendmsg/ioctl without pinning them to expected fds, so any leaked
+         * socket/file/device fd would needlessly widen a helper compromise. Keep
+         * only std{in,out,err} and the helper socket. (A bounded close loop is
+         * used rather than close_range() so the oldest supported bases build.) */
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0 || maxfd > 65536) {
+            maxfd = 65536;
+        }
+        for (int fd = 3; fd < (int)maxfd; fd++) {
+            if (fd != HELPER_SOCKET_FD) {
+                close(fd);
+            }
+        }
+
         /* Pass device path as argv[1] */
         execl(helper_path, "drmtap-helper", ctx->device_path, NULL);
 
@@ -151,9 +168,11 @@ int drmtap_helper_spawn(drmtap_ctx *ctx) {
 // Kill the helper process
 void drmtap_helper_stop(drmtap_ctx *ctx) {
     if (ctx->helper_fd >= 0) {
-        /* Send quit command (best effort) */
-        uint8_t cmd = CMD_QUIT;
-        ssize_t n = send(ctx->helper_fd, &cmd, 1, MSG_NOSIGNAL);
+        /* Send a full-size quit command (best effort). The helper reads one whole
+         * fixed-size command frame per iteration, so a 1-byte quit would be a
+         * short read that the helper now rejects; send the complete struct. */
+        helper_cmd_grab_t hcmd = { .cmd = CMD_QUIT, .crtc_id = 0 };
+        ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
         (void)n;
 
         close(ctx->helper_fd);
@@ -176,61 +195,19 @@ void drmtap_helper_stop(drmtap_ctx *ctx) {
 /* SCM_RIGHTS fd receiving                                                   */
 /* ========================================================================= */
 
-// Receive exactly len bytes from socket, handling partial reads
+// Exact-length framing + SCM_RIGHTS handling live in wire.h so the helper, this
+// client, and the wire-protocol tests share one implementation. Thin wrappers
+// keep the existing call sites unchanged.
 static int recv_all(int sock, void *buf, size_t len) {
-    uint8_t *p = (uint8_t *)buf;
-    size_t received = 0;
-    while (received < len) {
-        ssize_t n = recv(sock, p + received, len - received, 0);
-        if (n <= 0) {
-            return -1;
-        }
-        received += (size_t)n;
-    }
-    return 0;
+    return wire_recv_all(sock, buf, len);
 }
 
 /* Receive metadata + optional DMA-BUF fd via SCM_RIGHTS (V3 protocol).
  * When helper sends FLAG_HAS_DMABUF, the metadata arrives via sendmsg
  * with the DMA-BUF fd attached as ancillary data. */
 static int recv_fd_and_meta(int sock, void *meta_buf, size_t meta_len, int *out_fd) {
-    struct msghdr msg = {0};
-    struct iovec iov;
-    union {
-        struct cmsghdr align;
-        char buf[CMSG_SPACE(sizeof(int))];
-    } cmsg_buf;
-
-    *out_fd = -1;
-
-    iov.iov_base = meta_buf;
-    iov.iov_len = meta_len;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.buf;
-    msg.msg_controllen = sizeof(cmsg_buf.buf);
-
-    ssize_t n = recvmsg(sock, &msg, 0);
-    if (n <= 0) {
+    if (wire_recv_fd(sock, meta_buf, meta_len, out_fd) < 0) {
         return -1;
-    }
-
-    /* Extract fd from ancillary data if present */
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
-        cmsg->cmsg_type == SCM_RIGHTS &&
-        cmsg->cmsg_len == CMSG_LEN(sizeof(int))) {
-        memcpy(out_fd, CMSG_DATA(cmsg), sizeof(int));
-    }
-
-    /* We may have received less than meta_len in the first recvmsg.
-     * Read the rest with plain recv. */
-    if ((size_t)n < meta_len) {
-        if (recv_all(sock, (uint8_t *)meta_buf + n, meta_len - n) < 0) {
-            if (*out_fd >= 0) close(*out_fd);
-            *out_fd = -1;
-            return -1;
-        }
     }
 
     return 0;

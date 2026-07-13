@@ -678,10 +678,18 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         }
 
         if (mapped == MAP_FAILED) {
-            drmtap_set_error(ctx, "mmap failed (%zu bytes): %s",
-                             size, strerror(errno));
-            drmtap_debug_log(ctx, "mmap failed, falling back to zero-copy");
+            /* A tiled scanout (notably amdgpu GFX9+) commonly refuses a CPU
+             * mmap. The DMA-BUF fd (frame->dma_buf_fd) is still valid, so detile
+             * on the GPU via EGL instead of handing back a black frame. */
+            drmtap_debug_log(ctx,
+                "mmap failed (%zu bytes: %s), trying EGL detile via DMA-BUF fd",
+                size, strerror(errno));
             frame->data = NULL;
+            gpu_auto_process(ctx, NULL, frame, 0);
+            if (!frame->data) {
+                drmtap_set_error(ctx, "mmap failed (%zu bytes): %s",
+                                 size, strerror(errno));
+            }
         } else {
             /* Invalidate CPU caches with SYNC_START and remember it succeeded so
              * release issues the matching SYNC_END (and only then). Crucial for
@@ -781,7 +789,12 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
      * pixels that a CPU mmap reads back black, so we must go down the EGL path
      * (which imports the fd on the GPU) even though there is no usable `data`
      * and the modifier is linear. */
-    if (!data && !force_egl) return 0;
+    /* No CPU-mapped pixels. We can still detile on the GPU if the caller passed
+     * a DMA-BUF fd: a tiled scanout (notably amdgpu GFX9+) commonly refuses a
+     * CPU mmap, so the fd is all we have and the EGL path below imports it
+     * directly. Only bail when there is genuinely nothing to work with — no
+     * data, no fd, and not a forced virgl readback. */
+    if (!data && !force_egl && frame->dma_buf_fd < 0) return 0;
 
     uint64_t modifier = frame->modifier;
     int is_linear = (modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0);
@@ -880,6 +893,16 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     if (force_egl) {
         drmtap_set_error(ctx,
             "virgl scanout needs GPU EGL readback, which is unavailable or failed");
+        return -ENOTSUP;
+    }
+
+    /* The CPU deswizzle below reads from `data`. If we reached here with no CPU
+     * mapping (a tiled scanout whose mmap failed, e.g. amdgpu GFX9+) and EGL did
+     * not produce pixels, there is nothing to deswizzle — fail closed rather
+     * than dereference a NULL source. */
+    if (!data) {
+        drmtap_set_error(ctx,
+            "tiled scanout has no CPU mapping and EGL detile is unavailable");
         return -ENOTSUP;
     }
 
