@@ -139,8 +139,11 @@ int drmtap_helper_spawn(drmtap_ctx *ctx) {
          * only std{in,out,err} and the helper socket. (A bounded close loop is
          * used rather than close_range() so the oldest supported bases build.) */
         long maxfd = sysconf(_SC_OPEN_MAX);
-        if (maxfd < 0 || maxfd > 65536) {
-            maxfd = 65536;
+        if (maxfd < 0) {
+            maxfd = 65536; /* only fall back when the query itself fails; do NOT
+                            * cap the real limit — under an elevated RLIMIT_NOFILE
+                            * (e.g. systemd LimitNOFILE=infinity) a fixed 65536 cap
+                            * would leave inherited fds above it open across exec */
         }
         for (int fd = 3; fd < (int)maxfd; fd++) {
             if (fd != HELPER_SOCKET_FD) {

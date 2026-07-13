@@ -18,8 +18,20 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <dirent.h>
 
 #include "../src/wire.h"
+
+/* Count entries under /proc/self/fd. Only the DELTA across a call matters (the
+ * transient dir fd + '.'/'..' cancel out), so this detects a descriptor leak. */
+static int count_open_fds(void) {
+    DIR *d = opendir("/proc/self/fd");
+    if (!d) return -1;
+    int n = 0;
+    while (readdir(d) != NULL) n++;
+    closedir(d);
+    return n;
+}
 
 static int g_failures = 0;
 #define CHECK(cond, name)                                                     \
@@ -118,9 +130,48 @@ static void test_extra_descriptor_rejected(void) {
     int fds[3] = {ro, ro, ro};
     send_n_fds(sv[0], fds, 3);
     char got_meta = 0; int got_fd = -1;
+    int before = count_open_fds();
     int r = wire_recv_fd(sv[1], &got_meta, sizeof(got_meta), &got_fd);
+    int after = count_open_fds();
     CHECK(r == -1 && got_fd == -1, "extra/truncated ancillary (MSG_CTRUNC) rejected, no fd taken");
+    CHECK(before >= 0 && after == before, "no descriptor leaked when a truncated fd message is rejected");
     close(ro); close(sv[0]); close(sv[1]);
+}
+
+/* On LP64 CMSG_SPACE(1 int) == CMSG_SPACE(2 ints), so TWO fds fit the one-fd
+ * control buffer WITHOUT MSG_CTRUNC. wire_recv_fd must still reject (not exactly
+ * one fd) and must close BOTH installed descriptors rather than leak them. */
+static void test_two_fds_no_ctrunc_rejected(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { CHECK(0, "twofd: socketpair"); return; }
+    int ro = make_readonly_fd();
+    if (ro < 0) { CHECK(0, "twofd: make_readonly_fd"); close(sv[0]); close(sv[1]); return; }
+    int fds[2] = {ro, ro};
+    send_n_fds(sv[0], fds, 2);
+    char got_meta = 0; int got_fd = -1;
+    int before = count_open_fds();
+    int r = wire_recv_fd(sv[1], &got_meta, sizeof(got_meta), &got_fd);
+    int after = count_open_fds();
+    CHECK(r == -1 && got_fd == -1, "two-fd message with no MSG_CTRUNC is rejected, no fd taken");
+    CHECK(before >= 0 && after == before, "no descriptor leaked when a two-fd message is rejected");
+    close(ro); close(sv[0]); close(sv[1]);
+}
+
+/* A metadata-only message (no SCM_RIGHTS fd) is LEGITIMATE — the V2 pixel path
+ * passes no DMA-BUF — so it must succeed with *out_fd == -1, not be rejected as
+ * "not exactly one fd". Guards against over-tightening the fd-count check. */
+static void test_zero_fds_accepted(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { CHECK(0, "zerofd: socketpair"); return; }
+    uint32_t meta = 0xFEEDBEEF;
+    if (send(sv[0], &meta, sizeof(meta), MSG_NOSIGNAL) != (ssize_t)sizeof(meta)) {
+        CHECK(0, "zerofd: send");
+    }
+    uint32_t got_meta = 0; int got_fd = -1;
+    int r = wire_recv_fd(sv[1], &got_meta, sizeof(got_meta), &got_fd);
+    CHECK(r == 0 && got_fd == -1 && got_meta == 0xFEEDBEEF,
+          "metadata-only message (no fd) accepted with out_fd = -1");
+    close(sv[0]); close(sv[1]);
 }
 
 static void test_fragmented_frame_reassembled(void) {
@@ -153,6 +204,8 @@ int main(void) {
     test_received_fd_is_cloexec();
     test_received_fd_is_readonly();
     test_extra_descriptor_rejected();
+    test_two_fds_no_ctrunc_rejected();
+    test_zero_fds_accepted();
     test_fragmented_frame_reassembled();
     test_eof_midframe_rejected();
     if (g_failures == 0) {

@@ -127,22 +127,50 @@ static inline int wire_recv_fd(int sock, void *meta_buf, size_t meta_len, int *o
     if (n <= 0) {
         return -1;
     }
-    if (msg.msg_flags & MSG_CTRUNC) {
-        return -1; /* ancillary truncated: fd may have been dropped */
+
+    /* Collect every descriptor the kernel installed across all SCM_RIGHTS
+     * blocks. At most one fd is expected; zero is legitimate (a metadata-only
+     * message, e.g. the V2 pixel path that passes no DMA-BUF), but two or more —
+     * or any truncation — is a protocol violation. Every received descriptor
+     * beyond the first is closed immediately, and on a reject the first is
+     * closed too, so no path leaks a descriptor. This matters because on LP64
+     * CMSG_SPACE is identical for one and two ints, so a peer can slip TWO fds
+     * into the one-fd control buffer with NO MSG_CTRUNC, and the truncated path
+     * can still install the fds that fit before the kernel raised MSG_CTRUNC. */
+    int accepted = -1;
+    int nfds = 0;
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+            cmsg->cmsg_len < CMSG_LEN(0)) {
+            continue;
+        }
+        size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (size_t i = 0; i < count; i++) {
+            int fd;
+            memcpy(&fd, CMSG_DATA(cmsg) + i * sizeof(int), sizeof(int));
+            if (nfds == 0) {
+                accepted = fd; /* keep the first; may still be rejected below */
+            } else {
+                close(fd);     /* never keep an unexpected extra descriptor */
+            }
+            nfds++;
+        }
     }
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
-        cmsg->cmsg_type == SCM_RIGHTS &&
-        cmsg->cmsg_len == CMSG_LEN(sizeof(int))) {
-        memcpy(out_fd, CMSG_DATA(cmsg), sizeof(int));
+    if ((msg.msg_flags & MSG_CTRUNC) || nfds > 1) {
+        if (accepted >= 0) {
+            close(accepted);
+        }
+        return -1;
     }
+    /* nfds is 0 (accepted stays -1) or 1 (accepted holds the single fd). */
+    *out_fd = accepted;
+
     /* A short first read is possible; read the metadata remainder. */
     if ((size_t)n < meta_len) {
         if (wire_recv_all(sock, (unsigned char *)meta_buf + n, meta_len - (size_t)n) < 0) {
-            if (*out_fd >= 0) {
-                close(*out_fd);
-                *out_fd = -1;
-            }
+            close(*out_fd);
+            *out_fd = -1;
             return -1;
         }
     }
