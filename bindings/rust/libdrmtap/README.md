@@ -25,7 +25,7 @@ reports HDR (`P010` overlay-video and HLG excepted).
 libdrmtap = "0.3"
 ```
 
-This pulls in `libdrmtap-sys` 0.4.6, which embeds and statically compiles the C
+This pulls in `libdrmtap-sys` 0.4.7, which embeds and statically compiles the C
 sources (and the privilege helper) — no system `libdrmtap` install needed.
 
 ## Example
