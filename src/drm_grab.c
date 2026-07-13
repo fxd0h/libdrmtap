@@ -480,9 +480,13 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         ret = drmtap_helper_grab(ctx, &hresult, pixel_buf, buf_size);
         if (ret < 0) {
             drmtap_set_error(ctx,
-                "No CAP_SYS_ADMIN and helper failed (ret=%d). "
-                "Install the helper: sudo cp drmtap-helper /usr/local/bin/ "
-                "&& sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper",
+                "No CAP_SYS_ADMIN and helper failed (ret=%d). Install the "
+                "helper, restricting it first so the capability is not "
+                "world-usable: sudo cp drmtap-helper /usr/local/bin/ && "
+                "sudo chown root:<capture-group> /usr/local/bin/drmtap-helper && "
+                "sudo chmod 0750 /usr/local/bin/drmtap-helper && "
+                "sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper "
+                "(see SECURITY.md)",
                 ret);
             drmModeFreeFB2(fb2);
             return -EACCES;
@@ -689,12 +693,20 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                 size, strerror(mmap_errno));
             frame->data = NULL;
             int rc = gpu_auto_process(ctx, NULL, frame, 0);
-            /* Only surface the generic mmap error if EGL produced no pixels AND
-             * gpu_auto_process set no more specific one (rc != 0 means it did —
-             * e.g. its "no CPU mapping and EGL unavailable" diagnosis). */
-            if (!frame->data && rc == 0) {
-                drmtap_set_error(ctx, "mmap failed (%zu bytes): %s",
-                                 size, strerror(mmap_errno));
+            if (!frame->data) {
+                /* No pixels: this grab failed. Return an error so the caller can
+                 * fall back (e.g. to PipeWire) instead of receiving a black
+                 * frame reported as success. Propagate gpu_auto_process's
+                 * specific error if it set one (rc != 0 — e.g. its "no CPU
+                 * mapping and EGL unavailable" diagnosis), otherwise surface the
+                 * original mmap failure. */
+                if (rc == 0) {
+                    drmtap_set_error(ctx, "mmap failed (%zu bytes): %s",
+                                     size, strerror(mmap_errno));
+                    rc = mmap_errno ? -mmap_errno : -EIO;
+                }
+                ret = rc;
+                goto cleanup;
             }
         } else {
             /* Invalidate CPU caches with SYNC_START and remember it succeeded so
