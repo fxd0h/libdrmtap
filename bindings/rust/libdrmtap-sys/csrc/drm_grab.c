@@ -61,6 +61,20 @@
 static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                             drmtap_frame_info *frame, int force_egl);
 
+/* Close a GEM handle returned by drmModeGetFB2 on the ctx's DRM fd. Each
+ * drmModeGetFB2 mints a fresh handle the caller must close (it is a separate
+ * kernel BO reference from the prime fd); not closing it leaks a handle on
+ * every grab. No-op for handle 0 (helper path) or a NULL ctx. */
+static void drmtap_gem_close(drmtap_ctx *ctx, uint32_t handle) {
+    if (!ctx || handle == 0) {
+        return;
+    }
+    struct drm_gem_close gc;
+    memset(&gc, 0, sizeof(gc));
+    gc.handle = handle;
+    drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
+}
+
 /* ========================================================================= */
 /* Internal state for a captured frame (stored in frame->_priv)              */
 /* ========================================================================= */
@@ -748,6 +762,11 @@ cleanup:
     if (fb2) {
         drmModeFreeFB2(fb2);
     }
+    /* Close the GEM handle if this error path was reached after the direct grab
+     * adopted one (priv->gem_handle set); otherwise it leaks like every grab. */
+    if (priv) {
+        drmtap_gem_close(ctx, priv->gem_handle);
+    }
     free(priv);
     return ret;
 }
@@ -1055,16 +1074,9 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             close(priv->helper_drm_fd);
         }
 
-        /* Close the GEM handle drmModeGetFB2 handed us on the direct path.
-         * Not closing it leaks a kernel GEM handle / BO reference on every
-         * grab (the handle is separate from the prime fd). The helper path
-         * leaves gem_handle == 0. Needs the ctx's DRM fd. */
-        if (priv->gem_handle != 0 && ctx) {
-            struct drm_gem_close gc;
-            memset(&gc, 0, sizeof(gc));
-            gc.handle = priv->gem_handle;
-            drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
-        }
+        /* Close the GEM handle drmModeGetFB2 handed us on the direct path
+         * (the helper path leaves it 0). */
+        drmtap_gem_close(ctx, priv->gem_handle);
 
         free(priv);
     }
@@ -1088,12 +1100,7 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx) {
         if (ctx->fast_slots[i].prime_fd >= 0) {
             close(ctx->fast_slots[i].prime_fd);
         }
-        if (ctx->fast_slots[i].gem_handle != 0) {
-            struct drm_gem_close gc;
-            memset(&gc, 0, sizeof(gc));
-            gc.handle = ctx->fast_slots[i].gem_handle;
-            drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
-        }
+        drmtap_gem_close(ctx, ctx->fast_slots[i].gem_handle);
         memset(&ctx->fast_slots[i], 0, sizeof(ctx->fast_slots[i]));
         ctx->fast_slots[i].prime_fd = -1;
     }
@@ -1125,12 +1132,7 @@ static int find_or_alloc_slot(drmtap_ctx *ctx, uint32_t fb_id) {
     if (ctx->fast_slots[0].prime_fd >= 0) {
         close(ctx->fast_slots[0].prime_fd);
     }
-    if (ctx->fast_slots[0].gem_handle != 0) {
-        struct drm_gem_close gc;
-        memset(&gc, 0, sizeof(gc));
-        gc.handle = ctx->fast_slots[0].gem_handle;
-        drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
-    }
+    drmtap_gem_close(ctx, ctx->fast_slots[0].gem_handle);
     memset(&ctx->fast_slots[0], 0, sizeof(ctx->fast_slots[0]));
     ctx->fast_slots[0].prime_fd = -1;
     return 0;
@@ -1267,6 +1269,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (ret != 0) {
         drmtap_set_error(ctx, "fast2: rejecting geometry %ux%u stride=%u",
                          fb2->width, fb2->height, fb2->pitches[0]);
+        drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
         return ret;
     }
@@ -1277,6 +1280,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                               O_RDONLY | O_CLOEXEC, &prime_fd);
     if (ret < 0) {
         ret = -errno;
+        drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
         return ret;
     }
@@ -1301,6 +1305,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
 
     if (mapped == MAP_FAILED) {
         close(prime_fd);
+        drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
         return -ENOMEM;
     }

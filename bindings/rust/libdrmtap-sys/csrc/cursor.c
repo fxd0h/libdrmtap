@@ -139,7 +139,13 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
 
     uint32_t cursor_plane_id = find_cursor_plane(ctx);
     if (cursor_plane_id == 0) {
-        return -ENOENT;  /* No cursor plane */
+        /* No cursor plane is currently bound to this CRTC. Since the plane is
+         * selected by its live binding, a hidden hardware cursor (which clears
+         * the plane's CRTC_ID) lands here — treat it as hidden, exactly like the
+         * helper's cursor_and_send does, not as an error. Returning -ENOENT
+         * would make the consumer keep displaying a stale cursor. */
+        cursor->visible = 0;
+        return 0;
     }
 
     /* Get plane state */

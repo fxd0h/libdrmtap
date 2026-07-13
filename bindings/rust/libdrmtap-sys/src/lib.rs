@@ -115,6 +115,7 @@ extern "C" {
         src_stride: u32,
         dst_stride: u32,
         modifier: u64,
+        src_size: usize,
     ) -> c_int;
     pub fn drmtap_convert_format(
         src: *const c_void,
