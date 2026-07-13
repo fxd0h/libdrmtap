@@ -164,3 +164,19 @@ jobs:
               exit 1
             fi
           fi
+
+  version-coherence:
+    name: Version & crate-source coherence
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      # One canonical version (the DRMTAP_VERSION_* macros in include/drmtap.h)
+      # drives every other site via tools/set-version.sh; this gate fails the
+      # build if any of them drift, or if the crate's bundled csrc/ sources no
+      # longer match the library (which once shipped a stale helper). No build
+      # deps needed — just grep/sed/diff.
+      - name: Check version + csrc coherence
+        run: ./tools/check-version.sh
