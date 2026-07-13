@@ -28,3 +28,6 @@ Thumbs.db
 
 # Rust build artifacts
 bindings/rust/target/
+
+# Library workspace lockfile (not tracked for a published lib)
+bindings/rust/Cargo.lock
