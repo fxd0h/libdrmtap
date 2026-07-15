@@ -214,6 +214,13 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
                             uint64_t modifier,
                             void **out_data, size_t *out_size);
 
+/* Release the calling thread's lazily-built EGL detile context + GL resources.
+ * Must be called on the capture thread (drmtap_close does this) — C thread-local
+ * storage has no destructor, so without it every open/close on a fresh thread
+ * leaks a whole EGL context + linear texture. No-op if this thread never detiled
+ * or the library was built without EGL. Never terminates the shared display. */
+void drmtap_gpu_egl_thread_cleanup(void);
+
 /* Convert a 16-bit/channel scanout (XR48/AR48/XB48/AB48) to XRGB8888.
  * bgr selects channel order (0 = XR48/AR48, 1 = XB48/AB48). When eotf is
  * DRMTAP_EOTF_PQ the 16-bit values are PQ-decoded and tone-mapped to SDR;

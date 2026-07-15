@@ -54,7 +54,7 @@ int main() {
 libdrmtap = "0.3"
 ```
 
-> This pulls in `libdrmtap-sys` 0.4.7, which embeds and statically compiles the
+> This pulls in `libdrmtap-sys` 0.4.8, which embeds and statically compiles the
 > C sources (and the privilege helper). No system `libdrmtap` install, no
 > `meson install`, no `pkg-config` to find a shared library.
 
@@ -195,7 +195,7 @@ sudo ./build/vnc_server
 libdrmtap is being upstreamed into [RustDesk](https://github.com/rustdesk/rustdesk)
 via [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420).
 The integration adds a `drm` backend to `scrap` that depends on the
-[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) 0.4.7 crate, which
+[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) 0.4.8 crate, which
 embeds and statically compiles the C sources (and the privilege helper) — so
 there is no system `libdrmtap` install and no dynamic `libdrmtap.so` linkage.
 

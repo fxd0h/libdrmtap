@@ -69,6 +69,36 @@ typedef struct {
     pthread_t owner_thread;  /* thread that created this context */
 } egl_state_t;
 
+/* The per-thread EGL context + GL resources.
+ *
+ * MUST be thread-local: an EGL/GL context is current in at most one thread, and
+ * each capture (e.g. one per monitor in a multi-display session) runs on its own
+ * thread. A single process-global state shared across threads would race on the
+ * FBO/program/textures, producing corrupted/garbage frames under concurrent
+ * capture. Thread-local storage gives each capture thread its own EGL context
+ * over the shared EGLDisplay — the correct EGL threading model.
+ *
+ * It lives at FILE scope (not inside egl_convert_impl) so drmtap_gpu_egl_thread_cleanup()
+ * can release it on drmtap_close(): C thread-local storage has no destructor, so
+ * without an explicit teardown every open/close cycle on a fresh capture thread
+ * leaked a whole EGL context + a w*h*4 linear texture (~33 MB at 4K). */
+static _Thread_local egl_state_t state = {0};
+
+/* Backstop for a capture thread that exits WITHOUT calling drmtap_close (an
+ * error/panic path): a pthread TSD destructor frees this thread's EGL context at
+ * thread exit, while its context can still be made current. The shared
+ * g_egl_display is never terminated, so this is safe. */
+static pthread_key_t g_egl_tsd_key;
+static pthread_once_t g_egl_tsd_once = PTHREAD_ONCE_INIT;
+static void egl_cleanup(egl_state_t *st);
+static void egl_tsd_destructor(void *unused) {
+    (void)unused;
+    egl_cleanup(&state);
+}
+static void egl_tsd_key_init(void) {
+    pthread_key_create(&g_egl_tsd_key, egl_tsd_destructor);
+}
+
 /* EGL function pointers (loaded dynamically) */
 static PFNEGLQUERYDEVICESEXTPROC pfn_eglQueryDevicesEXT;
 static PFNEGLQUERYDEVICESTRINGEXTPROC pfn_eglQueryDeviceStringEXT;
@@ -348,6 +378,11 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     state->tex_height = 0;
     state->initialized = 1;
     state->owner_thread = pthread_self();
+    /* Register the thread-exit backstop so a capture thread that dies without
+     * drmtap_close() still frees this context (value must be non-NULL to arm
+     * the destructor; the destructor frees the thread-local `state` directly). */
+    pthread_once(&g_egl_tsd_once, egl_tsd_key_init);
+    pthread_setspecific(g_egl_tsd_key, state);
     drmtap_debug_log(NULL, "EGL: init OK: display=%p ctx=%p program=%u fbo=%u (tid=%ld)",
             (void*)state->display, (void*)state->context, state->program, state->fbo, (long)(long)0);
 
@@ -355,24 +390,42 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     return 0;
 }
 
-static void __attribute__((unused)) egl_cleanup(egl_state_t *state) {
-    if (!state->initialized) {
+static void egl_cleanup(egl_state_t *st) {
+    if (!st->initialized) {
         return;
     }
-    eglMakeCurrent(state->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                   state->context);
-    if (state->linear_texture) {
-        glDeleteTextures(1, &state->linear_texture);
+    eglMakeCurrent(st->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   st->context);
+    if (st->linear_texture) {
+        glDeleteTextures(1, &st->linear_texture);
     }
-    if (state->fbo) {
-        glDeleteFramebuffers(1, &state->fbo);
+    if (st->fbo) {
+        glDeleteFramebuffers(1, &st->fbo);
     }
-    if (state->program) {
-        glDeleteProgram(state->program);
+    if (st->program) {
+        glDeleteProgram(st->program);
     }
-    eglDestroyContext(state->display, state->context);
-    eglTerminate(state->display);
-    state->initialized = 0;
+    /* Release the context from this thread before destroying it. MUST NOT
+     * eglTerminate(st->display): g_egl_display is shared across all capture
+     * threads; terminating it invalidates other threads' live detile contexts
+     * (see the CRITICAL note in drmtap_gpu_egl_available). */
+    eglMakeCurrent(st->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
+    eglDestroyContext(st->display, st->context);
+    st->context = EGL_NO_CONTEXT;
+    st->program = 0;
+    st->fbo = 0;
+    st->linear_texture = 0;
+    st->tex_width = 0;
+    st->tex_height = 0;
+    st->initialized = 0;
+}
+
+/* Release THIS thread's EGL context + GL resources. Safe no-op if this thread
+ * never built a context. Called from drmtap_close() on the capture thread (and
+ * by the TSD backstop at thread exit); idempotent. */
+void drmtap_gpu_egl_thread_cleanup(void) {
+    egl_cleanup(&state);
 }
 
 /* Ensure the linear output texture matches the capture dimensions */
@@ -493,36 +546,13 @@ static int egl_convert_impl(drmtap_ctx *ctx,
         return -EINVAL;
     }
 
-    /* Lazy-init EGL state, one per thread.
-     *
-     * MUST be thread-local: an EGL/GL context is current in at most one thread,
-     * and each capture (e.g. one per monitor in a multi-display session) runs on
-     * its own thread. A single process-global state shared across threads would
-     * race on the FBO/program/textures and thrash the context (via the
-     * owner-thread re-creation below), producing corrupted/garbage frames under
-     * concurrent capture. Thread-local storage gives each capture thread its own
-     * EGL context over the shared EGLDisplay — the correct EGL threading model. */
-    static _Thread_local egl_state_t state = {0};
+    /* Lazy-init this thread's EGL context. `state` is the file-scope
+     * thread-local defined above; it is freed by drmtap_gpu_egl_thread_cleanup()
+     * on close. (A `_Thread_local` is per-thread, so there is no cross-thread
+     * owner check to do here — each thread only ever sees its own instance.) */
     int ret;
 
     drmtap_debug_log(NULL, "EGL: state.initialized=%d", state.initialized);
-    if (state.initialized && state.owner_thread != pthread_self()) {
-        drmtap_debug_log(NULL, "EGL: thread changed! old=%lu new=%lu, re-creating context",
-                (unsigned long)state.owner_thread, (unsigned long)pthread_self());
-        /* Destroy old context — it belongs to a different thread */
-        eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       EGL_NO_CONTEXT);
-        if (state.program) glDeleteProgram(state.program);
-        if (state.fbo) glDeleteFramebuffers(1, &state.fbo);
-        if (state.linear_texture) glDeleteTextures(1, &state.linear_texture);
-        eglDestroyContext(state.display, state.context);
-        state.initialized = 0;
-        state.program = 0;
-        state.fbo = 0;
-        state.linear_texture = 0;
-        state.tex_width = 0;
-        state.tex_height = 0;
-    }
     if (!state.initialized) {
         ret = egl_init(ctx, &state);
         drmtap_debug_log(NULL, "EGL: egl_init returned %d", ret);
@@ -814,6 +844,10 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
     (void)out_data; (void)out_size;
     drmtap_set_error(ctx, "EGL backend not available (built without EGL)");
     return -ENOTSUP;
+}
+
+void drmtap_gpu_egl_thread_cleanup(void) {
+    /* No EGL backend compiled in — nothing to release. */
 }
 
 #endif /* HAVE_EGL */

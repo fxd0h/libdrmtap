@@ -253,6 +253,17 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
                          "warning: DRM_CLIENT_CAP_UNIVERSAL_PLANES not supported");
     }
 
+    /* Enable atomic modesetting uAPI — best-effort, read-only. This exposes the
+     * connector CRTC_ID property (atomic-flagged, hidden from non-atomic
+     * clients) so enumeration can resolve the real scanout CRTC of a
+     * compositor-managed connector whose legacy encoder link reports 0. We never
+     * commit; the cap only widens property visibility. Harmless if unsupported. */
+    if (drmSetClientCap(ctx->drm_fd, DRM_CLIENT_CAP_ATOMIC, 1) < 0) {
+        drmtap_debug_log(ctx,
+                         "warning: DRM_CLIENT_CAP_ATOMIC not supported "
+                         "(connector CRTC_ID fallback unavailable)");
+    }
+
     drmtap_debug_log(ctx, "context opened: %s (%s)",
                      ctx->device_path, ctx->driver_name);
 
@@ -277,6 +288,13 @@ void drmtap_close(drmtap_ctx *ctx) {
 
     /* Clean up persistent fast-grab state */
     drmtap_fast_cleanup(ctx);
+
+    /* Release this thread's EGL detile context (context + shader + FBO + linear
+     * texture). drmtap_close runs on the capture thread that built it, and C
+     * thread-local storage has no destructor, so without this every open/close on
+     * a fresh capture thread leaks a full EGL context (~tens of MB). No-op if this
+     * thread never used the EGL path. */
+    drmtap_gpu_egl_thread_cleanup();
 
     /* Stop helper if running */
     drmtap_helper_stop(ctx);
