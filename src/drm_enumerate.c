@@ -24,6 +24,38 @@
 
 #include "drmtap_internal.h"
 
+/* Resolve the CRTC bound to a connector via the atomic CRTC_ID property.
+ *
+ * The legacy path (drmModeGetEncoder(conn->encoder_id)->crtc_id) reports 0 for a
+ * compositor-managed / atomically-bound connector — a documented weakness of the
+ * legacy encoder API under atomic KMS. A connector that enumerates crtc_id==0 is
+ * then mishandled downstream (open() treats 0 as "auto-select the first CRTC",
+ * silently capturing the wrong monitor). Fall back to the connector's atomic
+ * CRTC_ID property to get the real scanout CRTC. Returns 0 if the connector is
+ * genuinely unbound or the property is unavailable (e.g. no atomic cap). */
+static uint32_t connector_crtc_from_atomic(int fd, uint32_t connector_id) {
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        return 0;
+    }
+    uint32_t crtc_id = 0;
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        drmModePropertyRes *p = drmModeGetProperty(fd, props->props[i]);
+        if (!p) {
+            continue;
+        }
+        if (strcmp(p->name, "CRTC_ID") == 0) {
+            crtc_id = (uint32_t)props->prop_values[i];
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+    return crtc_id;
+}
+
 /* ========================================================================= */
 /* Public API                                                                */
 /* ========================================================================= */
@@ -66,6 +98,15 @@ int drmtap_list_displays(drmtap_ctx *ctx, drmtap_display *out, int max_count) {
                 crtc_id = enc->crtc_id;
                 drmModeFreeEncoder(enc);
             }
+        }
+        /* The legacy encoder link is 0 for compositor-managed / atomically-bound
+         * connectors; fall back to the atomic CRTC_ID property so a lit monitor
+         * gets its real CRTC instead of enumerating as crtc_id==0 (which
+         * open(None,0) mis-handles as "auto-select the first/primary CRTC",
+         * silently capturing the wrong monitor). */
+        if (crtc_id == 0) {
+            crtc_id = connector_crtc_from_atomic(ctx->drm_fd,
+                                                 conn->connector_id);
         }
 
         /* Fill output entry */
