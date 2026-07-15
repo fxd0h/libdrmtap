@@ -48,15 +48,29 @@ if ! "$root/tools/sync-crate.sh" --check; then
     fail=1
 fi
 
-# Advisory only (never fails the build): surface version-looking strings in the
-# user-facing docs that are not the canonical version, so a human can decide
-# whether they are stale current-pointers or intentional history.
-echo "advisory: doc version strings that are not $ver (review manually):"
-grep -rnoE "$sem" \
-    "$root/README.md" "$root/AGENTS.md" \
-    "$root/bindings/rust/libdrmtap-sys/README.md" \
-    "$root/bindings/rust/libdrmtap/README.md" 2>/dev/null \
-    | grep -vE ":$ver$" | grep -vE "0\.3\.[0-9]+$" | sed 's/^/    /' || echo "    (none)"
+# Advisory only (never fails the build): surface version-looking strings that are
+# not the canonical version so a human can decide whether each is a stale
+# current-pointer (bump it) or intentional history ("shipped in X.Y.Z" — leave
+# it). Scans the WHOLE repo's docs + config (every *.md, *.toml, *.rs — the
+# top-level READMEs, AGENTS.md, docs/, contrib/, patches/, and the crates), NOT
+# just the top-level READMEs: contrib/ + patches/ + docs/research/ carry
+# current-pointer versions (integration snippets, "published on crates.io" status
+# lines, scrap dependency pins) that a 4-file scan silently missed and let ship
+# stale. Build artifacts are excluded. The wrapper's own 0.3.x line is filtered
+# out (its version is intentionally a separate track).
+echo "advisory: libdrmtap version strings that are not $ver (review: stale current-pointer vs intentional history):"
+# Scan with RELATIVE paths (cd "$root") so the repo dir name ("libdrmtap") is not
+# in the path — otherwise the drmtap scope filter below would match every line.
+# Keep only lines whose CONTENT mentions drmtap (a libdrmtap version reference),
+# dropping unrelated deps (rustdesk 1.x, tokio, etc.); drop the canonical version
+# and the wrapper's separate 0.3.x line.
+( cd "$root" && grep -rnE "$sem" . \
+    --include='*.md' --include='*.toml' --include='*.rs' \
+    --exclude-dir='.git' --exclude-dir='build' --exclude-dir='build-pkg' --exclude-dir='target' \
+    2>/dev/null ) \
+    | grep -iE 'drmtap' \
+    | grep -vF "$ver" | grep -vE "0\.3\.[0-9]+" \
+    | sed 's/^/    /' || echo "    (none)"
 
 if [ $fail -ne 0 ]; then
     echo "version coherence FAILED" >&2
