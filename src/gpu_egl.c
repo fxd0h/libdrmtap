@@ -66,7 +66,6 @@ typedef struct {
     uint32_t tex_width;
     uint32_t tex_height;
     int initialized;
-    pthread_t owner_thread;  /* thread that created this context */
 } egl_state_t;
 
 /* The per-thread EGL context + GL resources.
@@ -89,6 +88,7 @@ static _Thread_local egl_state_t state = {0};
  * thread exit, while its context can still be made current. The shared
  * g_egl_display is never terminated, so this is safe. */
 static pthread_key_t g_egl_tsd_key;
+static int g_egl_tsd_key_ok = 0;   /* set once the key is created successfully */
 static pthread_once_t g_egl_tsd_once = PTHREAD_ONCE_INIT;
 static void egl_cleanup(egl_state_t *st);
 static void egl_tsd_destructor(void *unused) {
@@ -96,7 +96,11 @@ static void egl_tsd_destructor(void *unused) {
     egl_cleanup(&state);
 }
 static void egl_tsd_key_init(void) {
-    pthread_key_create(&g_egl_tsd_key, egl_tsd_destructor);
+    /* Only mark the key usable if creation succeeds; otherwise g_egl_tsd_key is
+     * indeterminate and must never be passed to pthread_setspecific. */
+    if (pthread_key_create(&g_egl_tsd_key, egl_tsd_destructor) == 0) {
+        g_egl_tsd_key_ok = 1;
+    }
 }
 
 /* EGL function pointers (loaded dynamically) */
@@ -377,14 +381,17 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     state->tex_width = 0;
     state->tex_height = 0;
     state->initialized = 1;
-    state->owner_thread = pthread_self();
     /* Register the thread-exit backstop so a capture thread that dies without
-     * drmtap_close() still frees this context (value must be non-NULL to arm
-     * the destructor; the destructor frees the thread-local `state` directly). */
+     * drmtap_close() still frees this context (value must be non-NULL to arm the
+     * destructor; the destructor frees the thread-local `state` directly). Skip
+     * arming it if the key could not be created (indeterminate key => no UB). */
     pthread_once(&g_egl_tsd_once, egl_tsd_key_init);
-    pthread_setspecific(g_egl_tsd_key, state);
-    drmtap_debug_log(NULL, "EGL: init OK: display=%p ctx=%p program=%u fbo=%u (tid=%ld)",
-            (void*)state->display, (void*)state->context, state->program, state->fbo, (long)(long)0);
+    if (g_egl_tsd_key_ok) {
+        pthread_setspecific(g_egl_tsd_key, state);
+    }
+    drmtap_debug_log(NULL, "EGL: init OK: display=%p ctx=%p program=%u fbo=%u (tid=%lu)",
+            (void*)state->display, (void*)state->context, state->program, state->fbo,
+            (unsigned long)pthread_self());
 
     drmtap_debug_log(ctx, "egl: GPU-universal backend initialized");
     return 0;
