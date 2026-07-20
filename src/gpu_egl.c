@@ -1003,7 +1003,9 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     }
 
     /* ── Import-once: EGLImage cache keyed by fb_id ── */
-    egl_image_slot_t *slot = NULL;
+    /* slot is only ever read through (the writes go through `dst`/`s`), so it
+     * is const; free_slot/dst stay mutable because they populate a slot. */
+    const egl_image_slot_t *slot = NULL;
     egl_image_slot_t *free_slot = NULL;
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
     GLuint ext_texture = 0;
