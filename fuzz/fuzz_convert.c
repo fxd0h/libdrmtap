@@ -32,21 +32,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <linux/types.h>
 
 #include "drmtap.h"
-
-#ifndef UDMABUF_CREATE
-struct udmabuf_create {
-    __u32 memfd;
-    __u32 flags;
-    __u64 offset;
-    __u64 size;
-};
-#define UDMABUF_CREATE _IOW('u', 0x42, struct udmabuf_create)
-#endif
+#include "udmabuf_util.h"
 
 static drmtap_ctx *g_ctx;
 static int g_udmabuf = -1;   /* persistent /dev/udmabuf control fd */
@@ -64,36 +52,6 @@ static void fuzz_init(void) {
         g_ctx = drmtap_open(NULL);
     }
     g_udmabuf = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
-}
-
-/* Wrap `len` bytes of `payload` in a real, immutable dma-buf via udmabuf, so it
- * passes drmtap_convert_dmabuf's dma-buf gate. Returns the dma-buf fd or -1. */
-static int make_fuzz_dmabuf(const uint8_t *payload, size_t len) {
-    if (g_udmabuf < 0) {
-        return -1;
-    }
-    long pg = sysconf(_SC_PAGESIZE);
-    size_t rounded = ((len + (size_t)pg - 1) / (size_t)pg) * (size_t)pg;
-    if (rounded == 0) {
-        rounded = (size_t)pg;
-    }
-    int mfd = memfd_create("fuzz-convert", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (mfd < 0) {
-        return -1;
-    }
-    if (ftruncate(mfd, (off_t)rounded) != 0 ||
-        (len && write(mfd, payload, len) != (ssize_t)len) ||
-        fcntl(mfd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
-        close(mfd);
-        return -1;
-    }
-    struct udmabuf_create create;
-    memset(&create, 0, sizeof(create));
-    create.memfd = (__u32)mfd;
-    create.size = rounded;
-    int dbuf = ioctl(g_udmabuf, UDMABUF_CREATE, &create);
-    close(mfd);
-    return dbuf;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
@@ -137,7 +95,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     /* A real dma-buf of arbitrary (page-rounded) size: the mmap in the CPU path
      * can be smaller than the geometry claims, which is exactly the hostile
      * case to probe (now caught by the lseek size check, not a fault). */
-    int fd = make_fuzz_dmabuf(payload, paylen);
+    int fd = drmtap_udmabuf_wrap(g_udmabuf, payload, paylen);
     if (fd < 0) {
         return 0;
     }

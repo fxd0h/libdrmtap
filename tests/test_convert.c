@@ -26,23 +26,10 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <sys/ioctl.h>
 #include <fcntl.h>
-#include <linux/types.h>
 
 #include "drmtap.h"
-
-/* udmabuf: wrap a sealed memfd in a real, immutable DMA-BUF. Defined inline so
- * the test does not depend on a linux/udmabuf.h that older build headers lack. */
-#ifndef UDMABUF_CREATE
-struct udmabuf_create {
-    __u32 memfd;
-    __u32 flags;
-    __u64 offset;
-    __u64 size;
-};
-#define UDMABUF_CREATE _IOW('u', 0x42, struct udmabuf_create)
-#endif
+#include "udmabuf_util.h"
 
 static int failures = 0;
 
@@ -59,42 +46,11 @@ static void check(int cond, const char *what) {
 #define FMT_XR24 0x34325258u /* XRGB8888 */
 #define FMT_XR30 0x30335258u /* XRGB2101010 */
 
-/* A REAL DMA-BUF backed by `size` bytes of `data`: a page-sized sealed memfd
- * wrapped by udmabuf. drmtap_convert_dmabuf now requires a genuine dma-buf (it
- * refuses to mmap an untrusted non-dma-buf fd), so a plain memfd would be
- * rejected; udmabuf gives an immutable dma-buf the converter accepts. Returns
- * the dma-buf fd, or -1 when /dev/udmabuf is unavailable (the caller SKIPs). */
+/* A REAL DMA-BUF backed by `size` bytes of `data`, via the shared udmabuf
+ * helper (drmtap_udmabuf_make opens /dev/udmabuf per call). Returns the dma-buf
+ * fd, or -1 when /dev/udmabuf is unavailable (the caller SKIPs). */
 static int make_pixel_dmabuf(const void *data, size_t size) {
-    long pg = sysconf(_SC_PAGESIZE);
-    size_t rounded = ((size + (size_t)pg - 1) / (size_t)pg) * (size_t)pg;
-    if (rounded == 0) {
-        rounded = (size_t)pg;
-    }
-    int mfd = memfd_create("drmtap-convert-test", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (mfd < 0) {
-        return -1;
-    }
-    if (ftruncate(mfd, (off_t)rounded) != 0 ||
-        write(mfd, data, size) != (ssize_t)size ||
-        fcntl(mfd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
-        close(mfd);
-        return -1;
-    }
-    int ctrl = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
-    if (ctrl < 0) {
-        close(mfd);
-        return -1;  /* udmabuf not available -> caller skips */
-    }
-    struct udmabuf_create create;
-    memset(&create, 0, sizeof(create));
-    create.memfd = (__u32)mfd;
-    create.flags = 0;
-    create.offset = 0;
-    create.size = rounded;
-    int dbuf = ioctl(ctrl, UDMABUF_CREATE, &create);
-    close(ctrl);
-    close(mfd);  /* udmabuf holds its own reference on the pages */
-    return dbuf;  /* dma-buf fd, or -1 on ioctl failure */
+    return drmtap_udmabuf_make(data, size);
 }
 
 static void test_null_args(void) {
