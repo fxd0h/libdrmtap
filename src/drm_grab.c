@@ -1047,6 +1047,18 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
     if (ret != 0) {
         return ret;
     }
+    /* The split model ships the dma_buf_fd to another process, so a grab that
+     * produced pixels instead of a transferable fd (the helper V2 pixel
+     * fallback sets frame->dma_buf_fd = -1) yields a descriptor the receiver
+     * cannot convert — its fb_id is not valid across the process boundary
+     * either. Fail closed rather than hand back an untransferable descriptor. */
+    if (frame->dma_buf_fd < 0) {
+        drmtap_set_error(ctx,
+            "grab_desc needs a transferable DMA-BUF fd; this capture path "
+            "returned pixels only (no exportable dma-buf)");
+        drmtap_frame_release(ctx, frame);
+        return -ENOTSUP;
+    }
     /* Snapshot the full descriptor. The plane layout and HDR state are cached
      * on ctx during do_grab (from GetFB2 and the connector metadata) — they are
      * NOT in frame_info, which is exactly why a split exporter needs this call

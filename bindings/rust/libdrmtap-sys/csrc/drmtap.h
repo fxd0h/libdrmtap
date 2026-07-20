@@ -276,10 +276,15 @@ typedef struct {
  *
  * @p frame is also populated (same as drmtap_grab) and OWNS the resources:
  * release it with drmtap_frame_release() once the fd has been sent. @p desc is
- * a plain value snapshot (safe to serialize over IPC); it borrows nothing.
+ * a metadata snapshot safe to serialize over IPC, with ONE caveat: desc.dma_buf_fd
+ * is an integer valid only in THIS (exporter) process — it aliases @p frame's fd.
+ * Transfer the fd itself out of band (SCM_RIGHTS); on the receiving side the
+ * converter must OVERWRITE desc.dma_buf_fd with the fd number it received before
+ * calling drmtap_convert_dmabuf(), and owns/closes that received fd. Fails with
+ * -ENOTSUP if the capture path produced pixels but no transferable dma-buf.
  *
  * @param ctx   Capture context (a real KMS context from drmtap_open)
- * @param desc  Output descriptor (value type; ship over IPC)
+ * @param desc  Output descriptor (value type; ship over IPC, fixing up the fd)
  * @param frame Output frame — owns the dma_buf_fd; release when done
  * @return 0 on success, negative errno on error
  */
