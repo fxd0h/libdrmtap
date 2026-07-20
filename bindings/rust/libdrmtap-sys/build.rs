@@ -60,14 +60,17 @@ fn main() {
 
     build.compile("drmtap");
 
-    // System dependencies.
+    // System dependencies. EGL/GLESv2 are intentionally NOT linked: gpu_egl.c
+    // dlopen()s them lazily on first convert so a privileged process that
+    // never converts never maps the GPU stack (their headers are still needed
+    // at compile time).
     println!("cargo:rustc-link-lib=drm");
-    println!("cargo:rustc-link-lib=EGL");
-    println!("cargo:rustc-link-lib=GLESv2");
     println!("cargo:rustc-link-lib=seccomp");
     println!("cargo:rustc-link-lib=cap");
     // libm: HDR tone-mapping in pixel_convert.c uses pow()/tanh().
     println!("cargo:rustc-link-lib=m");
+    // libdl: only a real library pre-glibc-2.34; harmless (a stub) after.
+    println!("cargo:rustc-link-lib=dl");
 
     // Compile drmtap-helper as a standalone executable.
     // It inherits a socketpair fd from the parent, opens the DRM device with

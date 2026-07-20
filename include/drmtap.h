@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 4
-#define DRMTAP_VERSION_PATCH 8
+#define DRMTAP_VERSION_PATCH 9
 
 /**
  * @brief Get the library version as a packed integer.
@@ -200,6 +200,120 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * @param frame Frame to release
  */
 void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame);
+
+/* ========================================================================= */
+/* Split capture: privileged export + unprivileged convert                   */
+/* ========================================================================= */
+/*
+ * These entry points let a caller that already owns a privilege boundary
+ * (e.g. a root service + an unprivileged worker) run the DRM export and the
+ * GPU detile/convert in DIFFERENT processes, so the EGL/GLES and vendor GPU
+ * driver stack never load into the privileged one.
+ *
+ *   privileged side:   drmtap_open() + drmtap_grab()  -> dma_buf_fd + metadata
+ *                      (minimal DRM ops only; libEGL/libGLESv2 are dlopen'd
+ *                       lazily on first convert, so a process that never
+ *                       converts never maps the GPU stack at all)
+ *   unprivileged side: drmtap_open_render() + drmtap_convert_dmabuf()
+ *                      (imports the fd, EGL-detiles, converts to linear RGBA)
+ *
+ * The fd + metadata are carried between the two processes by the caller
+ * (e.g. over a unix socket with SCM_RIGHTS) — libdrmtap does not impose a
+ * wire format.
+ */
+
+/* Electro-optical transfer function of a scanout, from the connector
+ * HDR_OUTPUT_METADATA infoframe (kernel/CTA-861 numbering). PQ means
+ * "tone-map this"; HLG currently gets the plain bit-depth reduction
+ * (PQ/HDR10 is the desktop norm). */
+#define DRMTAP_EOTF_SDR  0  /**< traditional gamma SDR (or no HDR metadata) */
+#define DRMTAP_EOTF_PQ   2  /**< SMPTE ST 2084 (HDR10) */
+#define DRMTAP_EOTF_HLG  3  /**< Hybrid Log-Gamma (BT.2100) */
+
+/**
+ * @brief Descriptor of an externally-supplied scanout DMA-BUF.
+ *
+ * Filled by the caller from what the privileged exporter produced
+ * (drmtap_grab() frame metadata plus the connector HDR state) and shipped
+ * over IPC. num_planes/offsets/pitches carry the auxiliary planes of
+ * compressed layouts (e.g. Intel CCS: main surface + CCS aux + clear-color);
+ * all planes live inside the one dma_buf_fd, as DRM GetFB2 reports them.
+ */
+typedef struct {
+    int dma_buf_fd;         /**< Scanout DMA-BUF. May be -1 for an fb_id this
+                                 context has already imported (see
+                                 drmtap_convert_dmabuf). */
+    uint32_t width;         /**< Frame width in pixels */
+    uint32_t height;        /**< Frame height in pixels */
+    uint32_t format;        /**< DRM fourcc of the scanout */
+    uint64_t modifier;      /**< DRM format modifier (tiling/compression) */
+    uint32_t fb_id;         /**< KMS framebuffer id — the import-once cache
+                                 key. 0 disables caching for this frame. */
+    uint32_t num_planes;    /**< Used entries in offsets/pitches (1..4);
+                                 0 is treated as 1 */
+    uint32_t offsets[4];    /**< Per-plane byte offsets into the DMA-BUF */
+    uint32_t pitches[4];    /**< Per-plane strides in bytes; pitches[0] is the
+                                 main surface stride */
+    uint32_t hdr_eotf;      /**< DRMTAP_EOTF_*: PQ triggers the HDR->SDR
+                                 tone-map during conversion */
+    uint32_t hdr_max_nits;  /**< Mastering/content peak luminance (cd/m2),
+                                 0 = unknown */
+} drmtap_dmabuf_desc;
+
+/**
+ * @brief Open an UNPRIVILEGED, render-only context for drmtap_convert_dmabuf().
+ *
+ * Opens a DRM render node only. It does NOT open a KMS card, spawn the
+ * privileged helper, or enumerate displays, and it needs no elevated
+ * capability. Grab entry points return -ENOTSUP on this context.
+ *
+ * @param render_node Render node path (e.g. "/dev/dri/renderD128"),
+ *                    or NULL to auto-select the first usable one.
+ * @return Context handle, or NULL on error (call drmtap_error(NULL) for message)
+ */
+drmtap_ctx *drmtap_open_render(const char *render_node);
+
+/**
+ * @brief Convert an externally-supplied scanout frame to linear RGBA.
+ *
+ * On success frame->data points to context-owned pixels valid until the next
+ * convert on this context or drmtap_close(). Do NOT free it and do NOT call
+ * drmtap_frame_release() on it — there is nothing per-frame to release.
+ * ALWAYS read the returned frame->format, ->stride and ->modifier to describe
+ * the buffer:
+ *   - the GPU (EGL) path normalizes every input to XRGB8888, stride width*4,
+ *     modifier LINEAR;
+ *   - the CPU fallback (used only when no EGL backend is available) also
+ *     returns LINEAR width*4 pixels, but may keep the source 8-bit channel
+ *     order (e.g. XBGR8888) in frame->format.
+ * A well-behaved caller reads frame->format/->stride rather than assuming a
+ * fixed layout.
+ *
+ * Import-once: the DMA-BUF import (EGLImage) is cached keyed by desc->fb_id
+ * plus the buffer's identity (its dma-buf inode), so a fb_id the compositor
+ * recycles onto a NEW buffer re-imports instead of serving stale pixels. The
+ * compositor cycles a small pool of framebuffers, so after the first few
+ * frames every convert hits the cache and no per-frame import happens. For a
+ * known fb_id desc->dma_buf_fd may be -1; whenever the fb_id is new — or was
+ * recycled — a valid fd must be supplied. The cached import holds its own
+ * reference on the buffer, so the caller may close its fd right after the
+ * call. DRMTAP_NO_IMAGE_CACHE=1 forces a fresh import per frame (debug aid).
+ *
+ * Threading: call convert AND drmtap_close for a given context from the SAME
+ * thread. The EGL state and its cached imports are thread-local; closing on a
+ * different thread cannot release them and would strand the cached buffers.
+ *
+ * When no GPU path is usable the conversion falls back to a CPU mmap +
+ * deswizzle of the fd (same pipeline as the in-process grab).
+ *
+ * @param ctx   Context from drmtap_open_render() (or any context with a
+ *              usable EGL backend)
+ * @param desc  Input frame descriptor (metadata from the exporter)
+ * @param frame Output frame (data/format/stride/modifier filled on return)
+ * @return 0 on success, negative errno on error
+ */
+int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
+                          drmtap_frame_info *frame);
 
 /* ========================================================================= */
 /* Cursor Capture                                                            */

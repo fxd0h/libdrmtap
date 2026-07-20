@@ -29,6 +29,13 @@
  *   - GL_OES_EGL_image_external
  */
 
+/* _GNU_SOURCE: expose POSIX types (ino_t via <sys/stat.h>) and syscall() under
+ * -std=c11 strict mode, matching the other translation units. Guarded because
+ * the Rust cc build passes -D_GNU_SOURCE on the command line. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -40,6 +47,9 @@
 
 #ifdef HAVE_EGL
 
+#include <dlfcn.h>
+#include <sys/stat.h>
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -49,12 +59,202 @@
 #include "drmtap_internal.h"
 
 /* ========================================================================= */
+/* Lazy runtime loading of libEGL / libGLESv2                                */
+/* ========================================================================= */
+/*
+ * libEGL and libGLESv2 are resolved with dlopen() on first use instead of
+ * being linked as DT_NEEDED, so the GPU userspace stack (and everything it
+ * drags in) is only mapped into processes that actually convert frames. In
+ * the split capture model the privileged exporter calls only
+ * drmtap_open()/drmtap_grab(), which never reach this backend, so the GL
+ * stack never loads into the privileged process.
+ *
+ * The handles are never dlclose()d: GL drivers install thread-local state and
+ * worker threads that do not survive an unload, and the per-thread contexts
+ * released by the TSD destructor can still run at thread exit. One-time load,
+ * process lifetime — the same lifetime a DT_NEEDED link had.
+ */
+
+#define DRMTAP_EGL_CORE_SYMBOLS(X) \
+    X(eglBindAPI) \
+    X(eglChooseConfig) \
+    X(eglCreateContext) \
+    X(eglDestroyContext) \
+    X(eglGetDisplay) \
+    X(eglGetError) \
+    X(eglGetProcAddress) \
+    X(eglInitialize) \
+    X(eglMakeCurrent)
+
+#define DRMTAP_GLES_CORE_SYMBOLS(X) \
+    X(glActiveTexture) \
+    X(glAttachShader) \
+    X(glBindAttribLocation) \
+    X(glBindFramebuffer) \
+    X(glBindTexture) \
+    X(glCompileShader) \
+    X(glCreateProgram) \
+    X(glCreateShader) \
+    X(glDeleteFramebuffers) \
+    X(glDeleteProgram) \
+    X(glDeleteShader) \
+    X(glDeleteTextures) \
+    X(glDisableVertexAttribArray) \
+    X(glDrawArrays) \
+    X(glEnableVertexAttribArray) \
+    X(glFinish) \
+    X(glFramebufferTexture2D) \
+    X(glGenFramebuffers) \
+    X(glGenTextures) \
+    X(glGetError) \
+    X(glGetProgramiv) \
+    X(glGetShaderiv) \
+    X(glGetUniformLocation) \
+    X(glLinkProgram) \
+    X(glReadPixels) \
+    X(glShaderSource) \
+    X(glTexImage2D) \
+    X(glTexParameteri) \
+    X(glUniform1f) \
+    X(glUniform1i) \
+    X(glUseProgram) \
+    X(glVertexAttribPointer) \
+    X(glViewport)
+
+/* One function pointer per symbol, typed from the real prototype in the EGL/
+ * GLES headers so a signature drift is a compile error. Declared BEFORE the
+ * name-routing defines below so __typeof__ sees the header declaration. */
+#define DRMTAP_DECLARE_GL_PFN(name) static __typeof__(name) *pfn_##name;
+DRMTAP_EGL_CORE_SYMBOLS(DRMTAP_DECLARE_GL_PFN)
+DRMTAP_GLES_CORE_SYMBOLS(DRMTAP_DECLARE_GL_PFN)
+#undef DRMTAP_DECLARE_GL_PFN
+
+static void *g_libegl_handle;
+static void *g_libgles_handle;
+static int g_gl_libs_state; /* 0 = not attempted, 1 = loaded, -1 = failed */
+
+/* dlopen libEGL + libGLESv2 and resolve every core symbol this file calls.
+ * Returns 0 when everything resolved, -1 otherwise (sticky either way).
+ * Thread-safe. NOTE: the # / ## operators suppress macro expansion of the
+ * symbol names, so this loader is immune to the name-routing defines below,
+ * but it must stay textually ABOVE them so the pfn_ declarations resolve. */
+static int load_gl_libraries(void) {
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lk);
+    if (g_gl_libs_state == 0) {
+        g_gl_libs_state = -1;
+        g_libegl_handle = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (!g_libegl_handle) {
+            g_libegl_handle = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+        }
+        g_libgles_handle = dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_LOCAL);
+        if (!g_libgles_handle) {
+            g_libgles_handle = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
+        }
+        if (g_libegl_handle && g_libgles_handle) {
+            int ok = 1;
+            /* *(void **)&pfn is the POSIX-documented way to store a dlsym
+             * result into a function pointer without the pedantic
+             * object-to-function pointer conversion warning. */
+#define DRMTAP_LOAD_EGL_SYM(name) \
+            *(void **)&pfn_##name = dlsym(g_libegl_handle, #name); \
+            if (!pfn_##name) ok = 0;
+#define DRMTAP_LOAD_GLES_SYM(name) \
+            *(void **)&pfn_##name = dlsym(g_libgles_handle, #name); \
+            if (!pfn_##name) ok = 0;
+            DRMTAP_EGL_CORE_SYMBOLS(DRMTAP_LOAD_EGL_SYM)
+            DRMTAP_GLES_CORE_SYMBOLS(DRMTAP_LOAD_GLES_SYM)
+#undef DRMTAP_LOAD_EGL_SYM
+#undef DRMTAP_LOAD_GLES_SYM
+            if (ok) {
+                g_gl_libs_state = 1;
+            }
+        }
+    }
+    int ret = g_gl_libs_state;
+    pthread_mutex_unlock(&lk);
+    return (ret == 1) ? 0 : -1;
+}
+
+/* Route every EGL/GLES call in the rest of this file through the loaded
+ * pointers while keeping the standard API names at the call sites (the same
+ * pattern GLAD-style loaders use). Anything below this point that names an
+ * EGL/GLES core function is calling through its pfn_ pointer. */
+#define eglBindAPI pfn_eglBindAPI
+#define eglChooseConfig pfn_eglChooseConfig
+#define eglCreateContext pfn_eglCreateContext
+#define eglDestroyContext pfn_eglDestroyContext
+#define eglGetDisplay pfn_eglGetDisplay
+#define eglGetError pfn_eglGetError
+#define eglGetProcAddress pfn_eglGetProcAddress
+#define eglInitialize pfn_eglInitialize
+#define eglMakeCurrent pfn_eglMakeCurrent
+#define glActiveTexture pfn_glActiveTexture
+#define glAttachShader pfn_glAttachShader
+#define glBindAttribLocation pfn_glBindAttribLocation
+#define glBindFramebuffer pfn_glBindFramebuffer
+#define glBindTexture pfn_glBindTexture
+#define glCompileShader pfn_glCompileShader
+#define glCreateProgram pfn_glCreateProgram
+#define glCreateShader pfn_glCreateShader
+#define glDeleteFramebuffers pfn_glDeleteFramebuffers
+#define glDeleteProgram pfn_glDeleteProgram
+#define glDeleteShader pfn_glDeleteShader
+#define glDeleteTextures pfn_glDeleteTextures
+#define glDisableVertexAttribArray pfn_glDisableVertexAttribArray
+#define glDrawArrays pfn_glDrawArrays
+#define glEnableVertexAttribArray pfn_glEnableVertexAttribArray
+#define glFinish pfn_glFinish
+#define glFramebufferTexture2D pfn_glFramebufferTexture2D
+#define glGenFramebuffers pfn_glGenFramebuffers
+#define glGenTextures pfn_glGenTextures
+#define glGetError pfn_glGetError
+#define glGetProgramiv pfn_glGetProgramiv
+#define glGetShaderiv pfn_glGetShaderiv
+#define glGetUniformLocation pfn_glGetUniformLocation
+#define glLinkProgram pfn_glLinkProgram
+#define glReadPixels pfn_glReadPixels
+#define glShaderSource pfn_glShaderSource
+#define glTexImage2D pfn_glTexImage2D
+#define glTexParameteri pfn_glTexParameteri
+#define glUniform1f pfn_glUniform1f
+#define glUniform1i pfn_glUniform1i
+#define glUseProgram pfn_glUseProgram
+#define glVertexAttribPointer pfn_glVertexAttribPointer
+#define glViewport pfn_glViewport
+
+/* ========================================================================= */
 /* EGL context (lazily initialized per drmtap_ctx)                           */
 /* ========================================================================= */
 
 /* Global EGL display (one per process, shared across threads) */
 static EGLDisplay g_egl_display = EGL_NO_DISPLAY;
 static int g_egl_display_initialized = 0;
+
+/* ── Import-once EGLImage cache (keyed by KMS fb_id) ── */
+/* The compositor scans out of a small pool of framebuffers (double/triple
+ * buffering), so the same fb_ids repeat every frame. Importing the DMA-BUF as
+ * an EGLImage once per fb_id — instead of create+destroy per frame — removes
+ * the biggest per-frame EGL cost. The cached EGLImage aliases the live
+ * scanout memory, so sampling it always reads the current frame content.
+ * Geometry is stored to detect a recycled fb_id (same id, new framebuffer)
+ * and re-import. An EGLImage keeps its underlying buffer alive, so at most
+ * DRMTAP_EGL_IMAGE_SLOTS scanout buffers are pinned per thread — the same
+ * order of pinning the fast-grab mmap slots already do. */
+#define DRMTAP_EGL_IMAGE_SLOTS 4
+typedef struct {
+    const drmtap_ctx *owner;    /* cache entries are per capture context */
+    uint32_t fb_id;             /* 0 = slot unused */
+    uint32_t width, height, stride, fourcc;
+    uint64_t modifier;
+    int      num_planes;
+    uint32_t offsets[4];
+    uint32_t pitches[4];
+    ino_t    buf_inode;         /* dma-buf inode = the real buffer identity;
+                                   0 = unknown (fd was -1 or fstat failed) */
+    EGLImageKHR image;
+    GLuint texture;             /* GL_TEXTURE_EXTERNAL_OES bound to image */
+} egl_image_slot_t;
 
 /* Per-thread EGL context and GL resources */
 typedef struct {
@@ -66,6 +266,9 @@ typedef struct {
     uint32_t tex_width;
     uint32_t tex_height;
     int initialized;
+    egl_image_slot_t image_slots[DRMTAP_EGL_IMAGE_SLOTS];
+    unsigned next_evict;  /* round-robin eviction cursor for image_slots */
+    int cache_disabled;   /* DRMTAP_NO_IMAGE_CACHE=1 */
 } egl_state_t;
 
 /* The per-thread EGL context + GL resources.
@@ -112,6 +315,13 @@ static PFNEGLDESTROYIMAGEKHRPROC pfn_eglDestroyImageKHR;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC pfn_glEGLImageTargetTexture2DOES;
 
 static int load_egl_procs(void) {
+    /* Bring in libEGL/libGLESv2 first — every EGL entry point in this file
+     * funnels through here (egl_init and drmtap_gpu_egl_available) before any
+     * EGL/GL call is made, so this is the single lazy-load chokepoint. */
+    if (load_gl_libraries() < 0) {
+        return -1;
+    }
+
     pfn_eglQueryDevicesEXT = (PFNEGLQUERYDEVICESEXTPROC)
         eglGetProcAddress("eglQueryDevicesEXT");
     pfn_eglQueryDeviceStringEXT = (PFNEGLQUERYDEVICESTRINGEXTPROC)
@@ -251,6 +461,11 @@ static GLuint create_program(void) {
 /* EGL display from DRM card path                                            */
 /* ========================================================================= */
 
+/* From EGL_EXT_device_drm_render_node; missing from older eglext.h. */
+#ifndef EGL_DRM_RENDER_NODE_FILE_EXT
+#define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
+#endif
+
 static EGLDisplay get_egl_display_for_card(const char *card_path) {
     if (!pfn_eglQueryDevicesEXT || !pfn_eglQueryDeviceStringEXT ||
         !pfn_eglGetPlatformDisplayEXT) {
@@ -273,9 +488,16 @@ static EGLDisplay get_egl_display_for_card(const char *card_path) {
 
     EGLDisplay display = EGL_NO_DISPLAY;
     for (int i = 0; i < num_devices; i++) {
+        /* Match either the card path (drmtap_open) or the render node path
+         * (drmtap_open_render) — a render-only context knows its GPU only by
+         * its /dev/dri/renderD* node. The render-node query returns NULL when
+         * the extension is absent, which just skips that comparison. */
         const char *drm_path = pfn_eglQueryDeviceStringEXT(
             devices[i], EGL_DRM_DEVICE_FILE_EXT);
-        if (drm_path && strcmp(drm_path, card_path) == 0) {
+        const char *render_path = pfn_eglQueryDeviceStringEXT(
+            devices[i], EGL_DRM_RENDER_NODE_FILE_EXT);
+        if ((drm_path && strcmp(drm_path, card_path) == 0) ||
+            (render_path && strcmp(render_path, card_path) == 0)) {
             display = pfn_eglGetPlatformDisplayEXT(
                 EGL_PLATFORM_DEVICE_EXT, devices[i], NULL);
             break;
@@ -380,6 +602,10 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     state->linear_texture = 0;
     state->tex_width = 0;
     state->tex_height = 0;
+    /* Escape hatch: DRMTAP_NO_IMAGE_CACHE=1 forces a fresh EGLImage import
+     * per frame (the pre-0.4.9 behaviour) for debugging driver oddities. */
+    const char *nocache = getenv("DRMTAP_NO_IMAGE_CACHE");
+    state->cache_disabled = (nocache && nocache[0] == '1');
     state->initialized = 1;
     /* Register the thread-exit backstop so a capture thread that dies without
      * drmtap_close() still frees this context (value must be non-NULL to arm the
@@ -397,12 +623,30 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     return 0;
 }
 
+/* Release one cached EGLImage slot (external texture + image). The caller
+ * must have the thread's EGL context current. Safe on an empty slot. */
+static void egl_image_slot_release(egl_state_t *st, egl_image_slot_t *slot) {
+    if (slot->texture) {
+        glDeleteTextures(1, &slot->texture);
+    }
+    if (slot->image != EGL_NO_IMAGE_KHR && pfn_eglDestroyImageKHR) {
+        pfn_eglDestroyImageKHR(st->display, slot->image);
+    }
+    memset(slot, 0, sizeof(*slot));
+}
+
 static void egl_cleanup(egl_state_t *st) {
     if (!st->initialized) {
         return;
     }
     eglMakeCurrent(st->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                    st->context);
+    /* Drop the fb_id EGLImage cache first: the GL textures need the context
+     * current, and the cached EGLImages pin the imported scanout buffers. */
+    for (int i = 0; i < DRMTAP_EGL_IMAGE_SLOTS; i++) {
+        egl_image_slot_release(st, &st->image_slots[i]);
+    }
+    st->next_evict = 0;
     if (st->linear_texture) {
         glDeleteTextures(1, &st->linear_texture);
     }
@@ -454,131 +698,14 @@ static void ensure_linear_texture(egl_state_t *state, uint32_t w, uint32_t h) {
     state->tex_height = h;
 }
 
-/* ========================================================================= */
-/* Public API                                                                */
-/* ========================================================================= */
-
-/**
- * Check if EGL detiling is available on this system.
- * Returns 1 if EGL + GLES are functional, 0 otherwise.
- */
-int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
-    /* EGL availability is a static property of the GPU, but this is called on
-     * every captured frame. Cache it once.
-     *
-     * CRITICAL: this must NOT call eglTerminate() on the display. The display
-     * returned by get_egl_display_for_card() is the SAME shared EGLDisplay used
-     * by the live detile contexts. Terminating it here — while another capture
-     * thread is mid-eglCreateImage — invalidates that thread's display and makes
-     * its detile fail with EGL_NOT_INITIALIZED, so it falls back to returning the
-     * raw tiled/compressed buffer (garbage/color corruption). Concurrent captures
-     * (e.g. two monitors viewed at once) hit this constantly. */
-    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
-    static int cached = -1;
-    pthread_mutex_lock(&lk);
-    if (cached < 0) {
-        if (load_egl_procs() < 0) {
-            cached = 0;
-        } else {
-            EGLDisplay display = get_egl_display_for_card(ctx->device_path);
-            if (display == EGL_NO_DISPLAY) {
-                cached = 0;
-            } else {
-                EGLint major, minor;
-                cached = eglInitialize(display, &major, &minor) ? 1 : 0;
-                /* Intentionally no eglTerminate(display) — see above. */
-            }
-        }
-    }
-    pthread_mutex_unlock(&lk);
-    return cached;
-}
-
-/**
- * Convert a tiled DMA-BUF framebuffer to linear RGBA pixels using EGL/GL.
- *
- * This is the universal GPU detiling path. The GPU driver handles its
- * own tiling format transparently when the DMA-BUF is imported as an
- * EGLImage with the correct modifier.
- *
- * @param ctx       Capture context
- * @param dma_buf_fd  DMA-BUF file descriptor
- * @param width     Framebuffer width
- * @param height    Framebuffer height
- * @param stride    Framebuffer stride (bytes per row)
- * @param fourcc    DRM fourcc format (e.g., DRM_FORMAT_XRGB8888)
- * @param modifier  DRM framebuffer modifier (tiling info)
- * @param out_data  Output: allocated linear RGBA buffer (caller must free)
- * @param out_size  Output: size of the allocated buffer
- * @return 0 on success, negative errno on error
- */
-static int egl_convert_impl(drmtap_ctx *ctx,
-                            int dma_buf_fd,
-                            uint32_t width, uint32_t height,
-                            uint32_t stride, uint32_t fourcc,
-                            uint64_t modifier,
-                            void **out_data, size_t *out_size);
-
-/* Public entry point: serialize GPU detiles across the whole process.
- *
- * Each capture runs on its own thread with its own thread-local EGL context, but
- * the GPU is the real bottleneck. When two 4K monitors are captured at once,
- * letting both detiles run concurrently makes each take longer (wall-clock) than
- * the compositor's page-flip interval, so the live scanout buffer is recycled
- * mid-read and the CCS-compressed result comes out as garbage/color corruption.
- * A single process-global lock keeps every detile short enough to complete within
- * one flip interval, which eliminates the corruption while each thread still owns
- * its EGL context. */
-int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
-                           int dma_buf_fd,
-                           uint32_t width, uint32_t height,
-                           uint32_t stride, uint32_t fourcc,
-                           uint64_t modifier,
-                           void **out_data, size_t *out_size) {
-    static pthread_mutex_t g_convert_lock = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&g_convert_lock);
-    int _ret = egl_convert_impl(ctx, dma_buf_fd, width, height, stride, fourcc,
-                                modifier, out_data, out_size);
-    pthread_mutex_unlock(&g_convert_lock);
-    return _ret;
-}
-
-static int egl_convert_impl(drmtap_ctx *ctx,
-                            int dma_buf_fd,
-                            uint32_t width, uint32_t height,
-                            uint32_t stride, uint32_t fourcc,
-                            uint64_t modifier,
-                            void **out_data, size_t *out_size) {
-    if (!out_data || !out_size) {
-        return -EINVAL;
-    }
-
-    /* Lazy-init this thread's EGL context. `state` is the file-scope
-     * thread-local defined above; it is freed by drmtap_gpu_egl_thread_cleanup()
-     * on close. (A `_Thread_local` is per-thread, so there is no cross-thread
-     * owner check to do here — each thread only ever sees its own instance.) */
-    int ret;
-
-    drmtap_debug_log(NULL, "EGL: state.initialized=%d", state.initialized);
-    if (!state.initialized) {
-        ret = egl_init(ctx, &state);
-        drmtap_debug_log(NULL, "EGL: egl_init returned %d", ret);
-        if (ret < 0) {
-            return ret;
-        }
-    }
-
-    /* Ensure display is initialized for this thread and context is current */
-    eglBindAPI(EGL_OPENGL_ES_API);
-    {
-        EGLint _maj, _min;
-        eglInitialize(state.display, &_maj, &_min);  /* no-op if already init */
-    }
-    if (!eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                        state.context)) {
-        drmtap_debug_log(NULL, "EGL: eglMakeCurrent in convert failed: 0x%x", eglGetError());
-    }
-
+/* Import a DMA-BUF as an EGLImage, retrying with progressively simpler
+ * attribute sets (XRGB8888 keeping the modifier, then XRGB8888 alone) the way
+ * some drivers need. CCS auxiliary planes come from ctx->fb2_*. Returns
+ * EGL_NO_IMAGE_KHR when every attempt failed. */
+static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t stride, uint32_t fourcc,
+                                     uint64_t modifier) {
     /* Build EGLImage attributes with DMA-BUF import */
     EGLint image_attribs[64];
     int ai = 0;
@@ -643,8 +770,6 @@ static int egl_convert_impl(drmtap_ctx *ctx,
 
     drmtap_debug_log(NULL, "EGL: tid=%lu creating EGLImage: fd=%d %ux%u stride=%u fourcc=0x%x mod=0x%lx ai=%d",
             (unsigned long)pthread_self(), dma_buf_fd, width, height, stride, fourcc, (unsigned long)modifier, ai);
-
-    /* eglMakeCurrent already done at function entry */
 
     /* Import DMA-BUF as EGLImage */
     EGLImageKHR image = pfn_eglCreateImageKHR(
@@ -716,13 +841,18 @@ static int egl_convert_impl(drmtap_ctx *ctx,
             drmtap_debug_log(NULL, "EGL: retry XRGB8888+nomod also FAILED: err=0x%x", eglGetError());
             drmtap_debug_log(ctx, "egl: all retries failed: 0x%x",
                              eglGetError());
-            return -EIO;
+            return EGL_NO_IMAGE_KHR;
         }
         drmtap_debug_log(NULL, "EGL: retry SUCCEEDED");
         drmtap_debug_log(ctx, "egl: retry succeeded");
     }
+    return image;
+}
 
-    /* Bind as GL_TEXTURE_EXTERNAL_OES — GPU handles detiling */
+/* Wrap an EGLImage in a GL_TEXTURE_EXTERNAL_OES texture (the GPU detiles
+ * transparently when sampling it). Leaves the texture bound on unit 0. */
+static int egl_make_external_texture(drmtap_ctx *ctx, EGLImageKHR image,
+                                     GLuint *out_texture) {
     GLuint ext_texture;
     glGenTextures(1, &ext_texture);
     glActiveTexture(GL_TEXTURE0);
@@ -741,8 +871,248 @@ static int egl_convert_impl(drmtap_ctx *ctx,
         drmtap_debug_log(ctx, "egl: glEGLImageTargetTexture2DOES failed: 0x%x",
                          gl_err);
         glDeleteTextures(1, &ext_texture);
-        pfn_eglDestroyImageKHR(state.display, image);
         return -EIO;
+    }
+    *out_texture = ext_texture;
+    return 0;
+}
+
+/* ========================================================================= */
+/* Public API                                                                */
+/* ========================================================================= */
+
+/**
+ * Check if EGL detiling is available on this system.
+ * Returns 1 if EGL + GLES are functional, 0 otherwise.
+ */
+int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
+    /* EGL availability is a static property of the GPU, but this is called on
+     * every captured frame. Cache it once.
+     *
+     * CRITICAL: this must NOT call eglTerminate() on the display. The display
+     * returned by get_egl_display_for_card() is the SAME shared EGLDisplay used
+     * by the live detile contexts. Terminating it here — while another capture
+     * thread is mid-eglCreateImage — invalidates that thread's display and makes
+     * its detile fail with EGL_NOT_INITIALIZED, so it falls back to returning the
+     * raw tiled/compressed buffer (garbage/color corruption). Concurrent captures
+     * (e.g. two monitors viewed at once) hit this constantly. */
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    static int cached = -1;
+    pthread_mutex_lock(&lk);
+    if (cached < 0) {
+        if (load_egl_procs() < 0) {
+            cached = 0;
+        } else {
+            EGLDisplay display = get_egl_display_for_card(ctx->device_path);
+            if (display == EGL_NO_DISPLAY) {
+                cached = 0;
+            } else {
+                EGLint major, minor;
+                cached = eglInitialize(display, &major, &minor) ? 1 : 0;
+                /* Intentionally no eglTerminate(display) — see above. */
+            }
+        }
+    }
+    pthread_mutex_unlock(&lk);
+    return cached;
+}
+
+/**
+ * Convert a tiled DMA-BUF framebuffer to linear RGBA pixels using EGL/GL.
+ *
+ * This is the universal GPU detiling path. The GPU driver handles its
+ * own tiling format transparently when the DMA-BUF is imported as an
+ * EGLImage with the correct modifier.
+ *
+ * @param ctx       Capture context
+ * @param dma_buf_fd  DMA-BUF file descriptor
+ * @param width     Framebuffer width
+ * @param height    Framebuffer height
+ * @param stride    Framebuffer stride (bytes per row)
+ * @param fourcc    DRM fourcc format (e.g., DRM_FORMAT_XRGB8888)
+ * @param modifier  DRM framebuffer modifier (tiling info)
+ * @param out_data  Output: allocated linear RGBA buffer (caller must free)
+ * @param out_size  Output: size of the allocated buffer
+ * @return 0 on success, negative errno on error
+ */
+static int egl_convert_impl(drmtap_ctx *ctx,
+                            int dma_buf_fd,
+                            uint32_t width, uint32_t height,
+                            uint32_t stride, uint32_t fourcc,
+                            uint64_t modifier, uint32_t fb_id,
+                            void **out_data, size_t *out_size);
+
+/* Public entry point: serialize GPU detiles across the whole process.
+ *
+ * Each capture runs on its own thread with its own thread-local EGL context, but
+ * the GPU is the real bottleneck. When two 4K monitors are captured at once,
+ * letting both detiles run concurrently makes each take longer (wall-clock) than
+ * the compositor's page-flip interval, so the live scanout buffer is recycled
+ * mid-read and the CCS-compressed result comes out as garbage/color corruption.
+ * A single process-global lock keeps every detile short enough to complete within
+ * one flip interval, which eliminates the corruption while each thread still owns
+ * its EGL context. */
+int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
+                           int dma_buf_fd,
+                           uint32_t width, uint32_t height,
+                           uint32_t stride, uint32_t fourcc,
+                           uint64_t modifier, uint32_t fb_id,
+                           void **out_data, size_t *out_size) {
+    static pthread_mutex_t g_convert_lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&g_convert_lock);
+    int _ret = egl_convert_impl(ctx, dma_buf_fd, width, height, stride, fourcc,
+                                modifier, fb_id, out_data, out_size);
+    pthread_mutex_unlock(&g_convert_lock);
+    return _ret;
+}
+
+static int egl_convert_impl(drmtap_ctx *ctx,
+                            int dma_buf_fd,
+                            uint32_t width, uint32_t height,
+                            uint32_t stride, uint32_t fourcc,
+                            uint64_t modifier, uint32_t fb_id,
+                            void **out_data, size_t *out_size) {
+    if (!ctx || !out_data || !out_size) {
+        return -EINVAL;
+    }
+
+    /* Lazy-init this thread's EGL context. `state` is the file-scope
+     * thread-local defined above; it is freed by drmtap_gpu_egl_thread_cleanup()
+     * on close. (A `_Thread_local` is per-thread, so there is no cross-thread
+     * owner check to do here — each thread only ever sees its own instance.) */
+    int ret;
+
+    drmtap_debug_log(NULL, "EGL: state.initialized=%d", state.initialized);
+    if (!state.initialized) {
+        ret = egl_init(ctx, &state);
+        drmtap_debug_log(NULL, "EGL: egl_init returned %d", ret);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    /* Ensure display is initialized for this thread and context is current */
+    eglBindAPI(EGL_OPENGL_ES_API);
+    {
+        EGLint _maj, _min;
+        eglInitialize(state.display, &_maj, &_min);  /* no-op if already init */
+    }
+    if (!eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        state.context)) {
+        drmtap_debug_log(NULL, "EGL: eglMakeCurrent in convert failed: 0x%x", eglGetError());
+    }
+
+    /* ── Import-once: EGLImage cache keyed by fb_id ── */
+    egl_image_slot_t *slot = NULL;
+    egl_image_slot_t *free_slot = NULL;
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    GLuint ext_texture = 0;
+    int use_cache = (fb_id != 0 && !state.cache_disabled);
+
+    /* Real buffer identity: a DMA-BUF has a unique inode that is stable across
+     * re-exports of the same underlying scanout BO and changes when the BO
+     * changes. KMS recycles a freed fb_id onto a brand-new BO that can have
+     * BYTE-IDENTICAL geometry, so geometry alone cannot tell "same fb, live
+     * buffer" from "same id, new buffer" — the inode can. Captured when a real
+     * fd is supplied; 0 (fd == -1, the known-cached contract, or fstat failed)
+     * means "trust fb_id + geometry". */
+    ino_t cur_inode = 0;
+    if (dma_buf_fd >= 0) {
+        struct stat st;
+        if (fstat(dma_buf_fd, &st) == 0) {
+            cur_inode = st.st_ino;
+        }
+    }
+
+    if (use_cache) {
+        for (int i = 0; i < DRMTAP_EGL_IMAGE_SLOTS; i++) {
+            egl_image_slot_t *s = &state.image_slots[i];
+            if (s->fb_id == 0) {
+                if (!free_slot) {
+                    free_slot = s;
+                }
+                continue;
+            }
+            if (s->fb_id != fb_id || s->owner != ctx) {
+                continue;
+            }
+            int geom_match =
+                (s->width == width && s->height == height &&
+                 s->stride == stride && s->fourcc == fourcc &&
+                 s->modifier == modifier &&
+                 s->num_planes == ctx->fb2_num_planes &&
+                 memcmp(s->offsets, ctx->fb2_offsets, sizeof(s->offsets)) == 0 &&
+                 memcmp(s->pitches, ctx->fb2_pitches, sizeof(s->pitches)) == 0);
+            /* Identity holds unless BOTH inodes are known and differ — i.e. a
+             * recycled fb_id on a new buffer. If either is unknown, geometry
+             * is the best signal we have and we trust it. */
+            int ident_match =
+                (cur_inode == 0 || s->buf_inode == 0 ||
+                 s->buf_inode == cur_inode);
+            if (geom_match && ident_match) {
+                slot = s;
+                break;
+            }
+            /* Different geometry, or same geometry but the buffer identity
+             * changed (fb_id recycled onto a new BO) — the cached import is
+             * stale. Drop it and reuse the slot for the fresh import. */
+            egl_image_slot_release(&state, s);
+            if (!free_slot) {
+                free_slot = s;
+            }
+        }
+    }
+
+    if (slot) {
+        /* Cache hit: the EGLImage aliases the live scanout buffer, so binding
+         * the cached external texture samples the CURRENT frame content — no
+         * re-import, no texture churn. */
+        image = slot->image;
+        ext_texture = slot->texture;
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, ext_texture);
+    } else {
+        if (dma_buf_fd < 0) {
+            drmtap_set_error(ctx, "egl: fb_id %u is not cached and no "
+                             "dma-buf fd was supplied", fb_id);
+            return -EINVAL;
+        }
+        image = egl_import_dmabuf(ctx, dma_buf_fd, width, height, stride,
+                                  fourcc, modifier);
+        if (image == EGL_NO_IMAGE_KHR) {
+            return -EIO;
+        }
+        ret = egl_make_external_texture(ctx, image, &ext_texture);
+        if (ret != 0) {
+            pfn_eglDestroyImageKHR(state.display, image);
+            return ret;
+        }
+        if (use_cache) {
+            /* Adopt the fresh import into a slot: reuse a free one, else
+             * round-robin evict (compositors cycle 2-3 buffers, so with 4
+             * slots eviction only happens on pathological flip patterns). */
+            egl_image_slot_t *dst = free_slot;
+            if (!dst) {
+                dst = &state.image_slots[state.next_evict %
+                                         DRMTAP_EGL_IMAGE_SLOTS];
+                state.next_evict++;
+                egl_image_slot_release(&state, dst);
+            }
+            dst->owner = ctx;
+            dst->fb_id = fb_id;
+            dst->width = width;
+            dst->height = height;
+            dst->stride = stride;
+            dst->fourcc = fourcc;
+            dst->modifier = modifier;
+            dst->num_planes = ctx->fb2_num_planes;
+            memcpy(dst->offsets, ctx->fb2_offsets, sizeof(dst->offsets));
+            memcpy(dst->pitches, ctx->fb2_pitches, sizeof(dst->pitches));
+            dst->buf_inode = cur_inode;
+            dst->image = image;
+            dst->texture = ext_texture;
+            slot = dst;
+        }
     }
 
     /* Ensure output texture */
@@ -798,14 +1168,18 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     /* Ensure GPU rendering is complete before reading back */
     glFinish();
 
-    /* Read linear pixels back */
+    /* Read linear pixels straight into the ctx-owned grow-once buffer
+     * (drmtap_ensure_buf caps it at DRMTAP_MAX_FB_BYTES), so steady-state
+     * conversion performs zero per-frame allocations. The buffer belongs to
+     * the context and is freed in drmtap_close(); callers must not free it. */
     size_t rgba_size = (size_t)width * height * 4;
-    void *pixels = malloc(rgba_size);
-    if (!pixels) {
-        ret = -ENOMEM;
+    ret = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
+                            rgba_size);
+    if (ret != 0) {
         goto cleanup;
     }
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                 ctx->deswizzle_buf);
     drmtap_debug_log(NULL, "EGL: glReadPixels done, gl_err=0x%x", glGetError());
 
     /* NOTE: CPU horizontal flip removed. The EGL DMA-BUF import with
@@ -813,7 +1187,7 @@ static int egl_convert_impl(drmtap_ctx *ctx,
      * orientation. The previous CPU flip was compensating for a shader-
      * based X flip (1.0 - v_texcoord.x) that has since been removed. */
 
-    *out_data = pixels;
+    *out_data = ctx->deswizzle_buf;
     *out_size = rgba_size;
     ret = 0;
 
@@ -823,8 +1197,13 @@ static int egl_convert_impl(drmtap_ctx *ctx,
 cleanup:
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
-    glDeleteTextures(1, &ext_texture);
-    pfn_eglDestroyImageKHR(state.display, image);
+    if (!slot) {
+        /* Uncached import (fb_id 0, or cache disabled): per-call lifetime,
+         * exactly the pre-cache behaviour. A cached import stays alive in its
+         * slot until eviction or egl_cleanup(). */
+        glDeleteTextures(1, &ext_texture);
+        pfn_eglDestroyImageKHR(state.display, image);
+    }
 
     /* The context stays current on this (capture) thread and is reused across
      * calls — each thread owns its own thread-local context. It is released by
@@ -845,10 +1224,10 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
                             int dma_buf_fd,
                             uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t fourcc,
-                            uint64_t modifier,
+                            uint64_t modifier, uint32_t fb_id,
                             void **out_data, size_t *out_size) {
     (void)ctx; (void)dma_buf_fd; (void)width; (void)height;
-    (void)stride; (void)fourcc; (void)modifier;
+    (void)stride; (void)fourcc; (void)modifier; (void)fb_id;
     (void)out_data; (void)out_size;
     drmtap_set_error(ctx, "EGL backend not available (built without EGL)");
     return -ENOTSUP;

@@ -279,6 +279,85 @@ fail:
     return NULL;
 }
 
+drmtap_ctx *drmtap_open_render(const char *render_node) {
+    drmtap_ctx *ctx = calloc(1, sizeof(drmtap_ctx));
+    if (!ctx) {
+        drmtap_set_error(NULL, "Failed to allocate context: %s",
+                         strerror(errno));
+        return NULL;
+    }
+
+    ctx->drm_fd = -1;
+    ctx->helper_pid = -1;
+    ctx->helper_fd = -1;
+    ctx->is_render_only = 1;
+    for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+        ctx->fast_slots[i].prime_fd = -1;
+    }
+
+    const char *dbg_env = getenv("DRMTAP_DEBUG");
+    if (dbg_env && dbg_env[0] == '1') {
+        ctx->debug = 1;
+    }
+
+    drmtap_debug_log(ctx, "drmtap v%d.%d.%d opening render-only (pid=%d uid=%d)",
+                     DRMTAP_VERSION_MAJOR, DRMTAP_VERSION_MINOR,
+                     DRMTAP_VERSION_PATCH, getpid(), getuid());
+
+    if (render_node && render_node[0]) {
+        snprintf(ctx->device_path, sizeof(ctx->device_path), "%s", render_node);
+        ctx->drm_fd = open(render_node, O_RDWR | O_CLOEXEC);
+        if (ctx->drm_fd < 0) {
+            drmtap_set_error(NULL, "Failed to open %s: %s",
+                             render_node, strerror(errno));
+            goto fail;
+        }
+    } else {
+        /* Auto-detect: first openable render node (render minors start at 128).
+         * No KMS probing here on purpose — a render node has no resources. */
+        for (int i = 128; i < 128 + 16; i++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/dev/dri/renderD%d", i);
+            int fd = open(path, O_RDWR | O_CLOEXEC);
+            if (fd >= 0) {
+                snprintf(ctx->device_path, sizeof(ctx->device_path),
+                         "%s", path);
+                ctx->drm_fd = fd;
+                break;
+            }
+        }
+        if (ctx->drm_fd < 0) {
+            drmtap_set_error(NULL,
+                "No DRM render node found (/dev/dri/renderD*)");
+            goto fail;
+        }
+    }
+
+    /* Same low-fd protection as drmtap_open: async runtimes can close/reuse
+     * low-numbered fds. */
+    {
+        int high_fd = fcntl(ctx->drm_fd, F_DUPFD_CLOEXEC, 100);
+        if (high_fd >= 0) {
+            close(ctx->drm_fd);
+            ctx->drm_fd = high_fd;
+        }
+    }
+
+    /* The driver name selects the CPU deswizzle fallback when EGL is out. */
+    detect_driver(ctx);
+
+    drmtap_debug_log(ctx, "render context opened: %s (%s)",
+                     ctx->device_path, ctx->driver_name);
+    return ctx;
+
+fail:
+    if (ctx->drm_fd >= 0) {
+        close(ctx->drm_fd);
+    }
+    free(ctx);
+    return NULL;
+}
+
 void drmtap_close(drmtap_ctx *ctx) {
     if (!ctx) {
         return;

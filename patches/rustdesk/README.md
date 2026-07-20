@@ -31,7 +31,7 @@ cargo build --release
 ## Based on
 
 - RustDesk v1.4.6
-- libdrmtap (this repo, `main` branch) — `scrap` pins `libdrmtap-sys = "0.4.8"`
+- libdrmtap (this repo, `main` branch) — `scrap` pins `libdrmtap-sys = "0.4.9"`
 
 ## Upstream status
 

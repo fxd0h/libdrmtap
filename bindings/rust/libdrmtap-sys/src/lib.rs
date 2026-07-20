@@ -77,6 +77,29 @@ pub struct drmtap_rect {
     pub h: u32,
 }
 
+/// Scanout EOTF (from the connector HDR_OUTPUT_METADATA, CTA-861 numbering)
+pub const DRMTAP_EOTF_SDR: u32 = 0;
+pub const DRMTAP_EOTF_PQ: u32 = 2;
+pub const DRMTAP_EOTF_HLG: u32 = 3;
+
+/// Descriptor of an externally-supplied scanout DMA-BUF (split capture):
+/// metadata from the privileged exporter shipped over IPC into
+/// drmtap_convert_dmabuf() on the unprivileged side.
+#[repr(C)]
+pub struct drmtap_dmabuf_desc {
+    pub dma_buf_fd: c_int,
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub modifier: u64,
+    pub fb_id: u32,
+    pub num_planes: u32,
+    pub offsets: [u32; 4],
+    pub pitches: [u32; 4],
+    pub hdr_eotf: u32,
+    pub hdr_max_nits: u32,
+}
+
 extern "C" {
     // Version
     pub fn drmtap_version() -> c_int;
@@ -84,6 +107,14 @@ extern "C" {
     // Context lifecycle
     pub fn drmtap_open(config: *const drmtap_config) -> *mut drmtap_ctx;
     pub fn drmtap_close(ctx: *mut drmtap_ctx);
+
+    // Split capture (privileged export + unprivileged convert)
+    pub fn drmtap_open_render(render_node: *const c_char) -> *mut drmtap_ctx;
+    pub fn drmtap_convert_dmabuf(
+        ctx: *mut drmtap_ctx,
+        desc: *const drmtap_dmabuf_desc,
+        frame: *mut drmtap_frame_info,
+    ) -> c_int;
 
     // Display enumeration
     pub fn drmtap_list_displays(
