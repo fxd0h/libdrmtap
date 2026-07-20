@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 4
-#define DRMTAP_VERSION_PATCH 10
+#define DRMTAP_VERSION_PATCH 11
 
 /**
  * @brief Get the library version as a packed integer.

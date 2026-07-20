@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('libdrmtap', 'c',
-    version: '0.4.10',
+    version: '0.4.11',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -147,14 +147,32 @@ lib_sources += files('src/cursor.c')
 
 lib_include = include_directories('include', 'src')
 
-libdrmtap = library('drmtap',
+# Export ONLY the public API from the shared object (the one the privileged
+# service dlopen()s): a linker version script keeps every internal symbol
+# local. Guard on GNU-ld support so a toolchain without --version-script still
+# builds (it just exports the default symbol set there).
+version_script = meson.current_source_dir() / 'libdrmtap.map'
+libdrmtap_link_args = []
+if cc.has_link_argument('-Wl,--version-script,' + version_script)
+    libdrmtap_link_args += '-Wl,--version-script,' + version_script
+endif
+
+# Build BOTH a shared and a static library from one compile. The shared object
+# (the artifact the privileged service dlopen()s) is locked down to the public
+# ABI by the version script above. The static archive keeps every symbol so the
+# white-box unit tests can reach internal helpers (e.g. drmtap_convert_rgb16);
+# the version script does not apply to an `ar` archive.
+libdrmtap_both = both_libraries('drmtap',
     lib_sources,
     include_directories: lib_include,
     dependencies: lib_deps,
     version: meson.project_version(),
     soversion: '0',
+    link_args: libdrmtap_link_args,
+    link_depends: 'libdrmtap.map',
     install: true,
 )
+libdrmtap = libdrmtap_both.get_shared_lib()
 
 # Install the public header
 install_headers('include/drmtap.h')
@@ -167,9 +185,17 @@ pkg.generate(libdrmtap,
     url: 'https://github.com/fxd0h/libdrmtap',
 )
 
-# Declare dependency for subproject use
+# Public dependency (shared, version-scripted): examples/subprojects link this
+# and can only reach the public API.
 libdrmtap_dep = declare_dependency(
     link_with: libdrmtap,
+    include_directories: lib_include,
+)
+
+# Test-only dependency (static, full symbols): unit tests white-box internal
+# helpers not part of the public ABI.
+libdrmtap_test_dep = declare_dependency(
+    link_with: libdrmtap_both.get_static_lib(),
     include_directories: lib_include,
 )
 
@@ -238,41 +264,43 @@ endif # build_helper
 # Tests
 # ============================================================================
 
+# Unit/integration tests link the STATIC lib (libdrmtap_test_dep) so they can
+# white-box internal helpers the version-scripted .so no longer exports.
 test_enumerate = executable('test_enumerate',
     'tests/test_enumerate.c',
-    dependencies: [libdrmtap_dep, libdrm_dep],
+    dependencies: [libdrmtap_test_dep, libdrm_dep],
     include_directories: lib_include,
 )
 
 test_capture = executable('test_capture',
     'tests/test_capture.c',
-    dependencies: [libdrmtap_dep, libdrm_dep],
+    dependencies: [libdrmtap_test_dep, libdrm_dep],
     include_directories: lib_include,
 )
 
 test_formats = executable('test_formats',
     'tests/test_formats.c',
-    dependencies: [libdrmtap_dep],
+    dependencies: [libdrmtap_test_dep],
     include_directories: lib_include,
 )
 test_deswizzle = executable('test_deswizzle',
     'tests/test_deswizzle.c',
-    dependencies: [libdrmtap_dep],
+    dependencies: [libdrmtap_test_dep],
     include_directories: lib_include,
 )
 test_helper = executable('test_helper',
     'tests/test_helper.c',
-    dependencies: [libdrmtap_dep],
+    dependencies: [libdrmtap_test_dep],
     include_directories: lib_include,
 )
 test_hdr = executable('test_hdr',
     'tests/test_hdr.c',
-    dependencies: [libdrmtap_dep, m_dep],
+    dependencies: [libdrmtap_test_dep, m_dep],
     include_directories: lib_include,
 )
 test_convert = executable('test_convert',
     'tests/test_convert.c',
-    dependencies: [libdrmtap_dep],
+    dependencies: [libdrmtap_test_dep],
     include_directories: lib_include,
 )
 # Wire-protocol tests are self-contained (socketpair + fake peer, no DRM, no

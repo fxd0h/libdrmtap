@@ -9,7 +9,7 @@
 // captured 1920x1017 @ BGRA, 7,810,560 bytes — pixel-perfect.
 //
 // To use in RustDesk:
-//   Add `libdrmtap-sys = { version = "0.4.10", optional = true }` to
+//   Add `libdrmtap-sys = { version = "0.4.11", optional = true }` to
 //   libs/scrap/Cargo.toml, place this file at libs/scrap/src/common/drm.rs,
 //   and see mod.rs in this directory for the wiring. The canonical, current
 //   backend is in the upstream PR rustdesk/rustdesk#15420.
