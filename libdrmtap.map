@@ -1,0 +1,33 @@
+# Exported ABI for libdrmtap.so — the public entry points from include/drmtap.h
+# and NOTHING else. Every internal cross-module symbol (drmtap_set_error,
+# drmtap_gpu_*_process, drmtap_helper_*, drmtap_ensure_buf, ...) is made local,
+# so it cannot be resolved via dlsym from another module. This shrinks the
+# attack/ABI surface of the .so that the privileged service dlopen()s — the
+# hardening item raised in review. A new public function MUST be added here or
+# a consumer link will fail (that link error is the intended drift alarm).
+LIBDRMTAP_0.4 {
+    global:
+        drmtap_version;
+        drmtap_open;
+        drmtap_open_render;
+        drmtap_close;
+        drmtap_list_displays;
+        drmtap_displays_changed;
+        drmtap_grab;
+        drmtap_grab_mapped;
+        drmtap_grab_mapped_fast;
+        drmtap_grab_desc;
+        drmtap_convert_dmabuf;
+        drmtap_frame_release;
+        drmtap_get_cursor;
+        drmtap_cursor_release;
+        drmtap_error;
+        drmtap_gpu_driver;
+        drmtap_drm_fd;
+        drmtap_deswizzle;
+        drmtap_convert_format;
+        drmtap_tonemap_hdr10;
+        drmtap_diff_frames;
+    local:
+        *;
+};
