@@ -13,6 +13,13 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
   `drmtap_gpu_*_process`, `drmtap_helper_*`, `drmtap_ensure_buf`,
   `drmtap_convert_rgb16` and friends are no longer dlsym-able from the shared
   object the privileged service loads.
+- The shared object gets the same exploit mitigations as the privileged helper:
+  full RELRO (`-z relro -z now`), `_FORTIFY_SOURCE=2`, and an explicit
+  stack-protector.
+- `DRM_DEVICE` is honored only for an unprivileged process. A root capture
+  service now ignores it and uses the explicit config path or KMS
+  auto-detection, so an environment variable cannot redirect which device the
+  privileged process opens.
 
 ### Changed
 - Built as both a shared object (version-scripted, installed, the one loaded via

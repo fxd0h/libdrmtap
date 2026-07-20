@@ -68,8 +68,16 @@ void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...) {
 static int open_drm_auto(drmtap_ctx *ctx) {
     char path[64];
 
-    /* Check DRM_DEVICE env var first */
-    const char *env_dev = getenv("DRM_DEVICE");
+    /* Check DRM_DEVICE env var first, but ONLY when unprivileged. A privileged
+     * capture service (root / effective-root, e.g. the unattended --service)
+     * must not let an attacker-influenceable environment variable redirect which
+     * device it opens; it relies on the explicit config device_path or the KMS
+     * auto-scan below instead. DRM_DEVICE stays honored for unprivileged test /
+     * dev runs. */
+    const char *env_dev = NULL;
+    if (getuid() != 0 && geteuid() != 0) {
+        env_dev = getenv("DRM_DEVICE");
+    }
     if (env_dev) {
         drmtap_debug_log(ctx, "trying DRM_DEVICE=%s", env_dev);
         int fd = open(env_dev, O_RDWR | O_CLOEXEC);
