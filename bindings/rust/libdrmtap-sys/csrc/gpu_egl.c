@@ -1131,11 +1131,12 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     glUniform1i(glGetUniformLocation(state.program, "image"), 0);
 
     /* HDR10 scanout: tone-map PQ/BT.2020 -> SDR in the shader. eotf/peak come
-     * from the connector HDR_OUTPUT_METADATA (carried on ctx). */
-    int hdr_on = (ctx && ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
+     * from the connector HDR_OUTPUT_METADATA (carried on ctx). ctx is
+     * non-NULL here — the function returns -EINVAL up top otherwise. */
+    int hdr_on = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
     glUniform1i(glGetUniformLocation(state.program, "u_hdr"), hdr_on);
     {
-        uint32_t mn = (ctx && ctx->cur_hdr_max_nits > 0)
+        uint32_t mn = (ctx->cur_hdr_max_nits > 0)
                           ? ctx->cur_hdr_max_nits : 1000u;
         glUniform1f(glGetUniformLocation(state.program, "u_peak_n"),
                     (float)((double)mn / 203.0));
