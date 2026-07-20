@@ -16,7 +16,7 @@
 
 ### Integration path for each:
 
-**RustDesk**: `cargo add libdrmtap-sys` — both crates published on crates.io (`libdrmtap-sys` 0.4.8 + `libdrmtap` 0.3.4). RustDesk adds it as an optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`. **Now in review**: upstream PR [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) adds a `drm` capture backend to `scrap` on top of `libdrmtap-sys` and is under maintainer review (in progress — not merged). A self-contained reference backend also lives in `contrib/integrations/rustdesk/`.
+**RustDesk**: `cargo add libdrmtap-sys` — both crates published on crates.io (`libdrmtap-sys` 0.4.9 + `libdrmtap` 0.3.4). RustDesk adds it as an optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`. **Now in review**: upstream PR [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) adds a `drm` capture backend to `scrap` on top of `libdrmtap-sys` and is under maintainer review (in progress — not merged). A self-contained reference backend also lives in `contrib/integrations/rustdesk/`.
 
 **Sunshine**: Replace internal KMS code with `#include <drmtap.h>`. They already use DMA-BUF → VAAPI pipeline, so `drmtap_grab()` (zero-copy) slots in directly.
 
