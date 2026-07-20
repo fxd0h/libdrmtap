@@ -1580,12 +1580,17 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
             fd_size = st.st_size;
         }
     }
-    if (fd_size > 0 &&
+    /* Fail CLOSED: if the size cannot be determined (fd_size <= 0, e.g. a dma-buf
+     * whose backend supports neither llseek nor a per-inode fstat), reject
+     * rather than mmap+read a buffer we cannot bound (which could fault). Every
+     * real scanout dma-buf on a supported kernel reports its size via lseek, so
+     * this rejects only pathological/unknown-size fds, never a legitimate frame. */
+    if (fd_size <= 0 ||
         (uint64_t)desc->offsets[0] + (uint64_t)map_size > (uint64_t)fd_size) {
         dmabuf_sync_end(desc->dma_buf_fd);
-        drmtap_set_error(ctx, "convert: dma-buf too small for the declared "
-                         "geometry (buffer %lld bytes, need offset %u + %zu)",
-                         (long long)fd_size, desc->offsets[0], map_size);
+        drmtap_set_error(ctx, "convert: dma-buf size unknown or too small for the "
+                         "declared geometry (buffer %lld bytes, need offset %u "
+                         "+ %zu)", (long long)fd_size, desc->offsets[0], map_size);
         return -EINVAL;
     }
     void *mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED,

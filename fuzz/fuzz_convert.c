@@ -12,10 +12,11 @@
  *        convert boundary that treats its descriptor as UNTRUSTED IPC input.
  *
  * The fuzzer drives a hostile drmtap_dmabuf_desc (geometry, num_planes,
- * per-plane offsets/pitches, format, modifier, HDR state) together with a
- * memfd-backed fd of arbitrary size. An EGL import of a non-dma-buf fd fails,
- * so conversion falls to the CPU mmap + deswizzle/reduce path that reads the
- * untrusted geometry. Under ASan, any out-of-bounds access, overflow, or crash
+ * per-plane offsets/pitches, format, modifier, HDR state) together with a REAL
+ * dma-buf of arbitrary size (a sealed memfd wrapped by udmabuf, since the
+ * convert path now rejects non-dma-buf fds), and forces the CPU mmap +
+ * deswizzle/reduce path via DRMTAP_NO_EGL=1 (that is where the untrusted
+ * geometry is read). Under ASan, any out-of-bounds access, overflow, or crash
  * on a malformed descriptor is a finding. A well-behaved boundary either
  * returns a negative errno or converts safely for every input.
  *
