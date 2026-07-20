@@ -293,11 +293,29 @@ static void test_hdr_pq_xr30(drmtap_ctx *ctx) {
     desc.hdr_eotf = DRMTAP_EOTF_PQ;
     desc.hdr_max_nits = 1000;
 
+    /* Baseline: the SAME 10-bit pixel reduced WITHOUT HDR (plain 10->8). Keep
+     * a copy — the next convert overwrites the ctx-owned output buffer. */
+    desc.hdr_eotf = DRMTAP_EOTF_SDR;
+    desc.hdr_max_nits = 0;
+    int r_sdr = drmtap_convert_dmabuf(ctx, &desc, &frame);
+    uint32_t sdr_px = (r_sdr == 0 && frame.data)
+                          ? (((const uint32_t *)frame.data)[0] & 0x00FFFFFFu) : 0;
+
+    /* HDR10 (PQ) tone-map of the same pixel. */
+    desc.hdr_eotf = DRMTAP_EOTF_PQ;
+    desc.hdr_max_nits = 1000;
     int ret = drmtap_convert_dmabuf(ctx, &desc, &frame);
     check(ret == 0, "HDR10 (PQ) XR30 convert succeeds");
     if (ret == 0) {
         check(frame.format == FMT_XR24, "tone-mapped output is XRGB8888");
         check(frame.data != NULL, "tone-mapped pixels returned");
+        uint32_t pq_px = frame.data
+                             ? (((const uint32_t *)frame.data)[0] & 0x00FFFFFFu) : 0;
+        /* The whole point of the PQ path: it must NOT collapse to the plain
+         * bit-depth reduction. If HDR metadata were ignored, pq_px == sdr_px
+         * and this fails — which is exactly the broken-HDR regression to catch. */
+        check(r_sdr == 0 && pq_px != sdr_px,
+              "PQ tone-map differs from the plain SDR reduction (HDR path engaged)");
     }
     close(fd);
 }
