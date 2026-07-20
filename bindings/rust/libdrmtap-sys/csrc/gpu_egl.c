@@ -886,6 +886,13 @@ static int egl_make_external_texture(drmtap_ctx *ctx, EGLImageKHR image,
  * Returns 1 if EGL + GLES are functional, 0 otherwise.
  */
 int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
+    /* Escape hatch: DRMTAP_NO_EGL=1 forces the CPU deswizzle/convert path (used
+     * to exercise or debug it, and by the convert tests/fuzzer which target the
+     * untrusted-descriptor handling that lives on the CPU side). */
+    const char *no_egl = getenv("DRMTAP_NO_EGL");
+    if (no_egl && no_egl[0] == '1') {
+        return 0;
+    }
     /* EGL availability is a static property of the GPU, but this is called on
      * every captured frame. Cache it once.
      *

@@ -26,8 +26,23 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <linux/types.h>
 
 #include "drmtap.h"
+
+/* udmabuf: wrap a sealed memfd in a real, immutable DMA-BUF. Defined inline so
+ * the test does not depend on a linux/udmabuf.h that older build headers lack. */
+#ifndef UDMABUF_CREATE
+struct udmabuf_create {
+    __u32 memfd;
+    __u32 flags;
+    __u64 offset;
+    __u64 size;
+};
+#define UDMABUF_CREATE _IOW('u', 0x42, struct udmabuf_create)
+#endif
 
 static int failures = 0;
 
@@ -44,19 +59,42 @@ static void check(int cond, const char *what) {
 #define FMT_XR24 0x34325258u /* XRGB8888 */
 #define FMT_XR30 0x30335258u /* XRGB2101010 */
 
-/* A memfd filled with `size` bytes of `data` stands in for a linear DMA-BUF:
- * the library mmaps it PROT_READ/MAP_SHARED exactly like a real fd, and the
- * DMA_BUF_IOCTL_SYNC calls fail silently (they are best-effort). */
-static int make_pixel_memfd(const void *data, size_t size) {
-    int fd = memfd_create("drmtap-convert-test", MFD_CLOEXEC);
-    if (fd < 0) {
+/* A REAL DMA-BUF backed by `size` bytes of `data`: a page-sized sealed memfd
+ * wrapped by udmabuf. drmtap_convert_dmabuf now requires a genuine dma-buf (it
+ * refuses to mmap an untrusted non-dma-buf fd), so a plain memfd would be
+ * rejected; udmabuf gives an immutable dma-buf the converter accepts. Returns
+ * the dma-buf fd, or -1 when /dev/udmabuf is unavailable (the caller SKIPs). */
+static int make_pixel_dmabuf(const void *data, size_t size) {
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t rounded = ((size + (size_t)pg - 1) / (size_t)pg) * (size_t)pg;
+    if (rounded == 0) {
+        rounded = (size_t)pg;
+    }
+    int mfd = memfd_create("drmtap-convert-test", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (mfd < 0) {
         return -1;
     }
-    if (write(fd, data, size) != (ssize_t)size) {
-        close(fd);
+    if (ftruncate(mfd, (off_t)rounded) != 0 ||
+        write(mfd, data, size) != (ssize_t)size ||
+        fcntl(mfd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
+        close(mfd);
         return -1;
     }
-    return fd;
+    int ctrl = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
+    if (ctrl < 0) {
+        close(mfd);
+        return -1;  /* udmabuf not available -> caller skips */
+    }
+    struct udmabuf_create create;
+    memset(&create, 0, sizeof(create));
+    create.memfd = (__u32)mfd;
+    create.flags = 0;
+    create.offset = 0;
+    create.size = rounded;
+    int dbuf = ioctl(ctrl, UDMABUF_CREATE, &create);
+    close(ctrl);
+    close(mfd);  /* udmabuf holds its own reference on the pages */
+    return dbuf;  /* dma-buf fd, or -1 on ioctl failure */
 }
 
 static void test_null_args(void) {
@@ -110,6 +148,29 @@ static void test_desc_validation(drmtap_ctx *ctx) {
     desc.pitches[0] = 256; /* only 64 px wide, but width says 4096 */
     check(drmtap_convert_dmabuf(ctx, &desc, &frame) == -EINVAL,
           "stride smaller than width*bpp rejected");
+
+    /* Untrusted geometry vs the real fd size: a descriptor that claims a frame
+     * larger than the fd actually backs must be rejected, not mmap'd and read
+     * past the fd (which faults with SIGBUS). Regression for a DoS the convert
+     * fuzzer found. */
+    {
+        enum { SW = 64, SH = 16 };
+        static uint32_t small[SW * SH]; /* fd backs only SW*SH*4 bytes */
+        int fd = make_pixel_dmabuf(small, sizeof(small));
+        if (fd >= 0) {
+            memset(&desc, 0, sizeof(desc));
+            desc.dma_buf_fd = fd;
+            desc.width = SW;
+            desc.height = SH * 100;   /* claims 100x the backed height */
+            desc.format = FMT_XR24;
+            desc.modifier = 0;
+            desc.num_planes = 1;
+            desc.pitches[0] = SW * 4; /* passes the width*bpp guard */
+            check(drmtap_convert_dmabuf(ctx, &desc, &frame) == -EINVAL,
+                  "dma-buf smaller than declared geometry rejected (no SIGBUS)");
+            close(fd);
+        }
+    }
 }
 
 static void test_padded_stride_passthrough(drmtap_ctx *ctx) {
@@ -125,9 +186,9 @@ static void test_padded_stride_passthrough(drmtap_ctx *ctx) {
                 (x < W) ? (0xFF000000u | (y << 8) | x) : 0xDEADBEEFu;
         }
     }
-    int fd = make_pixel_memfd(src, sizeof(src));
+    int fd = make_pixel_dmabuf(src, sizeof(src));
     if (fd < 0) {
-        printf("  SKIP: memfd_create failed\n");
+        printf("  SKIP: no udmabuf / dma-buf source\n");
         return;
     }
 
@@ -191,9 +252,9 @@ static void test_linear_xrgb8888(drmtap_ctx *ctx) {
             src[y * W + x] = 0xAA000000u | (y << 16) | x;
         }
     }
-    int fd = make_pixel_memfd(src, sizeof(src));
+    int fd = make_pixel_dmabuf(src, sizeof(src));
     if (fd < 0) {
-        printf("  SKIP: memfd_create failed\n");
+        printf("  SKIP: no udmabuf / dma-buf source\n");
         return;
     }
 
@@ -240,9 +301,9 @@ static void test_linear_xr30(drmtap_ctx *ctx) {
     for (int i = 0; i < W * H; i++) {
         src[i] = px;
     }
-    int fd = make_pixel_memfd(src, sizeof(src));
+    int fd = make_pixel_dmabuf(src, sizeof(src));
     if (fd < 0) {
-        printf("  SKIP: memfd_create failed\n");
+        printf("  SKIP: no udmabuf / dma-buf source\n");
         return;
     }
 
@@ -278,9 +339,9 @@ static void test_hdr_pq_xr30(drmtap_ctx *ctx) {
     for (int i = 0; i < W * H; i++) {
         src[i] = px;
     }
-    int fd = make_pixel_memfd(src, sizeof(src));
+    int fd = make_pixel_dmabuf(src, sizeof(src));
     if (fd < 0) {
-        printf("  SKIP: memfd_create failed\n");
+        printf("  SKIP: no udmabuf / dma-buf source\n");
         return;
     }
 
@@ -327,6 +388,11 @@ static void test_hdr_pq_xr30(drmtap_ctx *ctx) {
 
 int main(void) {
     printf("test_convert: split-capture convert API\n");
+
+    /* Force the CPU deswizzle/convert path: it is where the untrusted-descriptor
+     * handling under test lives. A udmabuf-backed dma-buf is a real dma-buf EGL
+     * would otherwise import and detile on the GPU, bypassing this code. */
+    setenv("DRMTAP_NO_EGL", "1", 1);
 
     test_null_args();
 
