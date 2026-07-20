@@ -104,6 +104,7 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.4.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.12
 [0.4.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.11
 [0.4.10]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.10
 [0.4.9]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.9
