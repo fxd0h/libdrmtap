@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('libdrmtap', 'c',
-    version: '0.4.9',
+    version: '0.4.10',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -322,6 +322,16 @@ executable('screenshot',
 
 executable('stream',
     'examples/stream.c',
+    dependencies: [libdrmtap_dep],
+    include_directories: lib_include,
+    install: false,
+)
+
+# Split-capture reference: privileged export + unprivileged convert across a
+# process boundary (fork + SCM_RIGHTS fd-pass). Exercises drmtap_grab_desc +
+# drmtap_open_render + drmtap_convert_dmabuf end to end.
+executable('split_capture',
+    'examples/split_capture.c',
     dependencies: [libdrmtap_dep],
     include_directories: lib_include,
     install: false,

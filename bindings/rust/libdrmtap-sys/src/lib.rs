@@ -110,6 +110,11 @@ extern "C" {
 
     // Split capture (privileged export + unprivileged convert)
     pub fn drmtap_open_render(render_node: *const c_char) -> *mut drmtap_ctx;
+    pub fn drmtap_grab_desc(
+        ctx: *mut drmtap_ctx,
+        desc: *mut drmtap_dmabuf_desc,
+        frame: *mut drmtap_frame_info,
+    ) -> c_int;
     pub fn drmtap_convert_dmabuf(
         ctx: *mut drmtap_ctx,
         desc: *const drmtap_dmabuf_desc,
