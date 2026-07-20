@@ -11,7 +11,7 @@ clang -g -O1 -std=c11 \
     -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L \
     -DHAVE_EGL=1 -DHAVE_SECCOMP=1 -DHAVE_LIBCAP=1 \
     $(pkg-config --cflags libdrm) \
-    -I "$here/include" -I "$here/src" \
+    -I "$here/include" -I "$here/src" -I "$here/tests" \
     "$here"/src/*.c "$here"/fuzz/fuzz_convert.c \
     $(pkg-config --libs libdrm) -ldl -lm -lseccomp -lcap \
     -o "$out"
