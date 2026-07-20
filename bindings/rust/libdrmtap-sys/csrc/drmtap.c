@@ -313,9 +313,11 @@ drmtap_ctx *drmtap_open_render(const char *render_node) {
             goto fail;
         }
     } else {
-        /* Auto-detect: first openable render node (render minors start at 128).
-         * No KMS probing here on purpose — a render node has no resources. */
-        for (int i = 128; i < 128 + 16; i++) {
+        /* Auto-detect: first openable render node. DRM render minors span the
+         * whole 128..191 range (up to 64 nodes on a multi-GPU box), so scan all
+         * of it — a valid device can sit above renderD143. No KMS probing here
+         * on purpose: a render node has no resources. */
+        for (int i = 128; i < 128 + 64; i++) {
             char path[64];
             snprintf(path, sizeof(path), "/dev/dri/renderD%d", i);
             int fd = open(path, O_RDWR | O_CLOEXEC);
