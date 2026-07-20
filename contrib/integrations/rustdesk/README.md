@@ -7,7 +7,7 @@ crate.
 > The upstream integration PR
 > [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420)
 > is **under maintainer review** (in progress — not yet merged). It adds a `drm`
-> capture backend to `scrap` on top of `libdrmtap-sys` 0.4.9. The files here are a
+> capture backend to `scrap` on top of `libdrmtap-sys` 0.4.10. The files here are a
 > self-contained reference for the same crate-based backend.
 
 ## Status
@@ -42,7 +42,7 @@ capture. This means:
 1. Add the crate to `libs/scrap/Cargo.toml`:
 
    ```toml
-   libdrmtap-sys = { version = "0.4.9", optional = true }
+   libdrmtap-sys = { version = "0.4.10", optional = true }
    ```
 
    It embeds and statically compiles the C sources **and** builds the

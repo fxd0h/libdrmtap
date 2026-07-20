@@ -1038,6 +1038,46 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     return do_grab(ctx, frame, 0);  /* zero-copy: DMA-BUF fd only */
 }
 
+int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
+                     drmtap_frame_info *frame) {
+    if (!ctx || !desc || !frame) {
+        return -EINVAL;
+    }
+    int ret = do_grab(ctx, frame, 0);  /* zero-copy: DMA-BUF fd + metadata */
+    if (ret != 0) {
+        return ret;
+    }
+    /* Snapshot the full descriptor. The plane layout and HDR state are cached
+     * on ctx during do_grab (from GetFB2 and the connector metadata) — they are
+     * NOT in frame_info, which is exactly why a split exporter needs this call
+     * rather than drmtap_grab alone. */
+    memset(desc, 0, sizeof(*desc));
+    desc->dma_buf_fd = frame->dma_buf_fd;
+    desc->width = frame->width;
+    desc->height = frame->height;
+    desc->format = frame->format;
+    desc->modifier = frame->modifier;
+    desc->fb_id = frame->fb_id;
+
+    int np = ctx->fb2_num_planes > 0 ? ctx->fb2_num_planes : 1;
+    if (np > 4) {
+        np = 4;
+    }
+    desc->num_planes = (uint32_t)np;
+    for (int p = 0; p < 4; p++) {
+        desc->offsets[p] = ctx->fb2_offsets[p];
+        desc->pitches[p] = ctx->fb2_pitches[p];
+    }
+    /* Guarantee the main-surface stride is set even if GetFB2 left pitches[0]
+     * zero (helper/dumb paths): fall back to the frame stride. */
+    if (desc->pitches[0] == 0) {
+        desc->pitches[0] = frame->stride;
+    }
+    desc->hdr_eotf = ctx->cur_hdr_eotf;
+    desc->hdr_max_nits = ctx->cur_hdr_max_nits;
+    return 0;
+}
+
 int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (!ctx || !frame) {
         return -EINVAL;

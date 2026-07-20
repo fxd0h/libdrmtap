@@ -66,6 +66,8 @@ static void test_null_args(void) {
     memset(&desc, 0, sizeof(desc));
     check(drmtap_convert_dmabuf(NULL, &desc, &frame) == -EINVAL,
           "NULL ctx rejected");
+    check(drmtap_grab_desc(NULL, &desc, &frame) == -EINVAL,
+          "grab_desc NULL ctx rejected");
 }
 
 static void test_desc_validation(drmtap_ctx *ctx) {
@@ -170,10 +172,13 @@ static void test_grab_guard(drmtap_ctx *ctx, int render_only) {
         return;
     }
     drmtap_frame_info frame;
+    drmtap_dmabuf_desc desc;
     check(drmtap_grab(ctx, &frame) == -ENOTSUP,
           "grab rejected on render-only context");
     check(drmtap_grab_mapped_fast(ctx, &frame) == -ENOTSUP,
           "fast grab rejected on render-only context");
+    check(drmtap_grab_desc(ctx, &desc, &frame) == -ENOTSUP,
+          "grab_desc rejected on render-only context");
 }
 
 static void test_linear_xrgb8888(drmtap_ctx *ctx) {

@@ -450,7 +450,7 @@ Three layers, published on crates.io:
 └─────────────────────────────────────────────────┘
 ```
 
-> ⚠️ **Testing status**: Both crates are published (libdrmtap-sys 0.4.9,
+> ⚠️ **Testing status**: Both crates are published (libdrmtap-sys 0.4.10,
 > libdrmtap 0.3.4) and verified to build/test in CI on Ubuntu 22.04/24.04.
 > Capture is verified on Intel i915/xe (dual-4K Meteor Lake), Nvidia/Tegra
 > (Jetson Orin Nano, aarch64), virtio-gpu, and AMD amdgpu (RX Vega 64, gfx9,
@@ -514,8 +514,8 @@ Adding `libdrmtap-sys` is standard practice for them. They `cargo add libdrmtap`
 
 | Area | What shipped | Status |
 |---|---|---|
-| Core | `libdrmtap` C library 0.4.9 (`.so`/`.a` + `drmtap.h` + `pkg-config`) | ✅ Done |
-| Rust | `libdrmtap-sys` 0.4.9 (FFI; embeds + statically compiles C sources & helper) | ✅ Published on crates.io |
+| Core | `libdrmtap` C library 0.4.10 (`.so`/`.a` + `drmtap.h` + `pkg-config`) | ✅ Done |
+| Rust | `libdrmtap-sys` 0.4.10 (FFI; embeds + statically compiles C sources & helper) | ✅ Published on crates.io |
 | Rust | `libdrmtap` 0.3.4 (safe wrapper) | ✅ Published on crates.io |
 | GPU | EGL/GLES2 GPU-universal detiling backend | ✅ Implemented |
 | HW | Intel i915/xe + Nvidia/Tegra + virtio-gpu + AMD amdgpu validation | ✅ Verified (AMD on RX Vega 64, gfx9) |

@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 4
-#define DRMTAP_VERSION_PATCH 9
+#define DRMTAP_VERSION_PATCH 10
 
 /**
  * @brief Get the library version as a packed integer.
@@ -233,11 +233,13 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame);
 /**
  * @brief Descriptor of an externally-supplied scanout DMA-BUF.
  *
- * Filled by the caller from what the privileged exporter produced
- * (drmtap_grab() frame metadata plus the connector HDR state) and shipped
- * over IPC. num_planes/offsets/pitches carry the auxiliary planes of
- * compressed layouts (e.g. Intel CCS: main surface + CCS aux + clear-color);
- * all planes live inside the one dma_buf_fd, as DRM GetFB2 reports them.
+ * On the privileged exporter side use drmtap_grab_desc() to fill it in one
+ * call; ship it (plus the dma_buf_fd) over IPC to the unprivileged converter.
+ * num_planes/offsets/pitches carry the auxiliary planes of compressed layouts
+ * (e.g. Intel CCS: main surface + CCS aux + clear-color) — these are NOT
+ * present in drmtap_frame_info, so a split consumer must use drmtap_grab_desc
+ * (not drmtap_grab alone) to capture a CCS or HDR scanout losslessly. All
+ * planes live inside the one dma_buf_fd, as DRM GetFB2 reports them.
  */
 typedef struct {
     int dma_buf_fd;         /**< Scanout DMA-BUF. May be -1 for an fb_id this
@@ -259,6 +261,30 @@ typedef struct {
     uint32_t hdr_max_nits;  /**< Mastering/content peak luminance (cd/m2),
                                  0 = unknown */
 } drmtap_dmabuf_desc;
+
+/**
+ * @brief Capture a frame AND emit a complete DMA-BUF descriptor for the split.
+ *
+ * The privileged-exporter counterpart to drmtap_convert_dmabuf(): does a
+ * zero-copy grab and fills @p desc with everything the unprivileged converter
+ * needs — the dma_buf_fd, geometry, format/modifier, fb_id, the full plane
+ * layout (num_planes/offsets/pitches, incl. Intel CCS aux planes) and the
+ * connector HDR state (eotf/max_nits). drmtap_grab() alone cannot produce
+ * these last two — drmtap_frame_info has no plane array or HDR fields — so a
+ * split consumer that must handle compressed (CCS) or HDR scanouts has to use
+ * this entry point.
+ *
+ * @p frame is also populated (same as drmtap_grab) and OWNS the resources:
+ * release it with drmtap_frame_release() once the fd has been sent. @p desc is
+ * a plain value snapshot (safe to serialize over IPC); it borrows nothing.
+ *
+ * @param ctx   Capture context (a real KMS context from drmtap_open)
+ * @param desc  Output descriptor (value type; ship over IPC)
+ * @param frame Output frame — owns the dma_buf_fd; release when done
+ * @return 0 on success, negative errno on error
+ */
+int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
+                     drmtap_frame_info *frame);
 
 /**
  * @brief Open an UNPRIVILEGED, render-only context for drmtap_convert_dmabuf().
