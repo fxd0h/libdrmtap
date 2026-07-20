@@ -5,7 +5,13 @@
 # attack/ABI surface of the .so that the privileged service dlopen()s — the
 # hardening item raised in review. A new public function MUST be added here or
 # a consumer link will fail (that link error is the intended drift alarm).
-LIBDRMTAP_0.4 {
+#
+# ANONYMOUS version node on purpose: it hides the internals WITHOUT introducing
+# symbol versioning, so the public symbols stay unversioned (drmtap_open, not
+# drmtap_open@@NODE) — byte-for-byte the same export names 0.4.10 and earlier
+# shipped. We are not committing to an ABI-versioning scheme, only trimming the
+# exported set.
+{
     global:
         drmtap_version;
         drmtap_open;
