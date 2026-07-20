@@ -42,6 +42,10 @@ struct drmtap_ctx {
     /* Selected display */
     uint32_t crtc_id;
 
+    /* 1 = context from drmtap_open_render(): render node only, no KMS.
+     * Grab entry points reject it; only drmtap_convert_dmabuf() applies. */
+    int is_render_only;
+
     /* Cached resources for hotplug detection */
     uint32_t cached_connector_count;
     uint32_t cached_crtc_count;
@@ -72,6 +76,12 @@ struct drmtap_ctx {
         uint32_t width, height, stride;
         uint32_t format;
         uint64_t modifier;
+        /* Full plane layout captured at cache-miss (GetFB2) time. Restaged
+         * into ctx->fb2_* on every cache HIT so the EGL detile / CCS import
+         * sees THIS fb's planes, not whatever the last GetFB2 left there. */
+        int      fb2_num_planes;
+        uint32_t fb2_pitches[4];
+        uint32_t fb2_offsets[4];
     } fast_slots[4];
     uint32_t fast_plane_id;         /* cached primary plane id */
     uint32_t fast_last_fb_id;       /* fb_id from last capture (change detect) */
@@ -121,12 +131,8 @@ typedef struct {
 
 /* Result from helper v2 grab — helper reads pixels and sends via socket.
  * Must match struct grab_metadata in drmtap-helper.c */
-/* DRM EOTF values (from the connector HDR_OUTPUT_METADATA infoframe). These
- * match the kernel/CTA-861 numbering. PQ means "tone-map this"; HLG currently
- * falls back to the plain bit-depth reduction (PQ/HDR10 is the desktop norm). */
-#define DRMTAP_EOTF_SDR  0  /* traditional gamma SDR (or no HDR metadata) */
-#define DRMTAP_EOTF_PQ   2  /* SMPTE ST 2084 (HDR10) */
-#define DRMTAP_EOTF_HLG  3  /* Hybrid Log-Gamma (BT.2100) */
+/* DRMTAP_EOTF_* moved to the public header (drmtap.h): the split-capture
+ * descriptor carries the scanout EOTF across the process boundary. */
 
 /* Flags for helper_grab_result_t.flags */
 #define HELPER_FLAG_HAS_DMABUF  0x01  /* DMA-BUF fd follows via SCM_RIGHTS */
@@ -205,13 +211,22 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
                               uint32_t stride, uint32_t format,
                               uint64_t modifier);
 
-/* GPU backend: EGL/GLES2 universal detiling (gpu_egl.c) */
+/* Ensure *buf holds at least `size` bytes: grow-once, never shrinks, capped
+ * at DRMTAP_MAX_FB_BYTES. Contents are not preserved across a grow. Returns
+ * 0, -EINVAL (zero size), -EFBIG (over the cap) or -ENOMEM. (drm_grab.c) */
+int drmtap_ensure_buf(void **buf, size_t *cap, size_t size);
+
+/* GPU backend: EGL/GLES2 universal detiling (gpu_egl.c).
+ * On success *out_data points at ctx->deswizzle_buf (ctx-owned, grow-once,
+ * valid until the next convert or drmtap_close) — the caller must NOT free
+ * it. fb_id keys the import-once EGLImage cache (0 = no caching); for an
+ * fb_id already cached with matching geometry dma_buf_fd may be -1. */
 int drmtap_gpu_egl_available(drmtap_ctx *ctx);
 int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
                             int dma_buf_fd,
                             uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t fourcc,
-                            uint64_t modifier,
+                            uint64_t modifier, uint32_t fb_id,
                             void **out_data, size_t *out_size);
 
 /* Release the calling thread's lazily-built EGL detile context + GL resources.

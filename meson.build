@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('libdrmtap', 'c',
-    version: '0.4.8',
+    version: '0.4.9',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -106,12 +106,34 @@ endif
 # Nvidia backend (no extra deps — CPU deswizzle)
 lib_sources += files('src/gpu_nvidia.c')
 
-# EGL/GLES2 GPU-universal detiling backend
+# EGL/GLES2 GPU-universal detiling backend.
+# Compile-time headers ONLY: the backend dlopen()s libEGL/libGLESv2 lazily on
+# first use (see src/gpu_egl.c), so the GPU stack must never appear in the .so
+# DT_NEEDED NOR in libdrmtap.pc Requires.private (a static consumer resolving
+# the .pc would otherwise re-link -lEGL/-lGLESv2 into its own — possibly
+# privileged — binary, defeating the whole split). We therefore do NOT attach
+# egl/glesv2 as dependencies of the library target; we only pull their include
+# dirs in as plain compile args. dl IS a real link dep (dlopen) and stays.
+dl_dep = cc.find_library('dl', required: false)
 lib_sources += files('src/gpu_egl.c')
-if egl_dep.found() and glesv2_dep.found()
-    lib_deps += [egl_dep, glesv2_dep]
+have_egl = egl_dep.found() and glesv2_dep.found() \
+    and cc.has_header('EGL/egl.h') and cc.has_header('EGL/eglext.h') \
+    and cc.has_header('GLES2/gl2.h') and cc.has_header('GLES2/gl2ext.h')
+if have_egl
+    # Add the pkg-config include dirs (if any) as compile args, without making
+    # egl/glesv2 dependencies of the target — so they stay out of the .pc.
+    egl_incs = run_command('pkg-config', '--cflags-only-I', 'egl', 'glesv2',
+                           check: false)
+    if egl_incs.returncode() == 0
+        foreach _inc : egl_incs.stdout().split()
+            add_project_arguments(_inc, language: 'c')
+        endforeach
+    endif
+    if dl_dep.found()
+        lib_deps += dl_dep
+    endif
     add_project_arguments('-DHAVE_EGL=1', language: 'c')
-    message('EGL backend: enabled (GPU-universal detiling)')
+    message('EGL backend: enabled (GPU-universal detiling, lazy dlopen)')
 else
     message('EGL backend: disabled (stub only)')
 endif
@@ -248,6 +270,11 @@ test_hdr = executable('test_hdr',
     dependencies: [libdrmtap_dep, m_dep],
     include_directories: lib_include,
 )
+test_convert = executable('test_convert',
+    'tests/test_convert.c',
+    dependencies: [libdrmtap_dep],
+    include_directories: lib_include,
+)
 # Wire-protocol tests are self-contained (socketpair + fake peer, no DRM, no
 # libdrmtap link): they guard the helper IPC's fd-access-mode / CLOEXEC /
 # ancillary-truncation / fixed-frame-reassembly invariants.
@@ -261,6 +288,7 @@ test('deswizzle', test_deswizzle, suite: 'unit')
 test('helper', test_helper, suite: 'unit')
 test('hdr', test_hdr, suite: 'unit')
 test('wire', test_wire, suite: 'unit')
+test('convert', test_convert, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
 # LSan: suppress the deliberate process-lifetime EGL/Mesa display allocation

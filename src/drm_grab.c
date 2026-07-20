@@ -294,8 +294,9 @@ static int dmabuf_sync_end(int fd) {
  * Caps the allocation at DRMTAP_MAX_FB_BYTES as a guard against a bogus/hostile
  * framebuffer geometry forcing an unbounded request. Contents are not preserved
  * across a grow. Returns 0, -EINVAL (zero size), -EFBIG (over the cap), or
- * -ENOMEM. */
-static int ensure_buf(void **buf, size_t *cap, size_t size) {
+ * -ENOMEM. Shared across modules (gpu_egl.c reads back into the same ctx
+ * buffer), hence not static. */
+int drmtap_ensure_buf(void **buf, size_t *cap, size_t size) {
     if (size == 0) {
         return -EINVAL;
     }
@@ -400,6 +401,12 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     drmModeFB2 *fb2 = NULL;
     int prime_fd = -1;
 
+    if (ctx->is_render_only) {
+        drmtap_set_error(ctx, "context is render-only (drmtap_open_render); "
+                         "grab needs a KMS context from drmtap_open");
+        return -ENOTSUP;
+    }
+
     /* Step 1: Find the primary plane */
     uint32_t plane_id = find_primary_plane(ctx);
     if (plane_id == 0) {
@@ -474,10 +481,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             "No CAP_SYS_ADMIN (needs helper), trying helper...");
 
         /* Receive buffer for the helper to fill. ctx-owned, grow-once and
-         * reused across grabs (never per-frame churn), capped — see ensure_buf.
-         * Freed in drmtap_close(). */
+         * reused across grabs (never per-frame churn), capped — see
+         * drmtap_ensure_buf. Freed in drmtap_close(). */
         size_t buf_size = (size_t)fb2->pitches[0] * fb2->height;
-        ret = ensure_buf(&ctx->pixel_buf, &ctx->pixel_buf_size, buf_size);
+        ret = drmtap_ensure_buf(&ctx->pixel_buf, &ctx->pixel_buf_size, buf_size);
         if (ret != 0) {
             if (ret == -EFBIG) {
                 drmtap_set_error(ctx,
@@ -801,7 +808,8 @@ static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
     }
 
     size_t out_size = (size_t)frame->width * frame->height * 4u;
-    int b = ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size, out_size);
+    int b = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
+                              out_size);
     if (b != 0) return b;
     uint32_t dst_stride = frame->width * 4u;
     int hdr = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ);
@@ -874,13 +882,14 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
 
 
     /* Ensure the CPU-deswizzle shadow buffer is allocated (grow-once, capped —
-     * see ensure_buf). frame->stride/height are validated at every entry point
+     * see drmtap_ensure_buf). frame->stride/height are validated at every entry point
      * (validate_fb_size), so this multiply cannot overflow. NOTE: this does NOT
      * bound the EGL output, which is always 4-byte RGBA — a sub-4-byte source
      * (e.g. RG16) can expand past stride*height, so the EGL path caps egl_size
      * separately below. */
     size_t size = (size_t)frame->stride * frame->height;
-    int bres = ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size, size);
+    int bres = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
+                                 size);
     if (bres != 0) {
         if (bres == -EFBIG) {
             drmtap_set_error(ctx,
@@ -910,23 +919,14 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
         int ret = drmtap_gpu_egl_convert(ctx, frame->dma_buf_fd,
                                           frame->width, frame->height,
                                           frame->stride, frame->format,
-                                          modifier, &egl_data, &egl_size);
+                                          modifier, frame->fb_id,
+                                          &egl_data, &egl_size);
         drmtap_debug_log(ctx, "EGL convert: ret=%d data=%p", ret, egl_data);
         if (ret == 0 && egl_data) {
-            /* The EGL output is 4-byte RGBA and can exceed the source
-             * stride*height for sub-4-byte formats, so cap it independently
-             * before adopting it as the context buffer. */
-            if (egl_size > DRMTAP_MAX_FB_BYTES) {
-                free(egl_data);
-                drmtap_set_error(ctx, "EGL output too large: %zu bytes (max %zu)",
-                                 egl_size, (size_t)DRMTAP_MAX_FB_BYTES);
-                return -EFBIG;
-            }
-            /* Store in ctx for reuse / cleanup */
-            free(ctx->deswizzle_buf);
-            ctx->deswizzle_buf = egl_data;
-            ctx->deswizzle_buf_size = egl_size;
-            frame->data = ctx->deswizzle_buf;
+            /* egl_data IS ctx->deswizzle_buf: the convert reads back into the
+             * ctx-owned grow-once buffer (size-capped inside), so adopting it
+             * is just repointing the frame — no allocation churn. */
+            frame->data = egl_data;
             /* EGL outputs RGBA/BGRA 8-bit */
             frame->format = DRM_FORMAT_XRGB8888;
             frame->stride = frame->width * 4;
@@ -1138,9 +1138,27 @@ static int find_or_alloc_slot(drmtap_ctx *ctx, uint32_t fb_id) {
     return 0;
 }
 
+/* Restage a cached slot's captured plane layout into ctx->fb2_*. A fast-path
+ * cache HIT skips GetFB2, so without this ctx->fb2_* still describes whichever
+ * fb was last GetFB2'd — and the EGL detile / CCS import (plus the EGLImage
+ * cache's geometry compare) reads ctx->fb2_*. Restaging the slot's own layout
+ * keeps the plane metadata matched to the frame actually being converted. */
+static void fast_slot_restage_planes(drmtap_ctx *ctx, int slot) {
+    ctx->fb2_num_planes = ctx->fast_slots[slot].fb2_num_planes;
+    for (int p = 0; p < 4; p++) {
+        ctx->fb2_pitches[p] = ctx->fast_slots[slot].fb2_pitches[p];
+        ctx->fb2_offsets[p] = ctx->fast_slots[slot].fb2_offsets[p];
+    }
+}
+
 int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (!ctx || !frame) {
         return -EINVAL;
+    }
+    if (ctx->is_render_only) {
+        drmtap_set_error(ctx, "context is render-only (drmtap_open_render); "
+                         "grab needs a KMS context from drmtap_open");
+        return -ENOTSUP;
     }
 
     int ret;
@@ -1196,6 +1214,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 frame->modifier = ctx->fast_slots[i].modifier;
                 frame->fb_id = fb_id;
                 frame->_priv = NULL;
+                /* Restage this slot's plane layout before converting (the
+                 * cache HIT skipped GetFB2, so ctx->fb2_* is otherwise stale). */
+                fast_slot_restage_planes(ctx, i);
                 /* Deswizzle/format-convert like the acquire path does — the
                  * cached mmap is the raw scanout, so a tiled buffer must be
                  * detiled here too (no-op for a linear one). Without this the
@@ -1245,6 +1266,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         frame->fb_id = fb_id;
         frame->_priv = NULL;
 
+        /* Restage this slot's plane layout before converting (the cache HIT
+         * skipped GetFB2, so ctx->fb2_* is otherwise stale). */
+        fast_slot_restage_planes(ctx, slot);
         /* Auto-deswizzle tiled framebuffers + format convert */
         gpu_auto_process(ctx, frame->data, frame, 0);
 
@@ -1276,6 +1300,18 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
         return ret;
+    }
+
+    /* Cache multi-plane info for the EGL CCS import. The EGL path reads plane
+     * offsets/pitches from ctx->fb2_*, which otherwise still holds whatever
+     * the last do_grab() left there (stale geometry from another fb). */
+    ctx->fb2_num_planes = 0;
+    for (int p = 0; p < 4; p++) {
+        ctx->fb2_pitches[p] = fb2->pitches[p];
+        ctx->fb2_offsets[p] = fb2->offsets[p];
+        if (fb2->handles[p] || fb2->pitches[p]) {
+            ctx->fb2_num_planes = p + 1;
+        }
     }
 
     /* Export DMA-BUF */
@@ -1325,6 +1361,14 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     ctx->fast_slots[slot].stride = fb2->pitches[0];
     ctx->fast_slots[slot].format = fb2->pixel_format;
     ctx->fast_slots[slot].modifier = fb2->modifier;
+    /* Capture this fb's plane layout with the slot so a later cache HIT can
+     * restage it into ctx->fb2_* (ctx->fb2_* was set from this same fb2 just
+     * above, at the "Cache multi-plane info" block). */
+    ctx->fast_slots[slot].fb2_num_planes = ctx->fb2_num_planes;
+    for (int p = 0; p < 4; p++) {
+        ctx->fast_slots[slot].fb2_pitches[p] = ctx->fb2_pitches[p];
+        ctx->fast_slots[slot].fb2_offsets[p] = ctx->fb2_offsets[p];
+    }
 
     drmtap_debug_log(ctx, "fast2: cached fb=%u slot=%d gem=%u %ux%u",
                      fb_id, slot, fb2->handles[0], fb2->width, fb2->height);
@@ -1347,4 +1391,171 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     gpu_auto_process(ctx, frame->data, frame, 0);
 
     return 0;   /* new frame */
+}
+
+/* ========================================================================= */
+/* Split capture: unprivileged convert of an externally-supplied DMA-BUF     */
+/* ========================================================================= */
+
+/* Minimum bytes-per-pixel of a scanout fourcc, for the width*bpp <= stride
+ * bound. The CPU deswizzle/reduce paths index the row as pixel[x] for
+ * x < width, so a stride that does not cover width*bpp would read/write past
+ * the row. 8-bit and 10-bit RGB pack into 4 bytes; the 16-bit-per-channel
+ * formats into 8. Unknown fourccs default to 4: a real desktop scanout is
+ * never sub-4-byte, and the tiled deswizzle writes 4-byte pixels, so 4 is the
+ * safe floor to reject a hostile narrow stride. */
+static uint32_t format_min_bpp(uint32_t fourcc) {
+    switch (fourcc) {
+    case DRMTAP_FMT_XR48:
+    case DRMTAP_FMT_AR48:
+    case DRMTAP_FMT_XB48:
+    case DRMTAP_FMT_AB48:
+        return 8;
+    default:
+        return 4;
+    }
+}
+
+int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
+                          drmtap_frame_info *frame) {
+    if (!ctx || !desc || !frame) {
+        return -EINVAL;
+    }
+
+    uint32_t num_planes = desc->num_planes ? desc->num_planes : 1;
+    if (num_planes > 4 || desc->width == 0) {
+        drmtap_set_error(ctx, "convert: invalid descriptor "
+                         "(width=%u num_planes=%u)",
+                         desc->width, desc->num_planes);
+        return -EINVAL;
+    }
+    int ret = validate_fb_size(desc->pitches[0], desc->height);
+    if (ret != 0) {
+        drmtap_set_error(ctx, "convert: rejecting geometry %ux%u stride=%u",
+                         desc->width, desc->height, desc->pitches[0]);
+        return ret;
+    }
+    /* The descriptor comes from the (untrusted) exporter over IPC, unlike the
+     * in-process grab whose width/stride come from drmModeGetFB2. validate_fb_size
+     * bounds stride*height but is independent of width — enforce that the row
+     * stride actually covers width pixels so the per-pixel CPU converters below
+     * (and the EGL import) cannot be driven past the buffer. */
+    if ((uint64_t)desc->width * format_min_bpp(desc->format) > desc->pitches[0]) {
+        drmtap_set_error(ctx, "convert: stride %u too small for width %u "
+                         "(fourcc %.4s)", desc->pitches[0], desc->width,
+                         (const char *)&desc->format);
+        return -EINVAL;
+    }
+
+    /* Stage the plane + HDR metadata exactly where the in-process grab
+     * (drmModeGetFB2 + the connector HDR read) would put it — the conversion
+     * paths below consume both from the context. */
+    ctx->fb2_num_planes = (int)num_planes;
+    for (uint32_t p = 0; p < 4; p++) {
+        ctx->fb2_pitches[p] = (p < num_planes) ? desc->pitches[p] : 0;
+        ctx->fb2_offsets[p] = (p < num_planes) ? desc->offsets[p] : 0;
+    }
+    ctx->cur_hdr_eotf = desc->hdr_eotf;
+    ctx->cur_hdr_max_nits = desc->hdr_max_nits;
+
+    memset(frame, 0, sizeof(*frame));
+    frame->width = desc->width;
+    frame->height = desc->height;
+    frame->stride = desc->pitches[0];
+    frame->format = desc->format;
+    frame->modifier = desc->modifier;
+    frame->fb_id = desc->fb_id;
+    frame->dma_buf_fd = desc->dma_buf_fd;
+
+#ifdef HAVE_EGL
+    /* GPU path first: EGL imports the fd (or reuses the fb_id-cached import)
+     * and hands back linear XRGB8888 — one hop covers every vendor tiling,
+     * the 10/16-bit reductions and the HDR tone-map. */
+    if (drmtap_gpu_egl_available(ctx)) {
+        void *egl_data = NULL;
+        size_t egl_size = 0;
+        ret = drmtap_gpu_egl_convert(ctx, desc->dma_buf_fd,
+                                     desc->width, desc->height,
+                                     desc->pitches[0], desc->format,
+                                     desc->modifier, desc->fb_id,
+                                     &egl_data, &egl_size);
+        if (ret == 0 && egl_data) {
+            frame->data = egl_data;   /* ctx-owned grow-once buffer */
+            frame->format = DRM_FORMAT_XRGB8888;
+            frame->stride = desc->width * 4;
+            frame->modifier = DRM_FORMAT_MOD_LINEAR;
+            return 0;
+        }
+        drmtap_debug_log(ctx, "convert: EGL path failed (%d), CPU fallback",
+                         ret);
+    }
+#endif
+
+    /* CPU fallback: map the DMA-BUF read-only and run the same deswizzle /
+     * format-reduction pipeline the in-process grab uses. */
+    if (desc->dma_buf_fd < 0) {
+        drmtap_set_error(ctx, "convert: fb_id %u is not cached and no "
+                         "dma-buf fd was supplied", desc->fb_id);
+        return -EINVAL;
+    }
+    size_t map_size = (size_t)desc->pitches[0] * desc->height;
+    void *mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED,
+                        desc->dma_buf_fd, desc->offsets[0]);
+    if (mapped == MAP_FAILED) {
+        int mmap_errno = errno;
+        drmtap_set_error(ctx, "convert: mmap(%zu) failed: %s "
+                         "(and no usable EGL path)",
+                         map_size, strerror(mmap_errno));
+        return mmap_errno ? -mmap_errno : -EIO;
+    }
+    int sync_started = (dmabuf_sync_start(desc->dma_buf_fd) == 0);
+
+    /* Hide the fd for the gpu_auto_process call so it stays off the EGL
+     * branch it would otherwise retry (we just watched EGL fail, or it is
+     * unavailable) and takes the CPU deswizzle/reduce paths on `mapped`. */
+    frame->data = mapped;
+    frame->dma_buf_fd = -1;
+    ret = gpu_auto_process(ctx, mapped, frame, 0);
+    frame->dma_buf_fd = desc->dma_buf_fd;
+
+    if (ret == 0 && frame->data == mapped) {
+        /* Linear 8-bit passthrough (no deswizzle / reduction happened). Copy
+         * into the ctx buffer so the pixels survive the temporary mapping,
+         * AND repack to a tight width*4 stride so the returned frame honors
+         * the documented "stride width*4" output even when the source scanout
+         * carried row padding (pitches[0] > width*4). The width*4 <= pitches[0]
+         * bound checked above keeps every per-row read inside the mapping. */
+        uint32_t out_stride = desc->width * 4u;
+        size_t out_size = (size_t)out_stride * desc->height;
+        ret = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
+                                out_size);
+        if (ret == 0) {
+            const uint8_t *src = mapped;
+            uint8_t *dst = ctx->deswizzle_buf;
+            if (desc->pitches[0] == out_stride) {
+                memcpy(dst, src, out_size);
+            } else {
+                for (uint32_t y = 0; y < desc->height; y++) {
+                    memcpy(dst + (size_t)y * out_stride,
+                           src + (size_t)y * desc->pitches[0], out_stride);
+                }
+            }
+            frame->data = ctx->deswizzle_buf;
+            frame->stride = out_stride;
+        }
+    }
+
+    if (sync_started) {
+        dmabuf_sync_end(desc->dma_buf_fd);
+    }
+    munmap(mapped, map_size);
+
+    if (ret == 0 && !frame->data) {
+        drmtap_set_error(ctx, "convert: no conversion path produced pixels");
+        ret = -ENOTSUP;
+    }
+    if (ret != 0) {
+        frame->data = NULL;
+    }
+    return ret;
 }
