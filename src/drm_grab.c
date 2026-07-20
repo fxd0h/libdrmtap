@@ -38,6 +38,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <linux/dma-buf.h>
 
 #include <xf86drm.h>
@@ -1551,16 +1552,52 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
         return -EINVAL;
     }
     size_t map_size = (size_t)desc->pitches[0] * desc->height;
+    /* The descriptor and its fd cross an IPC boundary and are UNTRUSTED. Two
+     * gates before we mmap and read the pixels:
+     *
+     * 1. Require a genuine DMA-BUF. It is the only legitimate input here, and it
+     *    is immutable in size, so it CANNOT be shrunk between the size check and
+     *    the read. A memfd / regular file could be ftruncate()d mid-read by a
+     *    hostile peer, faulting the reader with SIGBUS (a check-then-use race).
+     *    The DMA-BUF sync ioctl succeeds on every real dma-buf and returns
+     *    ENOTTY on a non-dma-buf, so it gates the source and also serves as the
+     *    CPU-access SYNC_START we need before reading.
+     * 2. Bound the read against the buffer's real size, so a descriptor that
+     *    claims more than the dma-buf backs is rejected instead of faulting.
+     *    lseek(SEEK_END) reports the dma-buf size across kernels (fstat returns
+     *    0 for a dma-buf before Linux 5.3, which would falsely reject every
+     *    frame); fstat is only a fallback when lseek yields nothing. */
+    if (dmabuf_sync_start(desc->dma_buf_fd) != 0) {
+        drmtap_set_error(ctx, "convert: fd is not a DMA-BUF; refusing to mmap "
+                         "an untrusted non-dma-buf source");
+        return -EINVAL;
+    }
+    int sync_started = 1;
+    off_t fd_size = lseek(desc->dma_buf_fd, 0, SEEK_END);
+    if (fd_size <= 0) {
+        struct stat st;
+        if (fstat(desc->dma_buf_fd, &st) == 0 && st.st_size > 0) {
+            fd_size = st.st_size;
+        }
+    }
+    if (fd_size > 0 &&
+        (uint64_t)desc->offsets[0] + (uint64_t)map_size > (uint64_t)fd_size) {
+        dmabuf_sync_end(desc->dma_buf_fd);
+        drmtap_set_error(ctx, "convert: dma-buf too small for the declared "
+                         "geometry (buffer %lld bytes, need offset %u + %zu)",
+                         (long long)fd_size, desc->offsets[0], map_size);
+        return -EINVAL;
+    }
     void *mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED,
                         desc->dma_buf_fd, desc->offsets[0]);
     if (mapped == MAP_FAILED) {
         int mmap_errno = errno;
+        dmabuf_sync_end(desc->dma_buf_fd);
         drmtap_set_error(ctx, "convert: mmap(%zu) failed: %s "
                          "(and no usable EGL path)",
                          map_size, strerror(mmap_errno));
         return mmap_errno ? -mmap_errno : -EIO;
     }
-    int sync_started = (dmabuf_sync_start(desc->dma_buf_fd) == 0);
 
     /* Hide the fd for the gpu_auto_process call so it stays off the EGL
      * branch it would otherwise retry (we just watched EGL fail, or it is

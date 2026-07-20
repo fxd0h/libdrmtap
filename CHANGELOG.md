@@ -4,6 +4,27 @@ Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
 project share one version; the `libdrmtap` wrapper crate is versioned separately.
 
+## [0.4.12] - 2026-07-20
+
+### Security
+- `drmtap_convert_dmabuf()` hardened at the untrusted convert boundary. A
+  coverage-guided fuzzer found that a descriptor claiming a frame larger than
+  the fd actually backs made the CPU fallback mmap and read past the fd,
+  faulting the unprivileged converter with SIGBUS (a denial of service on a
+  malformed IPC message). The fix requires the fd to be a genuine DMA-BUF (a
+  non-dma-buf fd is rejected; only an immutable dma-buf is safe to mmap and read
+  without a truncate-mid-read race) and bounds the read against the buffer size
+  read with lseek (reliable across kernels, unlike fstat which reports 0 for a
+  dma-buf before Linux 5.3). An oversized or non-dma-buf descriptor now returns
+  -EINVAL instead of faulting.
+
+### Added
+- `fuzz/fuzz_convert.c` (+ build.sh, README): a libFuzzer target for the
+  convert boundary, driving hostile descriptors over real udmabuf-backed
+  dma-bufs. It survives tens of millions of runs clean after the fix.
+- `DRMTAP_NO_EGL=1` forces the CPU deswizzle/convert path (for debugging and for
+  the convert tests/fuzzer, which target the CPU-side untrusted handling).
+
 ## [0.4.11] - 2026-07-20
 
 ### Hardening

@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 4
-#define DRMTAP_VERSION_PATCH 11
+#define DRMTAP_VERSION_PATCH 12
 
 /**
  * @brief Get the library version as a packed integer.
@@ -335,7 +335,12 @@ drmtap_ctx *drmtap_open_render(const char *render_node);
  * different thread cannot release them and would strand the cached buffers.
  *
  * When no GPU path is usable the conversion falls back to a CPU mmap +
- * deswizzle of the fd (same pipeline as the in-process grab).
+ * deswizzle of the fd (same pipeline as the in-process grab). The descriptor
+ * and fd are treated as untrusted: the geometry is validated, the fd MUST be a
+ * genuine DMA-BUF (a non-dma-buf fd is rejected -- only an immutable dma-buf is
+ * safe to mmap and read without a truncate-mid-read fault), and it must be
+ * large enough to back the declared frame (offset + stride*height); anything
+ * else returns -EINVAL rather than faulting.
  *
  * @param ctx   Context from drmtap_open_render() (or any context with a
  *              usable EGL backend)
