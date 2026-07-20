@@ -157,6 +157,22 @@ if cc.has_link_argument('-Wl,--version-script,' + version_script)
     libdrmtap_link_args += '-Wl,--version-script,' + version_script
 endif
 
+# Exploit-mitigation hardening for the shared object the privileged service
+# dlopen()s — the same set the helper binary gets. Full RELRO (-z relro -z now)
+# so the GOT is read-only after relocation, a stack canary, and _FORTIFY_SOURCE.
+# FORTIFY needs an optimized build (at -O0, and in 'plain' where meson adds no -O
+# at all, it only warns, and -Werror would then fail), so gate it on -O like the
+# helper does.
+libdrmtap_c_args = ['-fstack-protector-strong']
+if get_option('optimization') not in ['plain', '0']
+    libdrmtap_c_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=2']
+endif
+foreach _la : ['-Wl,-z,relro', '-Wl,-z,now']
+    if cc.has_link_argument(_la)
+        libdrmtap_link_args += _la
+    endif
+endforeach
+
 # Build BOTH a shared and a static library from one compile. The shared object
 # (the artifact the privileged service dlopen()s) is locked down to the public
 # ABI by the version script above. The static archive keeps every symbol so the
@@ -168,6 +184,7 @@ libdrmtap_both = both_libraries('drmtap',
     dependencies: lib_deps,
     version: meson.project_version(),
     soversion: '0',
+    c_args: libdrmtap_c_args,
     link_args: libdrmtap_link_args,
     link_depends: 'libdrmtap.map',
     install: true,
