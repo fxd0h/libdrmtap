@@ -20,10 +20,57 @@
 #define DRMTAP_WIRE_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sys/socket.h>
+
+/* ---- Command framing (library -> helper) --------------------------------
+ * A command frame carries a magic + protocol version so a helper and a library
+ * built from different releases fail cleanly instead of misreading each other:
+ * the helper rejects any frame whose magic/version/length do not match its own
+ * build and stops serving, rather than acting on a misparsed frame. The channel
+ * is a host-local socketpair between two ends of the same machine, so the multi
+ * byte fields are native byte order (both ends share the host endianness); there
+ * is no cross-machine transport to byte-swap for. Defined here, once, so the
+ * helper, the library client and the tests cannot drift apart. */
+#define HELPER_PROTO_MAGIC   0x544D5244u  /* "DRMT" as a little-endian u32 */
+#define HELPER_PROTO_VERSION 1u
+
+/* Command types (the `type` field of a command frame). */
+#define CMD_GRAB       0x01u
+#define CMD_GET_CURSOR 0x02u
+#define CMD_QUIT       0xFFu
+
+typedef struct {
+    uint32_t magic;    /* HELPER_PROTO_MAGIC */
+    uint16_t version;  /* HELPER_PROTO_VERSION */
+    uint16_t type;     /* CMD_GRAB / CMD_GET_CURSOR / CMD_QUIT */
+    uint32_t length;   /* total frame length in bytes (== sizeof(helper_cmd_grab_t)) */
+    uint32_t crtc_id;  /* target CRTC id (0 = auto-select first active) */
+} helper_cmd_grab_t;   /* 16 bytes, naturally aligned, no padding */
+
+/* Build a command frame with the header fields set for this build. */
+static inline helper_cmd_grab_t wire_cmd(uint16_t type, uint32_t crtc_id) {
+    helper_cmd_grab_t c;
+    memset(&c, 0, sizeof(c));
+    c.magic = HELPER_PROTO_MAGIC;
+    c.version = HELPER_PROTO_VERSION;
+    c.type = type;
+    c.length = (uint32_t)sizeof(helper_cmd_grab_t);
+    c.crtc_id = crtc_id;
+    return c;
+}
+
+/* True only for a valid, version-matched command frame. A foreign magic, a
+ * different protocol version, or a length that does not match this build's frame
+ * all fail here so a stale helper/library binary is rejected, not misparsed. */
+static inline int wire_cmd_valid(const helper_cmd_grab_t *c) {
+    return c->magic == HELPER_PROTO_MAGIC &&
+           c->version == HELPER_PROTO_VERSION &&
+           c->length == (uint32_t)sizeof(helper_cmd_grab_t);
+}
 
 /* Send exactly len bytes, handling partial writes and EINTR. 0 ok, -1 error. */
 static inline int wire_send_all(int sock, const void *buf, size_t len) {

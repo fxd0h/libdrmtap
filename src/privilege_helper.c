@@ -40,9 +40,8 @@
 
 /* Must match values in drmtap-helper.c */
 #define HELPER_SOCKET_FD 3
-#define CMD_GRAB 0x01
-#define CMD_GET_CURSOR 0x02
-#define CMD_QUIT 0xFF
+/* CMD_GRAB / CMD_GET_CURSOR / CMD_QUIT and the command frame (helper_cmd_grab_t,
+ * built via wire_cmd()) come from wire.h, shared with the helper. */
 #define RESP_OK    0x00
 
 /* ========================================================================= */
@@ -174,7 +173,7 @@ void drmtap_helper_stop(drmtap_ctx *ctx) {
         /* Send a full-size quit command (best effort). The helper reads one whole
          * fixed-size command frame per iteration, so a 1-byte quit would be a
          * short read that the helper now rejects; send the complete struct. */
-        helper_cmd_grab_t hcmd = { .cmd = CMD_QUIT, .crtc_id = 0 };
+        helper_cmd_grab_t hcmd = wire_cmd(CMD_QUIT, 0);
         ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
         (void)n;
 
@@ -235,10 +234,7 @@ int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
     }
 
     /* Send grab command */
-    helper_cmd_grab_t hcmd = {
-        .cmd = CMD_GRAB,
-        .crtc_id = ctx->crtc_id
-    };
+    helper_cmd_grab_t hcmd = wire_cmd(CMD_GRAB, ctx->crtc_id);
     ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
     if (n != sizeof(hcmd)) {
         drmtap_debug_log(ctx, "helper send failed, trying respawn");
@@ -337,10 +333,7 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
         }
     }
 
-    helper_cmd_grab_t hcmd = {
-        .cmd = CMD_GET_CURSOR,
-        .crtc_id = ctx->crtc_id,
-    };
+    helper_cmd_grab_t hcmd = wire_cmd(CMD_GET_CURSOR, ctx->crtc_id);
     ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
     if (n != sizeof(hcmd)) {
         drmtap_helper_stop(ctx);

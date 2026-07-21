@@ -199,6 +199,40 @@ static void test_eof_midframe_rejected(void) {
     close(sv[1]);
 }
 
+/* The command frame carries a magic + protocol version so a helper and a library
+ * built from different releases fail cleanly. wire_cmd() builds a valid frame and
+ * wire_cmd_valid() (the check the helper runs before acting on a frame) must
+ * accept it and reject a foreign magic, a different version, or a wrong length. */
+static void test_cmd_frame_magic_version(void) {
+    helper_cmd_grab_t c = wire_cmd(CMD_GRAB, 42);
+    CHECK(sizeof(helper_cmd_grab_t) == 16, "command frame is 16 bytes (fixed wire layout)");
+    CHECK(c.magic == HELPER_PROTO_MAGIC && c.version == HELPER_PROTO_VERSION &&
+          c.length == sizeof(helper_cmd_grab_t) && c.type == CMD_GRAB && c.crtc_id == 42,
+          "wire_cmd sets magic/version/length/type/crtc_id");
+    CHECK(wire_cmd_valid(&c), "well-formed command frame accepted");
+
+    /* Round-trip over a socketpair, exactly as the helper reads it. */
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { CHECK(0, "cmd: socketpair"); return; }
+    helper_cmd_grab_t sent = wire_cmd(CMD_GET_CURSOR, 7);
+    CHECK(wire_send_all(sv[0], &sent, sizeof(sent)) == 0, "command frame sent");
+    helper_cmd_grab_t got;
+    memset(&got, 0, sizeof(got));
+    int r = wire_recv_all(sv[1], &got, sizeof(got));
+    CHECK(r == 0 && wire_cmd_valid(&got) && got.type == CMD_GET_CURSOR && got.crtc_id == 7,
+          "received command frame is valid and preserves type/crtc_id");
+    close(sv[0]); close(sv[1]);
+
+    /* A foreign magic, a bumped version, and a wrong length are each rejected. */
+    helper_cmd_grab_t bad = wire_cmd(CMD_GRAB, 0);
+    bad.magic ^= 0xFFFFFFFFu;
+    CHECK(!wire_cmd_valid(&bad), "foreign magic rejected");
+    bad = wire_cmd(CMD_GRAB, 0); bad.version = (uint16_t)(HELPER_PROTO_VERSION + 1);
+    CHECK(!wire_cmd_valid(&bad), "mismatched protocol version rejected");
+    bad = wire_cmd(CMD_GRAB, 0); bad.length = sizeof(helper_cmd_grab_t) + 1;
+    CHECK(!wire_cmd_valid(&bad), "wrong frame length rejected");
+}
+
 int main(void) {
     printf("Running wire-protocol tests (against src/wire.h)...\n");
     test_received_fd_is_cloexec();
@@ -208,6 +242,7 @@ int main(void) {
     test_zero_fds_accepted();
     test_fragmented_frame_reassembled();
     test_eof_midframe_rejected();
+    test_cmd_frame_magic_version();
     if (g_failures == 0) {
         printf("All wire-protocol tests passed.\n");
         return 0;

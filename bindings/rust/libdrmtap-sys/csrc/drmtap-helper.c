@@ -108,18 +108,9 @@ struct drm_virtgpu_getparam {
 /* Socket fd inherited from parent (via socketpair) */
 #define HELPER_SOCKET_FD 3
 
-/* Protocol commands */
-#define CMD_GRAB 0x01
-#define CMD_GET_CURSOR 0x02
-#define CMD_QUIT 0xFF
-
-/* Command structure for CMD_GRAB (client to helper) */
-struct helper_cmd_grab {
-    uint8_t  cmd;           /* CMD_GRAB (0x01) */
-    /* cppcheck-suppress unusedStructMember ; explicit wire-format padding */
-    uint8_t  _pad1[3];      /* align to 4 bytes */
-    uint32_t crtc_id;       /* target CRTC id (0 = auto-select first active) */
-};
+/* Protocol commands (CMD_*), the command frame (helper_cmd_grab_t) and its
+ * magic/version validation live in wire.h, shared with the library client so
+ * the two ends cannot drift. */
 
 /* Response status */
 #define RESP_OK    0x00
@@ -889,15 +880,23 @@ int main(int argc, char *argv[]) {
 
     /* Event loop: receive commands, process with persistent fd */
     while (1) {
-        struct helper_cmd_grab hcmd;
+        helper_cmd_grab_t hcmd;
         /* Read the whole fixed-size command frame. A clean disconnect (EOF at a
          * boundary) or a truncated/partial frame both end the loop; we never act
          * on a short read with an uninitialized crtc_id. */
         if (recv_all(sock, &hcmd, sizeof(hcmd)) != 0) {
             break;
         }
+        /* Reject a frame from a mismatched protocol (a stale helper or library
+         * binary): the magic/version/length must match this build. Once they
+         * differ the stream framing is unreliable, so fail closed and stop
+         * serving rather than misparse a frame while holding CAP_SYS_ADMIN. */
+        if (!wire_cmd_valid(&hcmd)) {
+            send_error(sock, "protocol version mismatch");
+            break;
+        }
 
-        switch (hcmd.cmd) {
+        switch (hcmd.type) {
             case CMD_GRAB:
                 grab_and_send(sock, drm_fd, hcmd.crtc_id, is_virtio);
                 break;
