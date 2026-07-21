@@ -63,13 +63,16 @@ static inline helper_cmd_grab_t wire_cmd(uint16_t type, uint32_t crtc_id) {
     return c;
 }
 
-/* True only for a valid, version-matched command frame. A foreign magic, a
- * different protocol version, or a length that does not match this build's frame
- * all fail here so a stale helper/library binary is rejected, not misparsed. */
+/* True only for a valid, version-matched command frame carrying a known command
+ * type. A foreign magic, a different protocol version, a length that does not
+ * match this build's frame, or a type outside the declared CMD_* set all fail
+ * here, so a stale helper/library binary or a malformed command is rejected at
+ * one gate before dispatch, not misparsed. */
 static inline int wire_cmd_valid(const helper_cmd_grab_t *c) {
     return c->magic == HELPER_PROTO_MAGIC &&
            c->version == HELPER_PROTO_VERSION &&
-           c->length == (uint32_t)sizeof(helper_cmd_grab_t);
+           c->length == (uint32_t)sizeof(helper_cmd_grab_t) &&
+           (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR || c->type == CMD_QUIT);
 }
 
 /* Send exactly len bytes, handling partial writes and EINTR. 0 ok, -1 error. */
