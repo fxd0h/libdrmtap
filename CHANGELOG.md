@@ -4,6 +4,24 @@ Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
 project share one version; the `libdrmtap` wrapper crate is versioned separately.
 
+## [0.4.13] - 2026-07-20
+
+### Hardening
+
+- The privileged helper command frame now carries a magic and a protocol
+  version. The helper validates the magic, version, length and command type of
+  every frame at one gate before dispatch, and closes the connection on a
+  mismatch instead of replying, so a helper and a library built from different
+  releases fail closed rather than misreading each other while the helper holds
+  CAP_SYS_ADMIN. The command frame moved to one shared header (wire.h) instead of
+  being duplicated on each side.
+
+### Changed
+
+- SECURITY.md now documents the split-capture convert trust boundary (the
+  converter treats the exporter-supplied descriptor and fd as untrusted IPC
+  input) and the new command-frame header.
+
 ## [0.4.12] - 2026-07-20
 
 ### Security
@@ -115,6 +133,7 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.4.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.13
 [0.4.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.12
 [0.4.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.11
 [0.4.10]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.10
