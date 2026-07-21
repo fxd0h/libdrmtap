@@ -122,12 +122,9 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
 // Debug log to stderr (only when ctx->debug is set)
 void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
 
-/* Command structure for CMD_GRAB (client to helper) */
-typedef struct {
-    uint8_t  cmd;           /* CMD_GRAB (0x01) */
-    uint8_t  _pad1[3];      /* align to 4 bytes */
-    uint32_t crtc_id;       /* target CRTC id (0 = auto-select first active) */
-} helper_cmd_grab_t;
+/* The command frame (helper_cmd_grab_t), its CMD_* types and the magic/version
+ * validation are defined in wire.h, shared with the helper so the two ends of
+ * the protocol cannot drift. The library client includes wire.h directly. */
 
 /* Result from helper v2 grab — helper reads pixels and sends via socket.
  * Must match struct grab_metadata in drmtap-helper.c */
