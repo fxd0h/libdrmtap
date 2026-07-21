@@ -231,6 +231,8 @@ static void test_cmd_frame_magic_version(void) {
     CHECK(!wire_cmd_valid(&bad), "mismatched protocol version rejected");
     bad = wire_cmd(CMD_GRAB, 0); bad.length = sizeof(helper_cmd_grab_t) + 1;
     CHECK(!wire_cmd_valid(&bad), "wrong frame length rejected");
+    bad = wire_cmd(CMD_GRAB, 0); bad.type = 0x7Fu; /* not a declared CMD_* */
+    CHECK(!wire_cmd_valid(&bad), "unknown command type rejected");
 }
 
 int main(void) {

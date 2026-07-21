@@ -104,9 +104,11 @@ The wire protocol is tiny: three commands (`CMD_GRAB`, `CMD_GET_CURSOR`,
 `CMD_QUIT`) in a fixed 16-byte command frame (`helper_cmd_grab_t` in
 `src/wire.h`). The frame carries a `magic` + protocol `version` + `type` +
 `length` header, and the helper rejects any frame whose magic, version or length
-do not match its own build and stops serving — so a stale helper or library
-binary fails closed rather than misparsing a frame while holding
-`CAP_SYS_ADMIN`. The only semantically attacker-controllable field is a
+do not match its own build, or whose type is not one of the three commands, and
+stops serving — so a stale helper or library binary fails closed rather than
+misparsing a frame while holding `CAP_SYS_ADMIN`. Every field of the frame
+originates from the peer and is validated before use (the magic/version/length/
+type gate above). The only attacker-controllable payload field is a
 `u32 crtc_id`, used purely as an equality filter against a plane's CRTC id — a
 bad value yields "no active framebuffer", not memory unsafety. The request path
 carries no path or fd field. Fd passing (`SCM_RIGHTS`) is one-directional,

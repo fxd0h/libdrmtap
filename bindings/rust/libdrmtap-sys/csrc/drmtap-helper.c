@@ -888,11 +888,14 @@ int main(int argc, char *argv[]) {
             break;
         }
         /* Reject a frame from a mismatched protocol (a stale helper or library
-         * binary): the magic/version/length must match this build. Once they
-         * differ the stream framing is unreliable, so fail closed and stop
-         * serving rather than misparse a frame while holding CAP_SYS_ADMIN. */
+         * binary) or an unknown command type: wire_cmd_valid gates the
+         * magic/version/length AND the type at one point, before dispatch. Close
+         * the connection WITHOUT a response: the framing is untrustworthy and we
+         * cannot know which reply schema the peer expects (grab vs cursor), so
+         * any error payload could be misparsed as valid data. A closed socket is
+         * an unambiguous failure every client path already handles. Fail closed
+         * rather than misparse a frame while holding CAP_SYS_ADMIN. */
         if (!wire_cmd_valid(&hcmd)) {
-            send_error(sock, "protocol version mismatch");
             break;
         }
 
@@ -909,8 +912,10 @@ int main(int argc, char *argv[]) {
                 goto done;
 
             default:
-                send_error(sock, "unknown command");
-                break;
+                /* Unreachable: wire_cmd_valid already restricted the type to the
+                 * three commands above. Close defensively rather than reply with
+                 * a schema the peer may not expect. */
+                goto done;
         }
     }
 
