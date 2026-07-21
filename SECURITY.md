@@ -101,12 +101,17 @@ why).
 ### Request protocol / attack surface
 
 The wire protocol is tiny: three commands (`CMD_GRAB`, `CMD_GET_CURSOR`,
-`CMD_QUIT`) in a fixed 8-byte struct. The only attacker-controllable per-request
-field is a `u32 crtc_id`, used purely as an equality filter against a plane's
-CRTC id — a bad value yields "no active framebuffer", not memory unsafety. The
-request path carries no path or fd field. Fd passing (`SCM_RIGHTS`) is
-one-directional, **helper → main only** (the DMA-BUF export); the unprivileged
-side cannot hand the privileged side a path or fd to open.
+`CMD_QUIT`) in a fixed 16-byte command frame (`helper_cmd_grab_t` in
+`src/wire.h`). The frame carries a `magic` + protocol `version` + `type` +
+`length` header, and the helper rejects any frame whose magic, version or length
+do not match its own build and stops serving — so a stale helper or library
+binary fails closed rather than misparsing a frame while holding
+`CAP_SYS_ADMIN`. The only semantically attacker-controllable field is a
+`u32 crtc_id`, used purely as an equality filter against a plane's CRTC id — a
+bad value yields "no active framebuffer", not memory unsafety. The request path
+carries no path or fd field. Fd passing (`SCM_RIGHTS`) is one-directional,
+**helper → main only** (the DMA-BUF export); the unprivileged side cannot hand
+the privileged side a path or fd to open.
 
 Before any size computation, the helper validates the framebuffer geometry
 (`pitch`/`height`) reported by the kernel: it rejects a zero pitch/height and
@@ -114,6 +119,45 @@ caps `pitch * height` at one 8K BGRA frame (~126 MB). This guards against an
 integer-overflow of `size_t` and keeps the `u32 data_size` put on the wire from
 disagreeing with the payload actually sent, so a malformed scanout cannot drive
 an oversized allocation or a short write.
+
+---
+
+## The split-capture convert boundary
+
+The helper above is one trust boundary. The split-capture API is a second,
+independent one, for integrators that keep the GPU/EGL stack out of the
+privileged process entirely:
+
+- The **exporter** side (`drmtap_open` / `drmtap_grab_desc`) runs privileged and
+  does only the minimal DRM work: pick the active CRTC, get its scanout
+  framebuffer, export it as a DMA-BUF fd, and fill a `drmtap_dmabuf_desc`
+  (geometry, per-plane offsets/pitches, modifier, HDR state). No EGL, no GPU
+  driver on this side.
+- The **converter** side (`drmtap_open_render` / `drmtap_convert_dmabuf`) runs
+  unprivileged (a render node only, no KMS master, no helper), imports the
+  DMA-BUF, EGL-detiles it and converts to linear RGBA.
+- The DMA-BUF fd is passed to the converter over the integrator's IPC
+  (`SCM_RIGHTS`), together with the descriptor.
+
+Because the descriptor and fd arrive over a process boundary,
+**`drmtap_convert_dmabuf()` treats them as untrusted IPC input**, exactly like
+the helper treats a command frame. Before it maps or reads anything it:
+
+- rejects `num_planes > 4`, a zero/short stride (`pitches[0] < width * bpp`), and
+  a frame whose `stride * height` exceeds the same one-8K-frame cap
+  (`validate_fb_size`, ~126 MB) used on the privileged side;
+- requires the fd to be a **genuine DMA-BUF** — a non-dma-buf fd is rejected (an
+  immutable dma-buf cannot be truncated mid-read, so it is safe to `mmap` on the
+  CPU fallback path);
+- bounds the CPU read against the buffer size (via `lseek`, reliable across
+  kernels unlike `fstat`, which reports 0 for a dma-buf before Linux 5.3) and
+  **fails closed** (returns `-EINVAL`) when the size cannot be determined.
+
+A descriptor that claims a frame larger than its fd actually backs therefore
+returns `-EINVAL` instead of faulting the converter with `SIGBUS` (a
+denial-of-service on a malformed IPC message, fixed in 0.4.12 and covered by the
+`fuzz/fuzz_convert.c` libFuzzer target). The converter never trusts the
+descriptor's geometry against the real buffer.
 
 ---
 
@@ -159,6 +203,8 @@ Do not read the above as more locked down than it is:
 | Unprivileged side points the helper at an arbitrary device | Device path must canonicalize under `/dev/dri/`, and the node is opened `O_RDONLY` |
 | Unprivileged side makes the helper open an arbitrary path/fd | The request protocol carries no path/fd; fd passing is helper -> main only; `open`/`openat` are not on the seccomp allowlist after init |
 | Malformed scanout geometry drives an oversized allocation / overflow | Geometry guard rejects zero/absurd `pitch`/`height`, capping at one 8K BGRA frame |
+| Malformed convert descriptor faults the unprivileged converter (SIGBUS DoS) | `drmtap_convert_dmabuf` validates geometry, requires a genuine DMA-BUF, and bounds the read against the buffer size (`lseek`), failing closed on unknown size |
+| Stale helper/library binary misparses the command stream | The command frame carries a magic + protocol version; the helper rejects a mismatched frame and stops serving |
 | Helper gains new privileges via exec | `PR_SET_NO_NEW_PRIVS` |
 | Helper runs unconfined if hardening fails | Hard-fails: refuses to serve if cap-drop or seccomp cannot be established |
 | Third party intercepts frames or connects to the helper | Anonymous inherited socketpair, not discoverable, no listening socket |
