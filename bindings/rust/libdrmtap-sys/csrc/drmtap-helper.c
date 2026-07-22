@@ -52,6 +52,7 @@
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <drm_fourcc.h>  /* DRM_FORMAT_MOD_INVALID */
 
 #ifdef HAVE_LIBCAP
 #include <sys/capability.h>
@@ -629,7 +630,15 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     meta.stride = fb2->pitches[0];
     meta.format = fb2->pixel_format;
     meta.fb_id = fb_id;
-    meta.modifier = fb2->modifier;
+    /* fb2->modifier is valid only when the FB carries the DRM_MODE_FB_MODIFIERS flag;
+     * otherwise it is undefined. Report DRM_FORMAT_MOD_INVALID when the flag is clear
+     * so the parent's EGL import infers the real layout instead of trusting a bogus
+     * 0/LINEAR on a driver that is actually tiling (the XR30 class). INVALID is
+     * non-zero, so the export-vs-dumb-map branch below correctly routes it to the
+     * EGL-import path (with the dumb-map fallback still intact if export fails). */
+    meta.modifier = (fb2->flags & DRM_MODE_FB_MODIFIERS)
+                        ? fb2->modifier
+                        : DRM_FORMAT_MOD_INVALID;
 
     /* HDR transfer + peak from the connector, so the library can decide whether
      * to tone-map (vs a plain bit-depth reduction for SDR 10-bit). */
@@ -692,7 +701,13 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
             return send_error(sock, "virgl DMA-BUF export failed "
                                     "(no usable CPU readback for a host scanout)");
         }
-        /* Otherwise fall through to the dumb-map pixel path. */
+        /* Otherwise fall through to the dumb-map pixel path. This is safe even for an
+         * INVALID (unknown-layout) modifier: a driver that TILES the scanout also
+         * implements PRIME export, so the export above would have succeeded and we
+         * would not be here. A buffer that reaches this fallback (export failed) is in
+         * practice a LINEAR scanout on a non-PRIME driver (plain virtio-gpu guest RAM,
+         * simpledrm, legacy AddFB), whose dumb-mapped pixels the parent reconstructs
+         * correctly from stride/format/dims. */
         fprintf(stderr,
             "drmtap-helper: drmPrimeHandleToFD failed (%d), falling back to pixels\n",
             prime_ret);
@@ -842,6 +857,14 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "drmtap-helper: failed to open %s: %s\n",
                 device, strerror(errno));
         return 1;
+    }
+    /* Defensively drop DRM master. This helper only reads scanout (GetFB2 /
+     * PrimeHandleToFD) and never modesets, but if it opened the card node while no
+     * client held master the kernel made it master implicitly, which would then block
+     * a compositor from (re)acquiring master on a VT switch -> a black/frozen display.
+     * drmDropMaster returns 0 only when we actually held master; otherwise no-op. */
+    if (drmDropMaster(drm_fd) == 0) {
+        fprintf(stderr, "drmtap-helper: dropped implicit DRM master on %s\n", device);
     }
     drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 

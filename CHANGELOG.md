@@ -4,6 +4,26 @@ Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
 project share one version; the `libdrmtap` wrapper crate is versioned separately.
 
+## [0.4.14] - 2026-07-22
+
+### Fixed
+
+- Drop DRM master after opening the card node when running privileged (root /
+  CAP_SYS_ADMIN), in both the library and the privileged helper. libdrmtap only
+  reads scanout and never modesets, but if a privileged process opened the node
+  while no client held master (e.g. an unattended service started at boot before
+  the compositor) the kernel granted it implicitly, which then blocked a compositor
+  from reacquiring master on a VT switch and left the display black or frozen.
+  Master is now dropped defensively there. An unprivileged caller keeps master,
+  since it relies on it for drmModeGetFB2 to return framebuffer handles.
+- Honor the DRM_MODE_FB_MODIFIERS flag before trusting the framebuffer modifier.
+  drmModeGetFB2 leaves the modifier field undefined when the flag is clear, so a
+  driver that tiles the scanout without advertising a modifier was imported as if
+  linear and produced corruption (the recurring 10-bit XR30 class). When the flag
+  is clear the modifier is now reported as DRM_FORMAT_MOD_INVALID, so the EGL import
+  omits the modifier attribute and lets the driver infer the real layout; the CPU
+  fallback keeps treating an unknown modifier as linear.
+
 ## [0.4.13] - 2026-07-20
 
 ### Hardening

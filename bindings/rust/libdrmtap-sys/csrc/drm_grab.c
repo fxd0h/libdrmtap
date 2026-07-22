@@ -682,7 +682,15 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     frame->height = fb2->height;
     frame->stride = fb2->pitches[0];
     frame->format = fb2->pixel_format;
-    frame->modifier = fb2->modifier;
+    /* fb2->modifier is only meaningful when the framebuffer was created with the
+     * DRM_MODE_FB_MODIFIERS flag. When the flag is clear the field is undefined
+     * (commonly 0, but garbage on some drivers), and trusting a bogus 0/LINEAR on a
+     * driver that is actually tiling the scanout corrupts the import (the recurring
+     * XR30 / "special fix" class). Report DRM_FORMAT_MOD_INVALID instead so the EGL
+     * import omits the modifier attribute and the driver infers the real layout. */
+    frame->modifier = (fb2->flags & DRM_MODE_FB_MODIFIERS)
+                          ? fb2->modifier
+                          : DRM_FORMAT_MOD_INVALID;
     frame->fb_id = fb_id;
     frame->dma_buf_fd = prime_fd;
     frame->data = NULL;
@@ -857,7 +865,17 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     if (!data && !force_egl && frame->dma_buf_fd < 0) return 0;
 
     uint64_t modifier = frame->modifier;
-    int is_linear = (modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0);
+    /* INVALID means the FB advertised no modifier (flag clear), so the layout is
+     * unknown. Treat it as linear ONLY when EGL import is unavailable: this is the
+     * CPU fallback for the simple drivers that take that path (virtio, embedded),
+     * where an unknown scanout is in practice linear. When EGL IS available we must
+     * NOT short-circuit to the linear early-return below -- a modern tiling driver
+     * leaves the modifier flag clear on a tiled scanout (the XR30 class), and only
+     * the EGL path further down, which omits the modifier and lets the driver infer
+     * the real layout, decodes it correctly. */
+    int is_linear = (modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0 ||
+                     (modifier == DRM_FORMAT_MOD_INVALID &&
+                      !drmtap_gpu_egl_available(ctx)));
 
     /* A linear high-bit-depth / HDR scanout still needs reduction to 8-bit
      * (the early-return below is only safe for 8-bit RGB). */
