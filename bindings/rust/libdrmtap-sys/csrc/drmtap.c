@@ -252,6 +252,22 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
         /* If fcntl fails, keep the original fd (best effort) */
     }
 
+    /* Defensively drop DRM master -- but ONLY when we are privileged (root /
+     * CAP_SYS_ADMIN). We only READ scanout and never modeset, so if a PRIVILEGED
+     * process opened the node while no client held master (e.g. an unattended capture
+     * service that started at boot before the compositor), the kernel granted it
+     * implicit master, which would then block the compositor from acquiring master on
+     * a VT switch -> a black/frozen display; dropping it is safe there because
+     * drmModeGetFB2 still returns handles via CAP_SYS_ADMIN. An UNPRIVILEGED caller,
+     * by contrast, has no CAP_SYS_ADMIN and RELIES on that implicit master for
+     * drmModeGetFB2 to return framebuffer handles at all, so it must keep it -- do
+     * not drop. drmDropMaster returns 0 only when we actually held master; when a
+     * compositor already holds it (the normal desktop case) it is a harmless no-op. */
+    if ((geteuid() == 0 || getuid() == 0) &&
+        drmDropMaster(ctx->drm_fd) == 0) {
+        drmtap_debug_log(ctx, "dropped implicit DRM master on %s", ctx->device_path);
+    }
+
     /* Detect GPU driver */
     detect_driver(ctx);
 
