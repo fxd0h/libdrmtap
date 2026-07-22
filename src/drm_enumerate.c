@@ -56,11 +56,12 @@ static uint32_t connector_crtc_from_atomic(int fd, uint32_t connector_id) {
     return crtc_id;
 }
 
-/* Fold the current connector topology (per-connector connection state + bound
- * CRTC) into a hash. Unlike the raw connector/CRTC counts -- fixed by the GPU
- * hardware -- this changes when a monitor is plugged/unplugged on an existing
- * connector or a CRTC is (re)bound by a modeset, which is what hotplug detection
- * needs. GetConnectorCurrent reads cached kernel state (no forced probe). */
+/* Fold the current connector topology (per-connector connection state, bound CRTC,
+ * and that CRTC's active mode) into a hash. Unlike the raw connector/CRTC counts --
+ * fixed by the GPU hardware -- this changes when a monitor is plugged/unplugged on an
+ * existing connector, a CRTC is (re)bound, or a modeset changes the active resolution
+ * or refresh, which is what hotplug/modeset detection needs. GetConnectorCurrent reads
+ * cached kernel state (no forced probe). */
 static uint64_t topology_hash(int drm_fd, drmModeRes *res) {
     uint64_t h = 1469598103934665603ULL; /* FNV-1a 64-bit offset basis */
 #define TH_FOLD(v) do { h ^= (uint64_t)(uint32_t)(v); h *= 1099511628211ULL; } while (0)
@@ -75,7 +76,20 @@ static uint64_t topology_hash(int drm_fd, drmModeRes *res) {
         }
         TH_FOLD(conn->connector_id);
         TH_FOLD(conn->connection);
-        TH_FOLD(connector_crtc_from_atomic(drm_fd, conn->connector_id));
+        uint32_t crtc = connector_crtc_from_atomic(drm_fd, conn->connector_id);
+        TH_FOLD(crtc);
+        if (crtc) {
+            /* Fold the active mode so a modeset (resolution / refresh change) on the
+             * same connector+CRTC binding is detected, not just plug/unplug/rebind. */
+            drmModeCrtc *c = drmModeGetCrtc(drm_fd, crtc);
+            if (c) {
+                TH_FOLD(c->mode_valid);
+                TH_FOLD(c->mode.hdisplay);
+                TH_FOLD(c->mode.vdisplay);
+                TH_FOLD(c->mode.vrefresh);
+                drmModeFreeCrtc(c);
+            }
+        }
         drmModeFreeConnector(conn);
     }
 #undef TH_FOLD
