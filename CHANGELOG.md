@@ -8,21 +8,104 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 
 ### Fixed
 
-- Drop DRM master after opening the card node when running privileged (root /
-  CAP_SYS_ADMIN), in both the library and the privileged helper. libdrmtap only
-  reads scanout and never modesets, but if a privileged process opened the node
-  while no client held master (e.g. an unattended service started at boot before
-  the compositor) the kernel granted it implicitly, which then blocked a compositor
-  from reacquiring master on a VT switch and left the display black or frozen.
-  Master is now dropped defensively there. An unprivileged caller keeps master,
-  since it relies on it for drmModeGetFB2 to return framebuffer handles.
-- Honor the DRM_MODE_FB_MODIFIERS flag before trusting the framebuffer modifier.
-  drmModeGetFB2 leaves the modifier field undefined when the flag is clear, so a
-  driver that tiles the scanout without advertising a modifier was imported as if
-  linear and produced corruption (the recurring 10-bit XR30 class). When the flag
-  is clear the modifier is now reported as DRM_FORMAT_MOD_INVALID, so the EGL import
-  omits the modifier attribute and lets the driver infer the real layout; the CPU
-  fallback keeps treating an unknown modifier as linear.
+- Drop DRM master after opening the card node when the caller holds CAP_SYS_ADMIN,
+  in both the library and the privileged helper. libdrmtap only reads scanout and
+  never modesets, but if a process holding CAP_SYS_ADMIN opened the node while no
+  client held master (e.g. an unattended service started at boot before the
+  compositor) the kernel granted it implicitly, which then blocked a compositor from
+  reacquiring master on a VT switch and left the display black or frozen. Master is
+  now dropped defensively there. The gate is the capability, checked with the capget
+  syscall, not the uid: a caller without CAP_SYS_ADMIN (including a uid-0 process
+  that dropped it) relies on the implicit master for drmModeGetFB2 to return
+  framebuffer handles and must keep it.
+- Honor the DRM_MODE_FB_MODIFIERS flag before trusting the framebuffer modifier, on
+  every grab path (the primary grab, the fast-capture cache and the privileged
+  helper). drmModeGetFB2 leaves the modifier field undefined when the flag is clear,
+  so a driver that tiles the scanout without advertising a modifier was imported as
+  if linear and produced corruption (the recurring 10-bit XR30 class). When the flag
+  is clear the modifier is now reported as DRM_FORMAT_MOD_INVALID: with a DMA-BUF and
+  EGL the import omits the modifier attribute and lets the driver infer the real
+  layout; when EGL cannot run (no DMA-BUF fd, or EGL unavailable) an unknown layout is
+  treated as linear and reduced from the raw mapping, which keeps 10-bit and 16-bit
+  scanouts correct instead of diverting them into the CPU deswizzle.
+- The EGL import no longer falls back to reinterpreting a high-bit-depth scanout as
+  XRGB8888. When the native fourcc import failed, the retry forced XRGB8888 while
+  keeping the source stride, which sampled a 10-bit (XR30 family) or 16-bit (XR48
+  family) buffer at the wrong bit depth and returned it as a valid frame. A
+  high-bit-depth import that fails now fails cleanly so the caller reduces the real
+  bit depth from the raw mapping on the CPU; the XRGB8888 retry stays for genuine
+  8-bit sources whose exact fourcc a driver does not recognize.
+- The privileged helper leaked a GEM handle on every grab and every cursor poll:
+  drmModeGetFB2 mints a fresh handle the caller owns, and no path closed it, so the
+  long-running root helper pinned one buffer object per frame until exhaustion. Both
+  helper paths and the direct cursor path in the library now close the handle on every
+  return. (The main grab path in the library already closed its handles.)
+- The EGL convert path no longer returns a stale or uninitialized frame as success
+  after GPU context loss. A failed eglMakeCurrent is now fatal, and a GL error across
+  the render and readback (notably a context reset) fails the convert instead of
+  handing back whatever was in the readback buffer.
+- HDR displays are now tone-mapped on Wayland direct capture. Both HDR-metadata reads
+  (the library and the helper) mapped a CRTC to its connector through the legacy
+  encoder link, which reads 0 under atomic KMS, so a compositor-managed HDR connector
+  never matched and never tone-mapped. They now match on the atomic CRTC_ID property.
+- Half-float FP16 scanouts (XRGB16161616F and siblings) are reduced correctly on the
+  CPU fallback instead of being misread as 8-bit and returned as a corrupt frame. The
+  new converter decodes each half as linear light and re-encodes through the sRGB
+  OETF (HDR highlights clip).
+- Monitor hotplug and modeset are now detected. drmtap_displays_changed compared the
+  connector and CRTC object counts, which are fixed by the GPU hardware, so a monitor
+  plugged or unplugged on an existing connector never registered. It now hashes the
+  connection state and bound CRTC of each connector.
+- The XRGB8888 EGL import retries honor the plane-0 offset from the framebuffer
+  instead of hardcoding 0, so a scanout whose pixels start at a non-zero BO offset is
+  not imported shifted.
+- drmtap_convert_format rejects a source or destination stride narrower than
+  width times four, matching drmtap_convert_rgb16, closing an out-of-bounds row
+  access on a malformed geometry.
+- 10-bit BGR scanouts (XBGR2101010 / ABGR2101010, the XB30 family) are now reduced
+  and tone-mapped on the CPU fallback. Both the SDR reduction and the HDR tone-map
+  handled only the RGB 10-bit order (XR30 / AR30), so a 10-bit BGR scanout fell
+  through unreduced and was returned as a corrupt frame. The channel order is now
+  selected from the fourcc.
+- The fast-capture path falls back to EGL when a scanout cannot be CPU-mapped. A
+  tiled scanout on some drivers (amdgpu GFX9+, discrete VRAM, nvidia) refuses an mmap
+  of the exported DMA-BUF; grab_mapped_fast returned -ENOMEM there instead of
+  EGL-detiling the fd the way the primary grab does. It now takes that fallback (no
+  CPU mapping is cached for such a frame; the fd is re-exported each grab). Validated
+  on Intel via a DRMTAP_FORCE_MMAP_FAIL test hook that drops the CPU mapping so the
+  fallback runs on any EGL-capable GPU.
+- The grab_mapped_fast doc no longer claims it returns 1 on an unchanged framebuffer.
+  It always re-reads the current scanout and returns a fresh frame, because a
+  compositor can render into the same framebuffer without a page flip, so an
+  fb_id-unchanged skip would miss content updates. The identity assumption (a stable
+  fb_id denotes the same buffer between captures) is now documented.
+
+### Security
+
+- drmtap_convert_dmabuf now validates the untrusted fd (genuine dma-buf plus the
+  offset-and-size bound added in 0.4.12) BEFORE the EGL import, not only in the CPU
+  fallback. The EGL path runs first and is the one the intended unprivileged converter
+  takes, so a hostile descriptor claiming a frame larger than the dma-buf backs
+  previously reached eglCreateImage unbounded; it is now rejected up front.
+- The helper seccomp filter restricts ioctl to the DRM ioctl type instead of allowing
+  every ioctl. The helper issues nothing but DRM ioctls on its one DRM fd, so a
+  memory-corrupted helper can no longer reach an unrelated ioctl (terminal control,
+  console injection). Matching the type byte stays robust across drivers without
+  risking a KILL on a DRM command not individually listed.
+- The privileged helper no longer honors DRM_DEVICE from the environment. It takes the
+  device solely from the library-selected, vetted argv path (the library already
+  ignores DRM_DEVICE when privileged, since 0.4.11).
+
+### Performance
+
+- The HDR-metadata read no longer forces a hardware connector probe on every captured
+  frame. Both the library and the helper now use drmModeGetConnectorCurrent, which
+  reads cached kernel state instead of re-probing the connector each frame.
+- The 16-bit HDR (PQ) reduction uses a precomputed 65536-entry lookup table instead of
+  calling pow twice per channel per pixel (tens of millions of pow calls per 4K frame).
+- The privileged helper caches which planes are PRIMARY instead of re-reading each
+  plane's static type property (an object-properties fetch plus a per-property lookup)
+  on every captured frame.
 
 ## [0.4.13] - 2026-07-20
 
@@ -153,6 +236,7 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.4.14]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.14
 [0.4.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.13
 [0.4.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.12
 [0.4.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.11

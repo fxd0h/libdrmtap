@@ -53,8 +53,9 @@ this specific operation:
 So `CAP_SYS_ADMIN` is what the kernel requires. We are upfront that it is broad
 and overpowered for what the helper actually does with it. The mitigation is
 **structural** (keep it out of the main process, confine the helper), not a
-clever capability minimization. The helper never becomes DRM master (it does not
-call `drmSetMaster`).
+clever capability minimization. The helper never sets itself DRM master (it does
+not call `drmSetMaster`), and right after opening the node it calls
+`drmDropMaster` to release any master the kernel granted it implicitly.
 
 > A narrower kernel capability for scanout read-back would let us drop
 > `CAP_SYS_ADMIN` entirely. We would welcome such a change.
@@ -67,28 +68,38 @@ At startup, in this order (`main()` in `helper/drmtap-helper.c`):
 
 1. **Refuses to run standalone** — validates that fd 3 is a connected socket and
    that the peer uid (via `SO_PEERCRED`) matches its own uid; exits otherwise.
-2. **Restricts the device path** — the device comes from `argv[1]` or the
-   `DRM_DEVICE` env var (both attacker-influenceable). The helper canonicalizes
-   it with `realpath()` and **refuses any path that does not resolve under
-   `/dev/dri/`** before opening it.
+2. **Restricts the device path** — the device comes solely from `argv[1]` (the
+   path the library selected). The helper does not read `DRM_DEVICE` from the
+   environment (0.4.14 hardening), and the library itself ignores `DRM_DEVICE`
+   when privileged (since 0.4.11), so an env var cannot redirect which device the
+   privileged process opens. The still attacker-influenceable `argv[1]` is
+   canonicalized with `realpath()`, and the helper **refuses any path that does
+   not resolve under `/dev/dri/`** before opening it.
 3. **`PR_SET_NO_NEW_PRIVS`** — set via `prctl`, before seccomp; hard-fails if it
    cannot be set.
 4. **Opens the DRM device once, read-only** — `open(..., O_RDONLY | O_CLOEXEC)`.
    Only read ioctls are issued (`GetFB2` / `PrimeHandleToFD` / `SetClientCap`),
    which all work on an `O_RDONLY` fd on the CAP_SYS_ADMIN path; the helper never
    becomes DRM master and never modifies KMS state. Opening happens **before**
-   seccomp so the filter can forbid `open`/`openat` outright (next step).
-5. **Drops all capabilities except `CAP_SYS_ADMIN`** — via libcap
+   seccomp so the filter can forbid `open`/`openat` outright (the seccomp step
+   below).
+5. **Drops any implicitly-granted DRM master** — calls `drmDropMaster` right
+   after opening, so a boot-time capture process (started before the compositor
+   holds master) cannot block a compositor from (re)acquiring master on a VT
+   switch. It is a no-op unless the kernel had made the helper master implicitly.
+6. **Drops all capabilities except `CAP_SYS_ADMIN`** — via libcap
    (`cap_set_proc`). **Hard-fails** (refuses to serve) if it cannot.
-6. **Installs a seccomp filter** — `seccomp_init(SCMP_ACT_KILL_PROCESS)` (a
+7. **Installs a seccomp filter** — `seccomp_init(SCMP_ACT_KILL_PROCESS)` (a
    default-**KILL** allowlist), allowing only: `read, write, close, ioctl,
    sendto, sendmsg, recvfrom, mmap, munmap, brk, fstat, newfstatat, fcntl,
-   exit_group, exit, rt_sigreturn, clock_gettime`. **`open`/`openat` are
-   deliberately NOT on the allowlist** — the device fd was already opened in
-   step 4 and the grab loop only ever reuses it, so a compromised helper cannot
-   open arbitrary files even while it holds `CAP_SYS_ADMIN`. **Hard-fails** if it
-   cannot install.
-7. Serves grab/cursor requests on the persistent fd in a loop.
+   exit_group, exit, rt_sigreturn, clock_gettime`. `ioctl` is further restricted
+   by request **type** to DRM ioctls only — a masked equality on the request's
+   type byte (`'d'`), so a non-DRM `ioctl` such as `TIOCSTI` console injection
+   hits the default KILL. **`open`/`openat` are deliberately NOT on the
+   allowlist** — the device fd was already opened in step 4 and the grab loop
+   only ever reuses it, so a compromised helper cannot open arbitrary files even
+   while it holds `CAP_SYS_ADMIN`. **Hard-fails** if it cannot install.
+8. Serves grab/cursor requests on the persistent fd in a loop.
 
 The helper binary is also built with exploit-mitigation flags
 (`-fstack-protector-strong`, `_FORTIFY_SOURCE=2` on optimized builds, PIE, and
@@ -143,17 +154,22 @@ privileged process entirely:
 
 Because the descriptor and fd arrive over a process boundary,
 **`drmtap_convert_dmabuf()` treats them as untrusted IPC input**, exactly like
-the helper treats a command frame. Before it maps or reads anything it:
+the helper treats a command frame. The gates below run up front, before
+**either** conversion path touches the fd — the EGL import runs first and would
+otherwise hand the descriptor's width/height/stride/offset straight to
+`eglCreateImage` with no size check, so they protect it as much as the CPU
+`mmap` fallback:
 
 - rejects `num_planes > 4`, a zero/short stride (`pitches[0] < width * bpp`), and
   a frame whose `stride * height` exceeds the same one-8K-frame cap
   (`validate_fb_size`, ~126 MB) used on the privileged side;
 - requires the fd to be a **genuine DMA-BUF** — a non-dma-buf fd is rejected (an
-  immutable dma-buf cannot be truncated mid-read, so it is safe to `mmap` on the
-  CPU fallback path);
-- bounds the CPU read against the buffer size (via `lseek`, reliable across
-  kernels unlike `fstat`, which reports 0 for a dma-buf before Linux 5.3) and
-  **fails closed** (returns `-EINVAL`) when the size cannot be determined.
+  immutable dma-buf cannot be truncated mid-read, so it cannot be shrunk between
+  the check and the import or `mmap`);
+- bounds the read against the buffer size — `offsets[0] + pitches[0] * height`
+  must fit the real fd size (via `lseek`, reliable across kernels unlike
+  `fstat`, which reports 0 for a dma-buf before Linux 5.3) — and **fails closed**
+  (returns `-EINVAL`) when the size cannot be determined.
 
 A descriptor that claims a frame larger than its fd actually backs therefore
 returns `-EINVAL` instead of faulting the converter with `SIGBUS` (a
@@ -176,9 +192,12 @@ Do not read the above as more locked down than it is:
   the dynamic loader ignores `LD_PRELOAD`/`LD_LIBRARY_PATH` for the secure-exec
   case, but this is the loader's `AT_SECURE` behavior, not something the helper
   itself enforces.
-- **The seccomp filter has no per-argument filtering.** `ioctl` is allowed on
-  any fd. It blocks whole syscall classes (including `open`/`openat` entirely),
-  but it does not narrow the argument values of the syscalls it does allow.
+- **The seccomp filter narrows only `ioctl`, and only by request type.** `ioctl`
+  is restricted to the DRM type — a masked equality on the request's type byte
+  (`'d'`), so a non-DRM `ioctl` such as `TIOCSTI` console injection is killed —
+  but the fd argument itself is not filtered, and the other allowed syscalls have
+  no per-argument narrowing at all. It otherwise blocks whole syscall classes
+  (including `open`/`openat` entirely).
 - **A world-executable setcap helper on a multi-user host is a real
   consideration.** Anyone who can execute the binary gets a process holding
   `CAP_SYS_ADMIN` (confined by seccomp, and the `SO_PEERCRED` check stops them
@@ -204,7 +223,9 @@ Do not read the above as more locked down than it is:
 | Helper exec'd standalone or by a different user | Refuses unless fd 3 is a connected socket whose `SO_PEERCRED` peer uid matches its own |
 | Unprivileged side points the helper at an arbitrary device | Device path must canonicalize under `/dev/dri/`, and the node is opened `O_RDONLY` |
 | Unprivileged side makes the helper open an arbitrary path/fd | The request protocol carries no path/fd; fd passing is helper -> main only; `open`/`openat` are not on the seccomp allowlist after init |
+| Compromised helper issues a non-DRM ioctl (e.g. `TIOCSTI` console injection) | seccomp allows `ioctl` only for the DRM request type (masked equality on the type byte); any other ioctl hits `SCMP_ACT_KILL_PROCESS` |
 | Malformed scanout geometry drives an oversized allocation / overflow | Geometry guard rejects zero/absurd `pitch`/`height`, capping at one 8K BGRA frame |
+| Long-running helper exhausts kernel GEM handles / pins buffer objects | The helper closes the GEM handle `drmModeGetFB2` mints on every grab and cursor path (`helper_gem_close`), so handle/BO use cannot grow unboundedly |
 | Malformed convert descriptor faults the unprivileged converter (SIGBUS DoS) | `drmtap_convert_dmabuf` validates geometry, requires a genuine DMA-BUF, and bounds the read against the buffer size (`lseek`), failing closed on unknown size |
 | Stale helper/library binary misparses the command stream | The command frame carries a magic + protocol version; the helper rejects a mismatched frame and stops serving |
 | Helper gains new privileges via exec | `PR_SET_NO_NEW_PRIVS` |

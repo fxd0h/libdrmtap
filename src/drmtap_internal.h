@@ -47,8 +47,7 @@ struct drmtap_ctx {
     int is_render_only;
 
     /* Cached resources for hotplug detection */
-    uint32_t cached_connector_count;
-    uint32_t cached_crtc_count;
+    uint64_t cached_topology_hash;  /* per-connector state fold; hotplug/modeset signal */
 
     /* Helper binary */
     char helper_path[512];
@@ -241,5 +240,13 @@ int drmtap_convert_rgb16(const void *src, void *dst,
                          uint32_t width, uint32_t height,
                          uint32_t src_stride, uint32_t dst_stride,
                          int bgr, uint32_t eotf, uint32_t max_nits);
+
+/* Reduce a half-float (FP16) scanout -- XRGB16161616F ('XR4H') and its BGR/alpha
+ * siblings, 8 bytes/pixel -- to 8-bit XRGB8888. FP16 carries linear light, decoded
+ * to linear then re-encoded through the sRGB OETF; HDR highlights (>1.0) clip.
+ * `bgr` selects channel order. (pixel_convert.c) */
+int drmtap_convert_rgb16f(const void *src, void *dst,
+                          uint32_t width, uint32_t height,
+                          uint32_t src_stride, uint32_t dst_stride, int bgr);
 
 #endif /* DRMTAP_INTERNAL_H */

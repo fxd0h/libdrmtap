@@ -225,7 +225,7 @@ static int deswizzle_nvidia_x_tiled(const void *src, void *dst,
 static void convert_ar30_to_xrgb8888(const void *src, void *dst,
                                      uint32_t width, uint32_t height,
                                      uint32_t src_stride,
-                                     uint32_t dst_stride) {
+                                     uint32_t dst_stride, int bgr) {
     for (uint32_t y = 0; y < height; y++) {
         const uint32_t *s = (const uint32_t *)
             ((const uint8_t *)src + y * src_stride);
@@ -234,9 +234,13 @@ static void convert_ar30_to_xrgb8888(const void *src, void *dst,
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t pixel = s[x];
-            uint8_t r = (uint8_t)((pixel >> 22) & 0xFF);  /* [29:20] >> 2 */
-            uint8_t g = (uint8_t)((pixel >> 12) & 0xFF);  /* [19:10] >> 2 */
-            uint8_t b = (uint8_t)((pixel >> 2) & 0xFF);   /* [9:0] >> 2 */
+            /* Top 8 bits of each 10-bit channel. RGB: R[29:20] G[19:10] B[9:0];
+             * BGR (XB30/AB30) swaps the two outer channels. */
+            uint8_t c_hi = (uint8_t)((pixel >> 22) & 0xFF);  /* [29:20] >> 2 */
+            uint8_t g = (uint8_t)((pixel >> 12) & 0xFF);     /* [19:10] >> 2 */
+            uint8_t c_lo = (uint8_t)((pixel >> 2) & 0xFF);   /* [9:0] >> 2 */
+            uint8_t r = bgr ? c_lo : c_hi;
+            uint8_t b = bgr ? c_hi : c_lo;
             d[x] = (0xFFu << 24) | ((uint32_t)r << 16) |
                    ((uint32_t)g << 8) | b;
         }
@@ -379,9 +383,11 @@ int drmtap_deswizzle(const void *src, void *dst,
 #define DRMTAP_SDR_WHITE_NITS 203.0
 
 #define DRMTAP_PQ_LUT_N   1024    /* one entry per 10-bit code value */
+#define DRMTAP_PQ_LUT16_N 65536   /* one entry per 16-bit code value */
 #define DRMTAP_SRGB_LUT_N 4096    /* linear [0,1] -> 8-bit sRGB */
 
-static float   g_pq_lut[DRMTAP_PQ_LUT_N];      /* code -> luminance (nits) */
+static float   g_pq_lut[DRMTAP_PQ_LUT_N];      /* 10-bit code -> luminance (nits) */
+static float   g_pq_lut16[DRMTAP_PQ_LUT16_N];  /* 16-bit code -> luminance (nits) */
 static uint8_t g_srgb_lut[DRMTAP_SRGB_LUT_N];  /* linear [0,1] -> 8-bit sRGB */
 static pthread_once_t g_hdr_once = PTHREAD_ONCE_INIT;
 
@@ -413,6 +419,9 @@ static double srgb_oetf(double c) {
 static void hdr_lut_init(void) {
     for (int i = 0; i < DRMTAP_PQ_LUT_N; i++) {
         g_pq_lut[i] = (float)pq_eotf_nits((double)i / (DRMTAP_PQ_LUT_N - 1));
+    }
+    for (int i = 0; i < DRMTAP_PQ_LUT16_N; i++) {
+        g_pq_lut16[i] = (float)pq_eotf_nits((double)i / (DRMTAP_PQ_LUT16_N - 1));
     }
     for (int i = 0; i < DRMTAP_SRGB_LUT_N; i++) {
         double s = srgb_oetf((double)i / (DRMTAP_SRGB_LUT_N - 1));
@@ -479,8 +488,10 @@ int drmtap_tonemap_hdr10(const void *src, void *dst,
     if (!src || !dst || width == 0 || height == 0) {
         return -EINVAL;
     }
-    /* XR30 = XRGB2101010 ('XR30'), AR30 = ARGB2101010 ('AR30'). */
-    if (src_format != 0x30335258u && src_format != 0x30335241u) {
+    /* XR30/AR30 = X/ARGB2101010 (RGB order), XB30/AB30 = X/ABGR2101010 (BGR). */
+    int is_rgb = (src_format == 0x30335258u || src_format == 0x30335241u);
+    int is_bgr = (src_format == 0x30334258u || src_format == 0x30334241u);
+    if (!is_rgb && !is_bgr) {
         return -ENOTSUP;
     }
     /* Both buffers are 4 bytes/pixel; a stride that cannot hold a full row
@@ -500,11 +511,14 @@ int drmtap_tonemap_hdr10(const void *src, void *dst,
         uint32_t *d = (uint32_t *)((uint8_t *)dst + (size_t)y * dst_stride);
         for (uint32_t x = 0; x < width; x++) {
             uint32_t pixel = s[x];
-            /* 10-bit channels, ARGB2101010: R[29:20] G[19:10] B[9:0]. */
+            /* 10-bit channels. RGB: R[29:20] G[19:10] B[9:0]; BGR swaps the two
+             * outer channels (B[29:20] R[9:0]). */
+            uint32_t c_hi = (pixel >> 20) & 0x3FF;
+            uint32_t c_lo = (pixel)       & 0x3FF;
             uint8_t r, g, b;
-            tonemap_rgb_linear(g_pq_lut[(pixel >> 20) & 0x3FF],
+            tonemap_rgb_linear(g_pq_lut[is_bgr ? c_lo : c_hi],
                                g_pq_lut[(pixel >> 10) & 0x3FF],
-                               g_pq_lut[(pixel)       & 0x3FF],
+                               g_pq_lut[is_bgr ? c_hi : c_lo],
                                peak_n, &r, &g, &b);
             d[x] = (0xFFu << 24) | ((uint32_t)r << 16) |
                    ((uint32_t)g << 8) | b;
@@ -548,9 +562,9 @@ int drmtap_convert_rgb16(const void *src, void *dst,
             uint8_t r8, g8, b8;
             if (hdr) {
                 /* 16-bit PQ -> BT.2020 linear nits -> tone-map -> SDR. */
-                tonemap_rgb_linear(pq_eotf_nits((double)cr / 65535.0),
-                                   pq_eotf_nits((double)cg / 65535.0),
-                                   pq_eotf_nits((double)cb / 65535.0),
+                tonemap_rgb_linear(g_pq_lut16[cr],
+                                   g_pq_lut16[cg],
+                                   g_pq_lut16[cb],
                                    peak_n, &r8, &g8, &b8);
             } else {
                 /* Plain SDR 16-bit -> 8-bit (keep the high byte). */
@@ -565,11 +579,98 @@ int drmtap_convert_rgb16(const void *src, void *dst,
     return 0;
 }
 
+/* IEEE 754 binary16 -> binary32. */
+static float half_to_float(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t mant = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;                       /* +/-0 */
+        } else {                               /* subnormal */
+            exp = 127u - 15u + 1u;
+            while ((mant & 0x400u) == 0) { mant <<= 1; exp--; }
+            mant &= 0x3FFu;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1Fu) {                 /* Inf / NaN */
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp - 15u + 127u) << 23) | (mant << 13);
+    }
+    float out;
+    memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+/* Linear light [0,1] -> 8-bit sRGB via the shared OETF LUT (caller runs the
+ * pthread_once). Clamps out-of-range (HDR highlights, NaN) into [0,255]. */
+static uint8_t srgb8_from_linear(float f) {
+    if (!(f > 0.0f)) {           /* <= 0 or NaN */
+        return 0;
+    }
+    if (f >= 1.0f) {
+        return 255;
+    }
+    int i = (int)(f * (float)(DRMTAP_SRGB_LUT_N - 1) + 0.5f);
+    return g_srgb_lut[i];
+}
+
+/* Convert a half-float scanout (XRGB16161616F and its BGR/alpha siblings, fourcc
+ * 'XR4H' etc., 8 bytes/pixel) to 8-bit XRGB8888. FP16 scanouts carry LINEAR light,
+ * so each half is decoded to linear and re-encoded through the sRGB OETF -- unlike
+ * the integer 16-bit path, which treats its samples as already sRGB-encoded. HDR
+ * values above 1.0 clip to white: a faithful HDR tone-map needs the FP16 colorimetry
+ * the caller does not carry here, so this favors a correct, viewable SDR-range
+ * result over a speculative remap (and is still far better than the raw 16-bit bytes
+ * a consumer would otherwise misread as XRGB8888). */
+int drmtap_convert_rgb16f(const void *src, void *dst,
+                          uint32_t width, uint32_t height,
+                          uint32_t src_stride, uint32_t dst_stride, int bgr) {
+    if (!src || !dst || width == 0 || height == 0) {
+        return -EINVAL;
+    }
+    size_t src_row = (size_t)width * 8u;
+    size_t dst_row = (size_t)width * 4u;
+    if (src_row > UINT32_MAX || dst_row > UINT32_MAX ||
+        src_stride < src_row || dst_stride < dst_row) {
+        return -EINVAL;
+    }
+    pthread_once(&g_hdr_once, hdr_lut_init);   /* fills g_srgb_lut */
+    /* Memory order of the 16-bit quad is B,G,R,X for the RGB variants (XR4H/AR4H)
+     * and R,G,B,X for the BGR variants (XB4H/AB4H) -- identical to the integer
+     * drmtap_convert_rgb16 path, so red sits at unit 2 unless bgr. */
+    int ri = bgr ? 0 : 2;
+    int bi = bgr ? 2 : 0;
+    for (uint32_t y = 0; y < height; y++) {
+        const uint16_t *s = (const uint16_t *)
+            ((const uint8_t *)src + (size_t)y * src_stride);
+        uint32_t *d = (uint32_t *)((uint8_t *)dst + (size_t)y * dst_stride);
+        for (uint32_t x = 0; x < width; x++) {
+            const uint16_t *px = s + (size_t)x * 4;
+            uint8_t r8 = srgb8_from_linear(half_to_float(px[ri]));
+            uint8_t g8 = srgb8_from_linear(half_to_float(px[1]));
+            uint8_t b8 = srgb8_from_linear(half_to_float(px[bi]));
+            d[x] = (0xFFu << 24) | ((uint32_t)r8 << 16) |
+                   ((uint32_t)g8 << 8) | b8;
+        }
+    }
+    return 0;
+}
+
 int drmtap_convert_format(const void *src, void *dst,
                           uint32_t width, uint32_t height,
                           uint32_t src_stride, uint32_t dst_stride,
                           uint32_t src_format, uint32_t dst_format) {
     if (!src || !dst || width == 0 || height == 0) {
+        return -EINVAL;
+    }
+    /* Every format this converter handles (AR30/XR30 source, XRGB8888 dest, and
+     * the same-format copy) is 4 bytes/pixel, so a stride narrower than width*4
+     * would read or write past each row. Reject like drmtap_convert_rgb16 does. */
+    if ((size_t)src_stride < (size_t)width * 4u ||
+        (size_t)dst_stride < (size_t)width * 4u) {
         return -EINVAL;
     }
 
@@ -596,14 +697,20 @@ int drmtap_convert_format(const void *src, void *dst,
     #define DRM_FMT_ABGR8888    0x34324241u
     #define DRM_FMT_XRGB2101010 0x30335258u
     #define DRM_FMT_ARGB2101010 0x30335241u
+    #define DRM_FMT_XBGR2101010 0x30334258u
+    #define DRM_FMT_ABGR2101010 0x30334241u
 
-    /* AR30/XR30 → XRGB8888/ARGB8888 */
+    /* X/AR30 (RGB) and X/AB30 (BGR) 10-bit → XRGB8888/ARGB8888 */
     if ((src_format == DRM_FMT_XRGB2101010 ||
-         src_format == DRM_FMT_ARGB2101010) &&
+         src_format == DRM_FMT_ARGB2101010 ||
+         src_format == DRM_FMT_XBGR2101010 ||
+         src_format == DRM_FMT_ABGR2101010) &&
         (dst_format == DRM_FMT_XRGB8888 ||
          dst_format == DRM_FMT_ARGB8888)) {
+        int bgr = (src_format == DRM_FMT_XBGR2101010 ||
+                   src_format == DRM_FMT_ABGR2101010);
         convert_ar30_to_xrgb8888(src, dst, width, height,
-                                 src_stride, dst_stride);
+                                 src_stride, dst_stride, bgr);
         return 0;
     }
 

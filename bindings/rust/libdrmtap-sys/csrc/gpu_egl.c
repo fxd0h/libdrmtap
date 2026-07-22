@@ -698,6 +698,34 @@ static void ensure_linear_texture(egl_state_t *state, uint32_t w, uint32_t h) {
     state->tex_height = h;
 }
 
+/* True for a scanout fourcc carrying more than 8 bits per channel: the 10-bit
+ * XR30 family and the 16-bit XR48 family (integer and half-float). Such a buffer
+ * must NOT be reinterpreted as XRGB8888 during import retry -- that would sample it
+ * at the wrong bit depth (and, for the 16-bit formats, the wrong row width) and
+ * hand back a garbage frame reported as success. */
+static int egl_fourcc_high_bit_depth(uint32_t fourcc) {
+    switch (fourcc) {
+    /* 10-bit 2:10:10:10 */
+    case fourcc_code('X', 'R', '3', '0'):
+    case fourcc_code('X', 'B', '3', '0'):
+    case fourcc_code('A', 'R', '3', '0'):
+    case fourcc_code('A', 'B', '3', '0'):
+    /* 16-bit integer */
+    case fourcc_code('X', 'R', '4', '8'):
+    case fourcc_code('X', 'B', '4', '8'):
+    case fourcc_code('A', 'R', '4', '8'):
+    case fourcc_code('A', 'B', '4', '8'):
+    /* 16-bit half-float */
+    case fourcc_code('X', 'R', '4', 'H'):
+    case fourcc_code('X', 'B', '4', 'H'):
+    case fourcc_code('A', 'R', '4', 'H'):
+    case fourcc_code('A', 'B', '4', 'H'):
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* Import a DMA-BUF as an EGLImage, retrying with progressively simpler
  * attribute sets (XRGB8888 keeping the modifier, then XRGB8888 alone) the way
  * some drivers need. CCS auxiliary planes come from ctx->fb2_*. Returns
@@ -784,6 +812,19 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
                          first_err, (const char *)&fourcc,
                          (unsigned long)modifier);
 
+        /* The XRGB8888 retries below reinterpret the buffer as 8-bit while keeping
+         * the source stride. That only makes sense for a genuine 8-bit scanout whose
+         * exact fourcc the driver does not recognize. For a high-bit-depth source
+         * (10-bit XR30 / 16-bit XR48 family) it would sample the wrong bit depth and
+         * return corruption as success, so fail the import instead: the caller then
+         * reduces the real bit depth from the raw mapping on the CPU. */
+        if (egl_fourcc_high_bit_depth(fourcc)) {
+            drmtap_debug_log(ctx, "egl: no XRGB8888 retry for high-bit-depth "
+                             "fourcc %.4s (would corrupt); failing import so the "
+                             "CPU reduce path runs", (const char *)&fourcc);
+            return EGL_NO_IMAGE_KHR;
+        }
+
         /* Retry with XRGB8888 but keep modifier — the driver needs
          * the modifier for detiling but may support 8-bit import */
         uint32_t xrgb8888 = DRM_FORMAT_XRGB8888;
@@ -798,7 +839,7 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
         retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_FD_EXT;
         retry_attribs[ri++] = dma_buf_fd;
         retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-        retry_attribs[ri++] = 0;
+        retry_attribs[ri++] = (EGLint)ctx->fb2_offsets[0];
         retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
         retry_attribs[ri++] = (EGLint)stride;
         if (modifier != DRM_FORMAT_MOD_INVALID) {
@@ -826,7 +867,7 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
             retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_FD_EXT;
             retry_attribs[ri++] = dma_buf_fd;
             retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-            retry_attribs[ri++] = 0;
+            retry_attribs[ri++] = (EGLint)ctx->fb2_offsets[0];
             retry_attribs[ri++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
             retry_attribs[ri++] = (EGLint)stride;
             retry_attribs[ri++] = EGL_NONE;
@@ -1006,7 +1047,10 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     }
     if (!eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                         state.context)) {
+        /* Without a current context every GL call below is a no-op that leaves
+         * the output buffer undefined; fail instead of returning garbage. */
         drmtap_debug_log(NULL, "EGL: eglMakeCurrent in convert failed: 0x%x", eglGetError());
+        return -EIO;
     }
 
     /* ── Import-once: EGLImage cache keyed by fb_id ── */
@@ -1190,7 +1234,16 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     }
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
                  ctx->deswizzle_buf);
-    drmtap_debug_log(NULL, "EGL: glReadPixels done, gl_err=0x%x", glGetError());
+    /* A GL error across the render + readback (notably GL_CONTEXT_LOST after a GPU
+     * reset/TDR) means deswizzle_buf holds stale or undefined pixels. Fail closed
+     * instead of returning them as a valid frame. This glGetError also drains the
+     * error state so the next convert starts clean. */
+    GLenum gl_err = glGetError();
+    if (gl_err != GL_NO_ERROR) {
+        drmtap_debug_log(NULL, "EGL: GL error 0x%x across convert, failing", gl_err);
+        ret = -EIO;
+        goto cleanup;
+    }
 
     /* NOTE: CPU horizontal flip removed. The EGL DMA-BUF import with
      * standard texcoords (no shader manipulation) produces correct

@@ -146,7 +146,20 @@ static void test_rgb16(void) {
     TEST_ASSERT(((o_rgb >> 8) & 0xFF) == 0x22 &&
                 ((o_bgr >> 8) & 0xFF) == 0x22);   /* G is px[1] either way */
     TEST_ASSERT((o_rgb & 0xFF) == 0x11 && (o_bgr & 0xFF) == 0x33);  /* B swaps */
-    printf("  PASS: rgb16 HDR tone-map + SDR reduce + channel order\n");
+
+    /* Half-float FP16 (XR4H) channel order: half(1.0)=0x3C00, half(0.0)=0x0000.
+     * Memory order matches the integer path (B,G,R,X for the RGB variant), so a
+     * pure-red pixel must land in the output red byte, not blue. This locks in the
+     * ri/bi order of drmtap_convert_rgb16f. */
+    uint16_t fp[4] = {0x0000, 0x0000, 0x3C00, 0xFFFF};  /* B=0, G=0, R=1.0 */
+    uint32_t f_rgb = 0, f_bgr = 0;
+    TEST_ASSERT(drmtap_convert_rgb16f(fp, &f_rgb, 1, 1, 8, 4, 0 /*RGB*/) == 0);
+    TEST_ASSERT(drmtap_convert_rgb16f(fp, &f_bgr, 1, 1, 8, 4, 1 /*BGR*/) == 0);
+    TEST_ASSERT(((f_rgb >> 16) & 0xFF) == 0xFF);  /* RGB: R = px[2] = 1.0 */
+    TEST_ASSERT((f_rgb & 0xFF) == 0x00);          /* RGB: B = px[0] = 0.0 */
+    TEST_ASSERT(((f_bgr >> 16) & 0xFF) == 0x00);  /* BGR: R = px[0] = 0.0 */
+    TEST_ASSERT((f_bgr & 0xFF) == 0xFF);          /* BGR: B = px[2] = 1.0 */
+    printf("  PASS: rgb16/rgb16f HDR tone-map + SDR reduce + channel order\n");
 }
 
 int main(void) {

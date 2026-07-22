@@ -23,11 +23,37 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/syscall.h>
+#include <linux/capability.h>
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include "drmtap_internal.h"
+
+/* True if this thread holds CAP_SYS_ADMIN in its effective set. drmModeGetFB2
+ * returns framebuffer handles without DRM master only for a caller that holds
+ * CAP_SYS_ADMIN; a process running as uid 0 that has dropped CAP_SYS_ADMIN does
+ * NOT qualify and relies on implicit master exactly like an unprivileged caller.
+ * The raw capget syscall is used so the library links no libcap and adds nothing
+ * to the DT_NEEDED of the .so the privileged service dlopens. On any error the
+ * caller is treated as unprivileged (keep master), which is the safe default. */
+static int drmtap_have_cap_sys_admin(void) {
+    struct __user_cap_header_struct hdr = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+        .pid = 0, /* 0 == self */
+    };
+    struct __user_cap_data_struct data[2] = {{0, 0, 0}, {0, 0, 0}};
+    if (syscall(SYS_capget, &hdr, data) != 0) {
+        /* capget is unavailable (e.g. a seccomp filter denies the syscall while
+         * still permitting getuid). Fall back to the uid check so a genuine root
+         * capture service still drops master -- this matches the 0.4.13 gate and
+         * avoids regressing the VT-switch blackout fix when capget is filtered. */
+        return (geteuid() == 0 || getuid() == 0);
+    }
+    /* CAP_SYS_ADMIN (21) lives in the first 32-bit word. */
+    return (data[0].effective & (1u << CAP_SYS_ADMIN)) != 0;
+}
 
 /* Error string for when ctx is NULL (from failed drmtap_open). Thread-local so
  * concurrent NULL-ctx failures on different threads don't race on one buffer. */
@@ -252,18 +278,19 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
         /* If fcntl fails, keep the original fd (best effort) */
     }
 
-    /* Defensively drop DRM master -- but ONLY when we are privileged (root /
-     * CAP_SYS_ADMIN). We only READ scanout and never modeset, so if a PRIVILEGED
-     * process opened the node while no client held master (e.g. an unattended capture
-     * service that started at boot before the compositor), the kernel granted it
-     * implicit master, which would then block the compositor from acquiring master on
-     * a VT switch -> a black/frozen display; dropping it is safe there because
-     * drmModeGetFB2 still returns handles via CAP_SYS_ADMIN. An UNPRIVILEGED caller,
-     * by contrast, has no CAP_SYS_ADMIN and RELIES on that implicit master for
-     * drmModeGetFB2 to return framebuffer handles at all, so it must keep it -- do
-     * not drop. drmDropMaster returns 0 only when we actually held master; when a
+    /* Defensively drop DRM master -- but ONLY when we hold CAP_SYS_ADMIN. We only
+     * READ scanout and never modeset, so if a process holding CAP_SYS_ADMIN opened
+     * the node while no client held master (e.g. an unattended capture service that
+     * started at boot before the compositor), the kernel granted it implicit master,
+     * which would then block the compositor from acquiring master on a VT switch ->
+     * a black/frozen display; dropping it is safe there because drmModeGetFB2 still
+     * returns handles via CAP_SYS_ADMIN. A caller WITHOUT CAP_SYS_ADMIN -- including a
+     * uid-0 process that dropped it -- RELIES on that implicit master for drmModeGetFB2
+     * to return framebuffer handles at all, so it must keep it. The gate is the
+     * capability, not the uid: uid 0 without CAP_SYS_ADMIN cannot use GetFB2 after
+     * losing master. drmDropMaster returns 0 only when we actually held master; when a
      * compositor already holds it (the normal desktop case) it is a harmless no-op. */
-    if ((geteuid() == 0 || getuid() == 0) &&
+    if (drmtap_have_cap_sys_admin() &&
         drmDropMaster(ctx->drm_fd) == 0) {
         drmtap_debug_log(ctx, "dropped implicit DRM master on %s", ctx->device_path);
     }
