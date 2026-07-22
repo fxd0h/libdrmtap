@@ -228,7 +228,20 @@ static void test_convert_ar30_to_xrgb8888(void) {
     uint8_t b2 = (uint8_t)(dst[2] & 0xFF);
     TEST_ASSERT(b2 == 255);
 
-    printf("  PASS: AR30 → XRGB8888 conversion\n");
+    /* BGR variant XBGR2101010 (XB30, 0x30334258) = [2:A][10:B][10:G][10:R], so a
+     * pure-red pixel has R in the LOW 10 bits; the output red byte must be 255 and
+     * blue 0 (locks in the RGB/BGR swap of convert_ar30_to_xrgb8888). */
+    uint32_t bsrc[2], bdst[2];
+    bsrc[0] = (3u << 30) | (0u << 20) | (0u << 10) | 1023u;   /* R=1023 (low bits) */
+    bsrc[1] = (3u << 30) | (1023u << 20) | (0u << 10) | 0u;   /* B=1023 (high bits) */
+    TEST_ASSERT(drmtap_convert_format(bsrc, bdst, 2, 1, 8, 8,
+                                      0x30334258u, 0x34325258u) == 0);
+    TEST_ASSERT(((bdst[0] >> 16) & 0xFF) == 255);  /* pixel0 red = 255 */
+    TEST_ASSERT((bdst[0] & 0xFF) == 0);            /* pixel0 blue = 0 */
+    TEST_ASSERT((bdst[1] & 0xFF) == 255);          /* pixel1 blue = 255 */
+    TEST_ASSERT(((bdst[1] >> 16) & 0xFF) == 0);    /* pixel1 red = 0 */
+
+    printf("  PASS: AR30/AB30 → XRGB8888 conversion\n");
 }
 
 static void test_convert_abgr_to_argb(void) {

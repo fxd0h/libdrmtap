@@ -76,6 +76,18 @@ static void drmtap_gem_close(drmtap_ctx *ctx, uint32_t handle) {
     drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
 }
 
+/* Test hook: DRMTAP_FORCE_MMAP_FAIL=1 makes the fast-path cache-miss drop a
+ * successful CPU mapping so the EGL-detile fd fallback runs on any EGL-capable GPU,
+ * not only a discrete/tiled one that genuinely refuses the mmap. Off by default. */
+static int drmtap_force_mmap_fail(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DRMTAP_FORCE_MMAP_FAIL");
+        v = (e && e[0] == '1') ? 1 : 0;
+    }
+    return v;
+}
+
 /* ========================================================================= */
 /* Internal state for a captured frame (stored in frame->_priv)              */
 /* ========================================================================= */
@@ -100,6 +112,33 @@ typedef struct {
  * into ctx->cur_hdr_eotf / cur_hdr_max_nits, for the direct (no-helper) capture
  * path. Mirrors read_hdr_metadata in the helper. Best-effort: any failure leaves
  * it SDR (0), so a non-HDR display just means no tone-mapping. */
+/* Resolve the CRTC bound to a connector via the atomic CRTC_ID property; the
+ * legacy encoder link (drmModeGetEncoder(conn->encoder_id)->crtc_id) reads 0 for
+ * an atomically-bound connector under atomic KMS (Wayland), so an HDR display never
+ * matched its CRTC and never got tone-mapped. Returns 0 if unbound/unavailable. */
+static uint32_t connector_crtc_atomic(int drm_fd, uint32_t connector_id) {
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(drm_fd, connector_id, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        return 0;
+    }
+    uint32_t crtc = 0;
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        drmModePropertyRes *p = drmModeGetProperty(drm_fd, props->props[i]);
+        if (!p) {
+            continue;
+        }
+        if (strcmp(p->name, "CRTC_ID") == 0) {
+            crtc = (uint32_t)props->prop_values[i];
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+    return crtc;
+}
+
 static void read_hdr_metadata_direct(drmtap_ctx *ctx, uint32_t crtc_id) {
     ctx->cur_hdr_eotf = 0;
     ctx->cur_hdr_max_nits = 0;
@@ -110,22 +149,19 @@ static void read_hdr_metadata_direct(drmtap_ctx *ctx, uint32_t crtc_id) {
     if (!res) {
         return;
     }
+    /* Match on the atomic CRTC_ID property (see connector_crtc_atomic), not the
+     * legacy encoder link. GetConnectorCurrent reads cached kernel state instead of
+     * forcing a hardware connector probe on every do_grab. */
     uint32_t conn_id = 0;
     for (int i = 0; i < res->count_connectors && conn_id == 0; i++) {
         drmModeConnector *conn =
-            drmModeGetConnector(ctx->drm_fd, res->connectors[i]);
+            drmModeGetConnectorCurrent(ctx->drm_fd, res->connectors[i]);
         if (!conn) {
             continue;
         }
-        if (conn->connection == DRM_MODE_CONNECTED && conn->encoder_id) {
-            drmModeEncoder *enc =
-                drmModeGetEncoder(ctx->drm_fd, conn->encoder_id);
-            if (enc) {
-                if (enc->crtc_id == crtc_id) {
-                    conn_id = conn->connector_id;
-                }
-                drmModeFreeEncoder(enc);
-            }
+        if (conn->connection == DRM_MODE_CONNECTED &&
+            connector_crtc_atomic(ctx->drm_fd, conn->connector_id) == crtc_id) {
+            conn_id = conn->connector_id;
         }
         drmModeFreeConnector(conn);
     }
@@ -469,7 +505,12 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         ret = drmPrimeHandleToFD(ctx->drm_fd, fb2->handles[0],
                                   O_RDONLY | O_CLOEXEC, &prime_fd);
         if (ret < 0 && (errno == EACCES || errno == EPERM)) {
+            /* Export denied: the capture goes through the helper (which mints its
+             * own handle over IPC) and never adopts this one into priv->gem_handle.
+             * Close the handle GetFB2 just minted, or the needs_helper path -- and
+             * its per-frame V2/V3 success returns -- leaks it. */
             needs_helper = 1;
+            drmtap_gem_close(ctx, fb2->handles[0]);
         } else if (ret < 0) {
             ret = -errno;
             drmtap_set_error(ctx, "drmPrimeHandleToFD failed: %s", strerror(errno));
@@ -794,11 +835,17 @@ cleanup:
 /* DRM fourccs for the high-bit-depth scanout formats we reduce to 8-bit. */
 #define DRMTAP_FMT_XR30 0x30335258u  /* XRGB2101010 */
 #define DRMTAP_FMT_AR30 0x30335241u  /* ARGB2101010 */
+#define DRMTAP_FMT_XB30 0x30334258u  /* XBGR2101010 */
+#define DRMTAP_FMT_AB30 0x30334241u  /* ABGR2101010 */
 #define DRMTAP_FMT_XR48 0x38345258u  /* XRGB16161616 */
 #define DRMTAP_FMT_AR48 0x38345241u  /* ARGB16161616 */
 #define DRMTAP_FMT_XB48 0x38344258u  /* XBGR16161616 */
 #define DRMTAP_FMT_AB48 0x38344241u  /* ABGR16161616 */
 #define DRMTAP_FMT_XR24 0x34325258u  /* XRGB8888 */
+#define DRMTAP_FMT_XR4H 0x48345258u  /* XRGB16161616F (half-float) */
+#define DRMTAP_FMT_AR4H 0x48345241u  /* ARGB16161616F */
+#define DRMTAP_FMT_XB4H 0x48344258u  /* XBGR16161616F */
+#define DRMTAP_FMT_AB4H 0x48344241u  /* ABGR16161616F */
 
 /* Reduce a LINEAR high-bit-depth scanout (10-bit AR30/XR30 or 16-bit
  * XR48/AR48/XB48/AB48) to 8-bit XRGB8888, tone-mapping when the connector
@@ -809,10 +856,13 @@ cleanup:
 static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
                                      drmtap_frame_info *frame) {
     uint32_t fmt = frame->format;
-    int is_ar30 = (fmt == DRMTAP_FMT_XR30 || fmt == DRMTAP_FMT_AR30);
+    int is_ar30 = (fmt == DRMTAP_FMT_XR30 || fmt == DRMTAP_FMT_AR30 ||
+                   fmt == DRMTAP_FMT_XB30 || fmt == DRMTAP_FMT_AB30);
     int is_rgb16 = (fmt == DRMTAP_FMT_XR48 || fmt == DRMTAP_FMT_AR48 ||
                     fmt == DRMTAP_FMT_XB48 || fmt == DRMTAP_FMT_AB48);
-    if (!is_ar30 && !is_rgb16) {
+    int is_rgb16f = (fmt == DRMTAP_FMT_XR4H || fmt == DRMTAP_FMT_AR4H ||
+                     fmt == DRMTAP_FMT_XB4H || fmt == DRMTAP_FMT_AB4H);
+    if (!is_ar30 && !is_rgb16 && !is_rgb16f) {
         return 0;  /* 8-bit RGB (or unknown): leave as-is */
     }
 
@@ -834,16 +884,21 @@ static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
                     frame->width, frame->height, frame->stride, dst_stride,
                     fmt, DRMTAP_FMT_XR24);
         }
-    } else {
+    } else if (is_rgb16) {
         int bgr = (fmt == DRMTAP_FMT_XB48 || fmt == DRMTAP_FMT_AB48);
         ret = drmtap_convert_rgb16(data, ctx->deswizzle_buf,
                 frame->width, frame->height, frame->stride, dst_stride,
                 bgr, ctx->cur_hdr_eotf, ctx->cur_hdr_max_nits);
+    } else {
+        /* Half-float FP16 (XR4H family): linear-light decode + sRGB re-encode. */
+        int bgr = (fmt == DRMTAP_FMT_XB4H || fmt == DRMTAP_FMT_AB4H);
+        ret = drmtap_convert_rgb16f(data, ctx->deswizzle_buf,
+                frame->width, frame->height, frame->stride, dst_stride, bgr);
     }
     if (ret != 0) return ret;
 
     drmtap_debug_log(ctx, "auto-process: linear %s -> XRGB8888 (%s)",
-                     is_ar30 ? "10-bit" : "16-bit",
+                     is_ar30 ? "10-bit" : (is_rgb16f ? "FP16" : "16-bit"),
                      hdr ? "HDR tone-mapped" : "SDR");
     frame->data = ctx->deswizzle_buf;
     frame->format = DRMTAP_FMT_XR24;
@@ -872,7 +927,12 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
      * NOT short-circuit to the linear early-return below -- a modern tiling driver
      * leaves the modifier flag clear on a tiled scanout (the XR30 class), and only
      * the EGL path further down, which omits the modifier and lets the driver infer
-     * the real layout, decodes it correctly. */
+     * the real layout, decodes it correctly. Tradeoff: a GENUINELY linear flag-clear
+     * scanout on an EGL-capable GPU now takes the EGL round-trip too (it is
+     * indistinguishable from a secretly-tiled one while the flag is clear), losing the
+     * zero-copy path it had before. That is the unavoidable cost of decoding the tiled
+     * case correctly; it does not affect a compositor that advertises modifiers (flag
+     * set, handled above) nor a no-EGL simple driver (linear here). */
     int is_linear = (modifier == DRM_FORMAT_MOD_LINEAR || modifier == 0 ||
                      (modifier == DRM_FORMAT_MOD_INVALID &&
                       !drmtap_gpu_egl_available(ctx)));
@@ -976,6 +1036,24 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
         return -ENOTSUP;
     }
 
+    /* An INVALID (unknown) modifier reaching this point means the EGL detile did
+     * not run -- no dma-buf fd (helper V2 pixel mode) or EGL unavailable/failed.
+     * INVALID is not a known tiling, so the CPU deswizzle below, which is written
+     * for specific tiled layouts and hardcodes 4 bytes/pixel, cannot decode it and
+     * would mangle a wider (FP16) scanout. Treat an unknown layout as linear -- its
+     * practical case -- and reduce it from the RAW mapping, which handles 8/10/16-bit
+     * correctly. This restores the pre-INVALID behavior for a flag-clear buffer that
+     * used to read back as modifier 0, without diverting it into the tiled deswizzle. */
+    if (modifier == DRM_FORMAT_MOD_INVALID) {
+        int red = reduce_linear_to_xrgb8888(ctx, data, frame);
+        if (red < 0) {
+            return red;
+        }
+        /* red == 1: reduced to XRGB8888 (frame->data repointed). red == 0: already
+         * 8-bit -- the raw linear mapping (frame->data, pre-set by the caller) stands. */
+        return 0;
+    }
+
     /* --- CPU deswizzle for classic tiling (buffer already allocated above) --- */
     const char *driver = ctx->driver_name;
     if (drmtap_gpu_intel_match(driver) ||
@@ -1005,11 +1083,14 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
             frame->data = ctx->deswizzle_buf;
             drmtap_debug_log(ctx, "auto-process: CPU deswizzled to linear");
 
-            /* Reduce 10-bit XR30/AR30 to 8-bit XRGB8888. An HDR10 (PQ) scanout
-             * needs a real tone-map — the naive bit-shift would wash it out; a
-             * plain SDR 10-bit scanout (same fourcc) just gets truncated. */
+            /* Reduce 10-bit X/AR30 and X/AB30 to 8-bit XRGB8888. An HDR10 (PQ)
+             * scanout needs a real tone-map -- the naive bit-shift would wash it
+             * out; a plain SDR 10-bit scanout (same fourcc) just gets truncated.
+             * Both converters read the fourcc and handle the RGB/BGR order. */
             if (frame->format == DRMTAP_FMT_XR30 ||
-                frame->format == DRMTAP_FMT_AR30) {
+                frame->format == DRMTAP_FMT_AR30 ||
+                frame->format == DRMTAP_FMT_XB30 ||
+                frame->format == DRMTAP_FMT_AB30) {
                 int conv;
                 if (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) {
                     drmtap_debug_log(ctx,
@@ -1340,8 +1421,13 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         /* Restage this slot's plane layout before converting (the cache HIT
          * skipped GetFB2, so ctx->fb2_* is otherwise stale). */
         fast_slot_restage_planes(ctx, slot);
-        /* Auto-deswizzle tiled framebuffers + format convert */
-        gpu_auto_process(ctx, frame->data, frame, 0);
+        /* Auto-deswizzle tiled framebuffers + format convert. Propagate a
+         * processing failure instead of returning unprocessed pixels as success
+         * (the unchanged-fb branch above already does this). */
+        int pr = gpu_auto_process(ctx, frame->data, frame, 0);
+        if (pr != 0) {
+            return pr;
+        }
 
         return 0;   /* new frame */
     }
@@ -1414,7 +1500,55 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                       prime_fd, fb2->offsets[0]);
     }
 
+    /* Test hook (drmtap_force_mmap_fail): drop a successful mapping so the EGL fd
+     * fallback below is exercised on a GPU whose scanout IS cpu-mappable. */
+    if (mapped != MAP_FAILED && drmtap_force_mmap_fail()) {
+        munmap(mapped, size);
+        mapped = MAP_FAILED;
+    }
+
     if (mapped == MAP_FAILED) {
+#ifdef HAVE_EGL
+        /* A tiled scanout can refuse a CPU mmap (amdgpu GFX9+, discrete VRAM,
+         * nvidia) yet be fully capturable by EGL-detiling the exported fd, exactly
+         * as do_grab does. Fall back to that instead of dropping the capture. This
+         * frame has no CPU mapping to cache, so no slot is stored; the fd path
+         * re-exports each frame (still cheaper than failing the stream, and the EGL
+         * image cache keyed on the BO inode keeps the import itself amortized). */
+        if (drmtap_gpu_egl_available(ctx)) {
+            frame->data = NULL;
+            frame->dma_buf_fd = prime_fd;
+            frame->width = fb2->width;
+            frame->height = fb2->height;
+            frame->stride = fb2->pitches[0];
+            frame->format = fb2->pixel_format;
+            frame->modifier = (fb2->flags & DRM_MODE_FB_MODIFIERS)
+                                  ? fb2->modifier : DRM_FORMAT_MOD_INVALID;
+            frame->fb_id = fb_id;
+            frame->_priv = NULL;
+            int pr = gpu_auto_process(ctx, NULL, frame, 0);
+            /* A LINEAR-modifier scanout takes gpu_auto_process's linear early-return,
+             * which leaves frame->data NULL when it was called with data==NULL (no CPU
+             * mapping): that path assumes the caller already pointed frame->data at the
+             * raw mapping, which we do not have here. Treat a 0-return with no data as a
+             * failure so the caller never gets a success frame with a NULL buffer
+             * (do_grab guards the same case). Only EGL actually produces pixels here. */
+            if (pr == 0 && !frame->data) {
+                pr = -EIO;
+            }
+            /* gpu_auto_process EGL-read the fd back into ctx->deswizzle_buf, so the
+             * fd and handle are no longer needed and nothing is cached for fb_id. */
+            close(prime_fd);
+            frame->dma_buf_fd = -1;  /* prime_fd is closed; don't hand back a stale fd */
+            drmtap_gem_close(ctx, fb2->handles[0]);
+            drmModeFreeFB2(fb2);
+            ctx->fast_last_fb_id = 0;  /* uncached: next call does a fresh setup */
+            if (pr != 0) {
+                return pr;
+            }
+            return 0;
+        }
+#endif
         close(prime_fd);
         drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
@@ -1431,7 +1565,13 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     ctx->fast_slots[slot].height = fb2->height;
     ctx->fast_slots[slot].stride = fb2->pitches[0];
     ctx->fast_slots[slot].format = fb2->pixel_format;
-    ctx->fast_slots[slot].modifier = fb2->modifier;
+    /* Honor the DRM_MODE_FB_MODIFIERS flag (see do_grab): fb2->modifier is undefined
+     * when the flag is clear, so a tiled scanout that omits it must be cached as
+     * DRM_FORMAT_MOD_INVALID -- not the bogus 0 -- or the cached slot would replay it
+     * as linear on every fast-path hit and corrupt the XR30/tiled class this fixes. */
+    ctx->fast_slots[slot].modifier = (fb2->flags & DRM_MODE_FB_MODIFIERS)
+                                         ? fb2->modifier
+                                         : DRM_FORMAT_MOD_INVALID;
     /* Capture this fb's plane layout with the slot so a later cache HIT can
      * restage it into ctx->fb2_* (ctx->fb2_* was set from this same fb2 just
      * above, at the "Cache multi-plane info" block). */
@@ -1458,8 +1598,12 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     frame->fb_id = fb_id;
     frame->_priv = NULL;
 
-    /* Auto-deswizzle tiled framebuffers + format convert */
-    gpu_auto_process(ctx, frame->data, frame, 0);
+    /* Auto-deswizzle tiled framebuffers + format convert. Propagate a processing
+     * failure instead of returning unprocessed pixels as success. */
+    int mpr = gpu_auto_process(ctx, frame->data, frame, 0);
+    if (mpr != 0) {
+        return mpr;
+    }
 
     return 0;   /* new frame */
 }
@@ -1537,6 +1681,40 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
     frame->modifier = desc->modifier;
     frame->fb_id = desc->fb_id;
     frame->dma_buf_fd = desc->dma_buf_fd;
+
+    /* The descriptor and its fd cross an IPC boundary and are UNTRUSTED. Validate
+     * the fd BEFORE either conversion path touches it: the EGL import below hands
+     * width/height/stride/offset straight to eglCreateImage with no size check, so
+     * the 0.4.12 fd-type + size bound (previously only in the CPU fallback) must
+     * gate the EGL path too. Only meaningful when an fd is supplied; a cached-fb_id
+     * EGL import carries no untrusted fd. Gates:
+     *   1. Require a genuine DMA-BUF -- immutable in size, so it cannot be shrunk
+     *      between check and use (a memfd/regular file could, faulting the reader).
+     *      dmabuf_sync returns ENOTTY on a non-dma-buf; sync_end closes the probe.
+     *   2. Bound offsets[0] + pitches[0]*height against the real fd size; fail
+     *      CLOSED when the size cannot be determined. */
+    if (desc->dma_buf_fd >= 0) {
+        size_t need = (size_t)desc->pitches[0] * desc->height;
+        if (dmabuf_sync_start(desc->dma_buf_fd) != 0) {
+            drmtap_set_error(ctx, "convert: fd is not a dma-buf");
+            return -EINVAL;
+        }
+        off_t fd_size = lseek(desc->dma_buf_fd, 0, SEEK_END);
+        if (fd_size <= 0) {
+            struct stat st;
+            if (fstat(desc->dma_buf_fd, &st) == 0) {
+                fd_size = st.st_size;
+            }
+        }
+        dmabuf_sync_end(desc->dma_buf_fd);
+        if (fd_size <= 0 ||
+            (uint64_t)desc->offsets[0] + (uint64_t)need > (uint64_t)fd_size) {
+            drmtap_set_error(ctx, "convert: descriptor exceeds dma-buf size "
+                             "(fd_size=%lld, need offset %u + %zu)",
+                             (long long)fd_size, desc->offsets[0], need);
+            return -EINVAL;
+        }
+    }
 
 #ifdef HAVE_EGL
     /* GPU path first: EGL imports the fd (or reuses the fb_id-cached import)

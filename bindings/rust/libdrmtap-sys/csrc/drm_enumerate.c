@@ -56,6 +56,32 @@ static uint32_t connector_crtc_from_atomic(int fd, uint32_t connector_id) {
     return crtc_id;
 }
 
+/* Fold the current connector topology (per-connector connection state + bound
+ * CRTC) into a hash. Unlike the raw connector/CRTC counts -- fixed by the GPU
+ * hardware -- this changes when a monitor is plugged/unplugged on an existing
+ * connector or a CRTC is (re)bound by a modeset, which is what hotplug detection
+ * needs. GetConnectorCurrent reads cached kernel state (no forced probe). */
+static uint64_t topology_hash(int drm_fd, drmModeRes *res) {
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a 64-bit offset basis */
+#define TH_FOLD(v) do { h ^= (uint64_t)(uint32_t)(v); h *= 1099511628211ULL; } while (0)
+    TH_FOLD(res->count_connectors);
+    TH_FOLD(res->count_crtcs);
+    for (int i = 0; i < res->count_connectors; i++) {
+        drmModeConnector *conn =
+            drmModeGetConnectorCurrent(drm_fd, res->connectors[i]);
+        if (!conn) {
+            TH_FOLD(res->connectors[i]);
+            continue;
+        }
+        TH_FOLD(conn->connector_id);
+        TH_FOLD(conn->connection);
+        TH_FOLD(connector_crtc_from_atomic(drm_fd, conn->connector_id));
+        drmModeFreeConnector(conn);
+    }
+#undef TH_FOLD
+    return h;
+}
+
 /* ========================================================================= */
 /* Public API                                                                */
 /* ========================================================================= */
@@ -188,9 +214,8 @@ int drmtap_list_displays(drmtap_ctx *ctx, drmtap_display *out, int max_count) {
         drmModeFreeConnector(conn);
     }
 
-    /* Cache counts for hotplug detection */
-    ctx->cached_connector_count = (uint32_t)res->count_connectors;
-    ctx->cached_crtc_count = (uint32_t)res->count_crtcs;
+    /* Cache the topology signature for hotplug detection. */
+    ctx->cached_topology_hash = topology_hash(ctx->drm_fd, res);
 
     drmModeFreeResources(res);
     return found;
@@ -210,15 +235,12 @@ int drmtap_displays_changed(drmtap_ctx *ctx) {
         return -ENODEV;
     }
 
-    int changed = 0;
-    if ((uint32_t)res->count_connectors != ctx->cached_connector_count ||
-        (uint32_t)res->count_crtcs != ctx->cached_crtc_count) {
-        changed = 1;
-    }
-
-    /* Update cache */
-    ctx->cached_connector_count = (uint32_t)res->count_connectors;
-    ctx->cached_crtc_count = (uint32_t)res->count_crtcs;
+    /* Hash the per-connector connection + CRTC binding, not the fixed object
+     * counts: an ordinary monitor plug/unplug on an existing HDMI/DP connector,
+     * and a modeset that rebinds a CRTC, both leave the counts unchanged. */
+    uint64_t h = topology_hash(ctx->drm_fd, res);
+    int changed = (h != ctx->cached_topology_hash);
+    ctx->cached_topology_hash = h;
 
     drmModeFreeResources(res);
     return changed;

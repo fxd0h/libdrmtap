@@ -230,6 +230,13 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
         }
     }
 
+    /* drmModeGetFB2 minted a fresh GEM handle we own; close it before freeing fb2,
+     * or the privileged direct cursor path leaks a kernel handle (pinning the BO)
+     * on every poll. The pixels were already copied out and the prime_fd closed. */
+    if (fb2->handles[0] != 0) {
+        struct drm_gem_close gc = { .handle = fb2->handles[0] };
+        drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
+    }
     drmModeFreeFB2(fb2);
     drmModeFreePlane(plane);
 

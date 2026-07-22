@@ -13,7 +13,7 @@
 // Integration (tested on Ubuntu 24.04; uses the static libdrmtap-sys crate):
 //
 //   1. Add the crate to libs/scrap/Cargo.toml:
-//        libdrmtap-sys = { version = "0.4.13", optional = true }
+//        libdrmtap-sys = { version = "0.4.14", optional = true }
 //      It statically embeds and compiles the C sources and builds the
 //      drmtap-helper binary — no system libdrmtap install, no meson install,
 //      no apt package, and no rustc-link-search.

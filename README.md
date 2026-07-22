@@ -54,7 +54,7 @@ int main() {
 libdrmtap = "0.3"
 ```
 
-> This pulls in `libdrmtap-sys` 0.4.13, which embeds and statically compiles the
+> This pulls in `libdrmtap-sys` 0.4.14, which embeds and statically compiles the
 > C sources (and the privilege helper). No system `libdrmtap` install, no
 > `meson install`, no `pkg-config` to find a shared library.
 
@@ -82,7 +82,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU fallback |
 | AMD (amdgpu) deswizzle | ✅ CPU fallback |
 | Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU fallback |
-| HDR10 → SDR tone-map (AR30/XR30, XR48/AR48/XB48/AB48) | ✅ Implemented (P010 not yet) |
+| HDR10 → SDR tone-map (AR30/XR30/AB30/XB30, XR48/AR48/XB48/AB48) | ✅ Implemented (P010 not yet) |
 | Frame differencing (dirty rects) | ✅ Implemented |
 | Thread-safe (one `drmtap_ctx` per thread) | ✅ By design |
 | Coexists with NoMachine/Sunshine | ✅ By design |
@@ -107,10 +107,14 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > tone-map, sRGB — and returns correct 8-bit SDR, instead of the washed-out
 > top-8-of-10-bits result. This matches what consumers like RustDesk expect
 > (their pipeline is 8-bit SDR; on other platforms the OS/compositor tone-maps
-> before they see it — on DRM we do it). Covers `AR30`/`XR30` (10-bit) and
-> `XR48`/`AR48` (16-bit), in both the CPU and the EGL (tiled) paths.
-> `P010` (10-bit YUV, used for overlay-video planes rather than the primary
-> desktop scanout) is not handled.
+> before they see it — on DRM we do it). Covers `AR30`/`XR30`/`AB30`/`XB30`
+> (10-bit) and `XR48`/`AR48`/`XB48`/`AB48` (16-bit), in both the CPU and the EGL
+> (tiled) paths. `P010` (10-bit YUV, used for overlay-video planes rather than the
+> primary desktop scanout) is not handled.
+>
+> **FP16 half-float scanouts** (`XRGB16161616F` and its BGR/alpha siblings) are
+> reduced to 8-bit sRGB on the CPU fallback — linear-light decode through the sRGB
+> OETF, not HDR tone-mapped (values above 1.0 clip to white).
 
 ## Quick Start
 
@@ -195,7 +199,7 @@ sudo ./build/vnc_server
 libdrmtap is being upstreamed into [RustDesk](https://github.com/rustdesk/rustdesk)
 via [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420).
 The integration adds a `drm` backend to `scrap` that depends on the
-[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) 0.4.13 crate, which
+[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) 0.4.14 crate, which
 embeds and statically compiles the C sources (and the privilege helper) — so
 there is no system `libdrmtap` install and no dynamic `libdrmtap.so` linkage.
 
@@ -212,6 +216,18 @@ meson test -C build --suite unit
 # Integration tests (needs DRM device)
 sudo DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
 ```
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `DRM_DEVICE` | DRM node to open (e.g. `/dev/dri/card0`). **Ignored for privileged (root / `CAP_SYS_ADMIN`) callers** — a privileged capture service uses its configured `device_path` or the KMS auto-scan, so the environment cannot redirect which device it opens. Honored only for unprivileged runs. |
+| `DRMTAP_DEBUG` | Set to `1` for verbose debug logging on stderr. |
+| `DRMTAP_NO_EGL` | Set to `1` to force the CPU deswizzle/convert path (skip EGL/GLES). |
+| `DRMTAP_NO_IMAGE_CACHE` | Set to `1` to re-import the `EGLImage` every frame (disable the import-once cache). |
+| `DRMTAP_FORCE_MMAP_FAIL` | Test hook — set to `1` to force the fast-path CPU mmap to fail so the EGL-detile fallback runs. |
+
+The privilege model is described in [`SECURITY.md`](SECURITY.md).
 
 ## Performance
 

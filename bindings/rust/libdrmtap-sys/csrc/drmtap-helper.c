@@ -194,7 +194,6 @@ static int install_seccomp(void) {
      * even though it holds CAP_SYS_ADMIN. */
     int allowed[] = {
         SCMP_SYS(read), SCMP_SYS(write), SCMP_SYS(close),
-        SCMP_SYS(ioctl),       /* DRM ioctls */
         SCMP_SYS(sendto),      /* send() */
         SCMP_SYS(sendmsg),     /* sendmsg() for SCM_RIGHTS */
         SCMP_SYS(recvfrom),    /* recv() */
@@ -215,6 +214,25 @@ static int install_seccomp(void) {
         if (rc != 0) {
             seccomp_release(ctx);
             fprintf(stderr, "drmtap-helper: seccomp_rule_add failed: %s\n",
+                    strerror(-rc));
+            return -1;
+        }
+    }
+
+    /* ioctl: allow ONLY the DRM ioctl type ('d', bits 8-15 of the request). The
+     * helper issues nothing but DRM ioctls on its single DRM fd (KMS, PRIME, GEM
+     * close, dumb map, VIRTGPU), so a memory-corrupted helper cannot reach an
+     * unrelated ioctl (TIOCSTI console injection, terminal control, etc.). Matching
+     * the type byte rather than enumerating every DRM command keeps this robust
+     * across drivers and libdrm versions without risking a KILL on a legitimate DRM
+     * ioctl we forgot to list. */
+    {
+        int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(ioctl), 1,
+                                  SCMP_A1(SCMP_CMP_MASKED_EQ, 0xFF00u,
+                                          (unsigned)'d' << 8));
+        if (rc != 0) {
+            seccomp_release(ctx);
+            fprintf(stderr, "drmtap-helper: seccomp ioctl rule failed: %s\n",
                     strerror(-rc));
             return -1;
         }
@@ -246,6 +264,19 @@ static int send_all(int sock, const void *buf, size_t len) {
 }
 static int recv_all(int sock, void *buf, size_t len) {
     return wire_recv_all(sock, buf, len);
+}
+
+/* drmModeGetFB2 mints a fresh GEM handle that the caller owns; if it is not
+ * closed, this long-running privileged helper leaks one kernel handle (and pins
+ * the underlying BO) on every grab and every cursor poll. Close it on every path.
+ * Harmless for handle 0. The exported DMA-BUF fd keeps its own BO reference, so
+ * closing the handle after PRIME export is safe. */
+static void helper_gem_close(int drm_fd, uint32_t handle) {
+    if (handle == 0) {
+        return;
+    }
+    struct drm_gem_close gc = { .handle = handle };
+    drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
 }
 
 // Send error: metadata with data_size=0. For logical/validation failures where
@@ -361,6 +392,7 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
      * a padded cursor is not sent sheared. The width cap precedes width*4 so
      * that product cannot overflow. */
     if (!(cw <= 256 && ch <= 256 && cstride != 0 && cstride >= cw * 4)) {
+        helper_gem_close(drm_fd, chandle);
         send_all(sock, &meta, sizeof(meta));  /* visible=0 */
         return 0;
     }
@@ -377,6 +409,7 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
         if (prime_fd >= 0) {
             close(prime_fd);
         }
+        helper_gem_close(drm_fd, chandle);
         send_all(sock, &meta, sizeof(meta));  /* visible=0 (couldn't read) */
         return 0;
     }
@@ -394,6 +427,7 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
     }
     munmap(mapped, map_size);
     close(prime_fd);
+    helper_gem_close(drm_fd, chandle);
 
     meta.visible = 1;
     meta.data_size = (uint32_t)tight;
@@ -405,6 +439,33 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
 /* ========================================================================= */
 /* DRM capture (privileged) — reads pixels, sends via socket                 */
 /* ========================================================================= */
+
+/* Resolve the CRTC bound to a connector via the atomic CRTC_ID property. The
+ * legacy encoder link (drmModeGetEncoder(conn->encoder_id)->crtc_id) reads 0 for
+ * an atomically-bound / compositor-managed connector, so on Wayland an HDR display
+ * never matched its CRTC and never got tone-mapped. Returns 0 if unbound. */
+static uint32_t helper_connector_crtc(int drm_fd, uint32_t connector_id) {
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(drm_fd, connector_id, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        return 0;
+    }
+    uint32_t crtc = 0;
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        drmModePropertyRes *p = drmModeGetProperty(drm_fd, props->props[i]);
+        if (!p) {
+            continue;
+        }
+        if (strcmp(p->name, "CRTC_ID") == 0) {
+            crtc = (uint32_t)props->prop_values[i];
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+    return crtc;
+}
 
 /* Read the HDR transfer function + peak luminance advertised on the connector
  * driving `crtc_id`. Sets *eotf to the DRM EOTF (0 = SDR / none) and *max_nits
@@ -423,21 +484,19 @@ static void read_hdr_metadata(int drm_fd, uint32_t crtc_id,
     if (!res) {
         return;
     }
-    /* Map the CRTC back to its connected connector via the encoder. */
+    /* Map the CRTC back to its connected connector via the atomic CRTC_ID property
+     * (see helper_connector_crtc). GetConnectorCurrent reads cached kernel state
+     * instead of forcing a hardware connector probe on every captured frame. */
     uint32_t conn_id = 0;
     for (int i = 0; i < res->count_connectors && conn_id == 0; i++) {
-        drmModeConnector *conn = drmModeGetConnector(drm_fd, res->connectors[i]);
+        drmModeConnector *conn =
+            drmModeGetConnectorCurrent(drm_fd, res->connectors[i]);
         if (!conn) {
             continue;
         }
-        if (conn->connection == DRM_MODE_CONNECTED && conn->encoder_id) {
-            drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
-            if (enc) {
-                if (enc->crtc_id == crtc_id) {
-                    conn_id = conn->connector_id;
-                }
-                drmModeFreeEncoder(enc);
-            }
+        if (conn->connection == DRM_MODE_CONNECTED &&
+            helper_connector_crtc(drm_fd, conn->connector_id) == crtc_id) {
+            conn_id = conn->connector_id;
         }
         drmModeFreeConnector(conn);
     }
@@ -481,6 +540,50 @@ static void read_hdr_metadata(int drm_fd, uint32_t crtc_id,
     drmModeFreeObjectProperties(props);
 }
 
+/* A plane's 'type' (PRIMARY/OVERLAY/CURSOR) is fixed for the life of the device,
+ * so probe it once and cache the primary plane ids instead of re-reading the
+ * property list for every plane on every captured frame. The helper serves a single
+ * persistent drm_fd, so a file-static cache is correct. */
+static int plane_is_primary(int drm_fd, uint32_t plane_id) {
+    static uint32_t primary_ids[32];
+    static int primary_count = -1;  /* -1 = not probed yet */
+    if (primary_count < 0) {
+        primary_count = 0;
+        drmModePlaneRes *pr = drmModeGetPlaneResources(drm_fd);
+        if (pr) {
+            const int cap = (int)(sizeof(primary_ids) / sizeof(primary_ids[0]));
+            for (uint32_t i = 0; i < pr->count_planes && primary_count < cap; i++) {
+                drmModeObjectProperties *props = drmModeObjectGetProperties(
+                    drm_fd, pr->planes[i], DRM_MODE_OBJECT_PLANE);
+                if (!props) {
+                    continue;
+                }
+                for (uint32_t p = 0; p < props->count_props; p++) {
+                    drmModePropertyRes *prop =
+                        drmModeGetProperty(drm_fd, props->props[p]);
+                    if (!prop) {
+                        continue;
+                    }
+                    if (strcmp(prop->name, "type") == 0 &&
+                        props->prop_values[p] == DRM_PLANE_TYPE_PRIMARY &&
+                        primary_count < cap) {
+                        primary_ids[primary_count++] = pr->planes[i];
+                    }
+                    drmModeFreeProperty(prop);
+                }
+                drmModeFreeObjectProperties(props);
+            }
+            drmModeFreePlaneResources(pr);
+        }
+    }
+    for (int i = 0; i < primary_count; i++) {
+        if (primary_ids[i] == plane_id) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Grab current framebuffer. Helper reads pixels in its own process
 // (where dumb_mmap returns fresh data) and sends them via the socket.
 static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virtio) {
@@ -510,24 +613,8 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
 
         /* Check for active framebuffer */
         if (plane->fb_id != 0) {
-            /* Check plane type — prefer PRIMARY */
-            drmModeObjectProperties *props = drmModeObjectGetProperties(
-                drm_fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
-            int is_primary = 0;
-            if (props) {
-                for (uint32_t p = 0; p < props->count_props; p++) {
-                    drmModePropertyRes *prop = drmModeGetProperty(
-                        drm_fd, props->props[p]);
-                    if (prop) {
-                        if (strcmp(prop->name, "type") == 0 &&
-                            props->prop_values[p] == DRM_PLANE_TYPE_PRIMARY) {
-                            is_primary = 1;
-                        }
-                        drmModeFreeProperty(prop);
-                    }
-                }
-                drmModeFreeObjectProperties(props);
-            }
+            /* Check plane type — prefer PRIMARY (cached; the type is static). */
+            int is_primary = plane_is_primary(drm_fd, plane->plane_id);
 
             if (is_primary || fb_id == 0) {
                 fb_id = plane->fb_id;
@@ -570,6 +657,9 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
      * 8K BGRA frame (~126 MB, well under UINT32_MAX). */
     if (fb2->pitches[0] == 0 || fb2->height == 0 ||
         (size_t)fb2->height > ((size_t)7680 * 4320 * 4) / fb2->pitches[0]) {
+        /* This early return is BEFORE the gem_handle assignment + out: label, so
+         * close the just-minted handle here or the reject path leaks it. */
+        helper_gem_close(drm_fd, fb2->handles[0]);
         drmModeFreeFB2(fb2);
         return send_error(sock, "rejecting framebuffer geometry (too large)");
     }
@@ -692,14 +782,15 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
             meta.data_size = 0;  /* no pixel data follows */
             ret = send_fd(sock, prime_fd, &meta, sizeof(meta));
             close(prime_fd);
-            return ret;
+            goto out;
         }
         /* Export failed. For a confirmed virgl scanout the dumb-map fallback
          * below would read back black (host-side resource), so fail closed
          * rather than send a bogus all-black frame. */
         if (virtio_virgl) {
-            return send_error(sock, "virgl DMA-BUF export failed "
-                                    "(no usable CPU readback for a host scanout)");
+            ret = send_error(sock, "virgl DMA-BUF export failed "
+                                   "(no usable CPU readback for a host scanout)");
+            goto out;
         }
         /* Otherwise fall through to the dumb-map pixel path. This is safe even for an
          * INVALID (unknown-layout) modifier: a driver that TILES the scanout also
@@ -718,12 +809,14 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     struct drm_mode_map_dumb map = {0};
     map.handle = gem_handle;
     if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
-        return send_error_errno(sock, "MODE_MAP_DUMB failed");
+        ret = send_error_errno(sock, "MODE_MAP_DUMB failed");
+        goto out;
     }
     mapped = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED,
                   drm_fd, map.offset);
     if (mapped == MAP_FAILED) {
-        return send_error_errno(sock, "mmap failed");
+        ret = send_error_errno(sock, "mmap failed");
+        goto out;
     }
     meta.flags = 0;
     meta.data_size = (uint32_t)mapped_size;
@@ -755,6 +848,8 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
     /* Cleanup — munmap but DON'T close drm_fd (it's persistent). */
     munmap(mapped, mapped_size);
 
+out:
+    helper_gem_close(drm_fd, gem_handle);
     return ret;
 }
 
@@ -816,11 +911,10 @@ int main(int argc, char *argv[]) {
         device = argv[1];
     }
 
-    /* Also check DRM_DEVICE env var */
-    const char *env_dev = getenv("DRM_DEVICE");
-    if (env_dev) {
-        device = env_dev;
-    }
+    /* The device path comes solely from argv[1] -- the value the library selected
+     * and passed. A CAP_SYS_ADMIN process must not take device selection from the
+     * environment (the library itself ignores DRM_DEVICE when privileged, since
+     * 0.4.11), so DRM_DEVICE is deliberately NOT honored here. */
 
     /* The device path is attacker-influenceable (argv / DRM_DEVICE) and we run
      * with CAP_SYS_ADMIN, so refuse anything that does not canonicalize under

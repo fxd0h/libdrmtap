@@ -175,9 +175,24 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
 /**
  * @brief Capture a frame — fast persistent-mmap path.
  *
- * Like drmtap_grab_mapped() but keeps the mmap/GEM handle/prime fd alive
- * between calls. Uses fb_id to detect compositor page flips — if the
- * framebuffer hasn't changed, returns 1 immediately (~0.1ms instead of ~18ms).
+ * Like drmtap_grab_mapped() but keeps the mmap/GEM handle/prime fd alive between
+ * calls, so a repeat capture of the same framebuffer skips the GetFB2 / PRIME
+ * export / mmap setup (about 1 ioctl instead of ~7 syscalls). It ALWAYS re-reads
+ * the current scanout and returns it as a fresh frame (return 0): a compositor can
+ * render into the same framebuffer without a page flip, so treating an unchanged
+ * fb_id as "skip" would miss content updates. It therefore never returns 1.
+ *
+ * Identity is keyed on fb_id: this path assumes a stable fb_id denotes the same
+ * scanout buffer between captures. If the environment destroys a framebuffer and
+ * recycles its id onto a different buffer while it is being captured (uncommon in
+ * steady-state compositing, but possible across a resolution change), re-open or
+ * use drmtap_grab_mapped(), which re-exports every frame.
+ *
+ * If the scanout cannot be CPU-mapped (amdgpu GFX9+, discrete VRAM, nvidia) and
+ * an EGL backend is available, the call transparently falls back to EGL-detiling
+ * the exported fd instead of returning -ENOMEM. Such a frame is not cached — the
+ * fd is re-exported each grab — and -ENOMEM is returned only when no EGL fallback
+ * is possible.
  *
  * The returned frame->data pointer is valid until the NEXT call to this
  * function OR until drmtap_close(). Do NOT call drmtap_frame_release()
@@ -185,8 +200,7 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated, reused between calls)
- * @return 0 = new frame captured, 1 = same as last call (unchanged),
- *         negative errno on error
+ * @return 0 = frame captured, negative errno on error
  */
 int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame);
 
@@ -334,13 +348,18 @@ drmtap_ctx *drmtap_open_render(const char *render_node);
  * thread. The EGL state and its cached imports are thread-local; closing on a
  * different thread cannot release them and would strand the cached buffers.
  *
- * When no GPU path is usable the conversion falls back to a CPU mmap +
- * deswizzle of the fd (same pipeline as the in-process grab). The descriptor
- * and fd are treated as untrusted: the geometry is validated, the fd MUST be a
+ * The descriptor and its fd cross an IPC boundary and are treated as untrusted.
+ * Whenever desc->dma_buf_fd >= 0 the fd is validated UP FRONT, before EITHER
+ * conversion path touches it: the geometry is validated, the fd MUST be a
  * genuine DMA-BUF (a non-dma-buf fd is rejected -- only an immutable dma-buf is
  * safe to mmap and read without a truncate-mid-read fault), and it must be
  * large enough to back the declared frame (offset + stride*height); anything
- * else returns -EINVAL rather than faulting.
+ * else returns -EINVAL rather than faulting. This gates the EGL import — which
+ * would otherwise reach eglCreateImage unbounded — as well as the CPU fallback.
+ *
+ * When no GPU path is usable the conversion falls back to a CPU mmap +
+ * deswizzle of the fd (same pipeline as the in-process grab), which repeats the
+ * same size check.
  *
  * @param ctx   Context from drmtap_open_render() (or any context with a
  *              usable EGL backend)
@@ -451,7 +470,7 @@ int drmtap_deswizzle(const void *src, void *dst,
  * @brief Convert between pixel formats.
  *
  * Supported conversions:
- *   - XR30/AR30 (10-bit) → XRGB8888/ARGB8888
+ *   - XR30/AR30/XB30/AB30 (10-bit, RGB or BGR order) → XRGB8888/ARGB8888
  *   - ABGR8888 → ARGB8888/XRGB8888
  *   - Same format → copy
  *
@@ -463,7 +482,8 @@ int drmtap_deswizzle(const void *src, void *dst,
  * @param dst_stride Destination stride (bytes per row)
  * @param src_format Source DRM fourcc (e.g., DRM_FORMAT_XRGB2101010)
  * @param dst_format Destination DRM fourcc (e.g., DRM_FORMAT_XRGB8888)
- * @return 0 on success, -ENOTSUP if conversion not supported
+ * @return 0 on success, -ENOTSUP if conversion not supported, -EINVAL on
+ *         NULL/zero-size arguments or a src/dst stride narrower than width*4
  */
 int drmtap_convert_format(const void *src, void *dst,
                           uint32_t width, uint32_t height,
@@ -481,7 +501,8 @@ int drmtap_convert_format(const void *src, void *dst,
  * HDR_OUTPUT_METADATA, not from the pixel format alone — XR30/AR30 is also used
  * for plain SDR 10-bit).
  *
- * Supported src_format: XR30/AR30 (ARGB2101010). Others return -ENOTSUP.
+ * Supported src_format: XR30/AR30 and XB30/AB30 (X/ARGB2101010 and
+ * X/ABGR2101010). Others return -ENOTSUP.
  *
  * @param src        Source pixel data
  * @param dst        Destination buffer (XRGB8888)
@@ -489,7 +510,8 @@ int drmtap_convert_format(const void *src, void *dst,
  * @param height     Frame height in pixels
  * @param src_stride Source stride (bytes per row)
  * @param dst_stride Destination stride (bytes per row)
- * @param src_format Source DRM fourcc (DRM_FORMAT_XRGB2101010 / ARGB2101010)
+ * @param src_format Source DRM fourcc (DRM_FORMAT_XRGB2101010 / ARGB2101010 /
+ *                   XBGR2101010 / ABGR2101010)
  * @param max_nits   Content/mastering peak luminance for the highlight roll-off
  *                   (0 = a sensible default). Brighter peaks spread highlights
  *                   over more of the top range instead of clipping to white.
