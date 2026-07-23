@@ -514,8 +514,8 @@ Adding `libdrmtap-sys` is standard practice for them. They `cargo add libdrmtap`
 
 | Area | What shipped | Status |
 |---|---|---|
-| Core | `libdrmtap` C library 0.4.13 (`.so`/`.a` + `drmtap.h` + `pkg-config`) | ✅ Done |
-| Rust | `libdrmtap-sys` 0.4.13 (FFI; embeds + statically compiles C sources & helper) | ✅ Published on crates.io |
+| Core | `libdrmtap` C library 0.4.15 (`.so`/`.a` + `drmtap.h` + `pkg-config`) | ✅ Done |
+| Rust | `libdrmtap-sys` 0.4.15 (FFI; embeds + statically compiles C sources & helper) | ✅ Published on crates.io |
 | Rust | `libdrmtap` 0.3.4 (safe wrapper) | ✅ Published on crates.io |
 | GPU | EGL/GLES2 GPU-universal detiling backend | ✅ Implemented |
 | HW | Intel i915/xe + Nvidia/Tegra + virtio-gpu + AMD amdgpu validation | ✅ Verified (AMD on RX Vega 64, gfx9) |

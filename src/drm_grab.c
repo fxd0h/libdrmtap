@@ -663,11 +663,11 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             }
 
             drmModeFreeFB2(fb2);
-            /* For a virgl frame the GPU readback is the only way to get real
-             * pixels; if it failed, propagate the error rather than handing the
-             * caller a black frame. Non-virgl frames keep the prior best-effort
-             * behaviour (pret is ignored). */
-            if (is_virgl && pret != 0) {
+            /* Propagate ANY processing failure -- a virgl readback that produced no
+             * pixels, or an unconvertible CCS/compressed scanout that returned
+             * -ENOTSUP -- instead of handing the caller a black or still-compressed
+             * frame reported as valid. (Previously only virgl failures propagated.) */
+            if (pret != 0) {
                 /* Release everything this frame acquired (the DMA-BUF fd, the
                  * mmap and priv) — a failed grab is not released by the caller,
                  * so returning here without cleanup would leak them each grab. */
@@ -698,7 +698,17 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         frame->_priv = priv;
 
         if (do_mmap) {
-            gpu_auto_process(ctx, pixel_buf, frame, 0);
+            int pr = gpu_auto_process(ctx, pixel_buf, frame, 0);
+            if (pr != 0) {
+                /* Propagate a processing failure (e.g. an unconvertible CCS
+                 * scanout that returned -ENOTSUP) instead of handing back the
+                 * undecoded pixels reported as a valid frame. The caller does
+                 * not release a frame on error, so release priv here (V2 borrows
+                 * ctx->pixel_buf, so this frees priv only). */
+                drmModeFreeFB2(fb2);
+                drmtap_frame_release(ctx, frame);
+                return pr;
+            }
         }
 
         drmModeFreeFB2(fb2);
@@ -805,7 +815,17 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             drmtap_debug_log(ctx, "mapped %zu bytes at %p", size, mapped);
 
             /* Auto-deswizzle tiled framebuffers + format convert */
-            gpu_auto_process(ctx, mapped, frame, 0);
+            int pr = gpu_auto_process(ctx, mapped, frame, 0);
+            if (pr != 0) {
+                /* Propagate a processing failure (e.g. an unconvertible CCS
+                 * scanout that returned -ENOTSUP) instead of handing back the
+                 * still-tiled/compressed mmap reported as a valid frame. The
+                 * caller does not release a frame on error, so release the fd,
+                 * mmap (with its matching SYNC_END) and priv here. */
+                drmModeFreeFB2(fb2);
+                drmtap_frame_release(ctx, frame);
+                return pr;
+            }
         }
     }
 
@@ -825,6 +845,12 @@ cleanup:
         drmtap_gem_close(ctx, priv->gem_handle);
     }
     free(priv);
+    /* Leave the frame owning nothing on this error exit too, matching the
+     * drmtap_frame_release() the propagation sites use: priv is now freed, so a
+     * caller that defensively releases on a non-zero return gets a harmless no-op
+     * instead of a double-free through a dangling frame->_priv. */
+    frame->_priv = NULL;
+    frame->dma_buf_fd = -1;
     return ret;
 }
 
@@ -1066,18 +1092,18 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                                    frame->stride, frame->stride, modifier,
                                    (size_t)frame->stride * frame->height);
         if (ret == -ENOTSUP) {
-            /* CCS-compressed modifier — CPU deswizzle impossible.
-             * This happens in helper mode where dma_buf_fd is unavailable
-             * and the pixel data came from dumb_mmap (still compressed).
-             * Fall through to return raw data as-is with LINEAR modifier
-             * so the caller doesn't crash trying to deswizzle. */
+            /* CCS-compressed (or otherwise unsupported) modifier -- the CPU
+             * deswizzle cannot decode it and no EGL path produced linear pixels
+             * (helper V2 dumb-map, or EGL import/failure). Returning the raw
+             * compressed bytes relabelled LINEAR would hand the caller a corrupt
+             * frame reported as valid (drmtap_convert_dmabuf would forward garbage
+             * instead of failing over). Fail closed so the caller ends the stream
+             * and falls back (e.g. to PipeWire) instead. */
             drmtap_debug_log(ctx,
                 "auto-process: CCS modifier 0x%lx needs GPU deswizzle "
-                "(EGL/DMA-BUF), CPU deswizzle not possible — "
-                "returning raw pixels",
+                "(EGL/DMA-BUF), CPU deswizzle not possible -- failing closed",
                 (unsigned long)modifier);
-            frame->modifier = 0; /* DRM_FORMAT_MOD_LINEAR */
-            return 0;
+            return -ENOTSUP;
         }
         if (ret == 0) {
             frame->data = ctx->deswizzle_buf;
@@ -1122,9 +1148,17 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
         return ret;
     }
 
-    drmtap_debug_log(ctx, "auto-process: unknown driver '%s' mod=0x%lx",
+    /* Real tiling modifier (non-LINEAR, non-INVALID -- a genuinely tiled scanout;
+     * linear/unknown-layout buffers already returned above) on a driver we have no
+     * CPU deswizzle for, and EGL did not detile it (unavailable, or it failed).
+     * Returning the raw tiled mapping relabelled linear would hand the caller
+     * corruption reported as valid -- the same failure the CCS branch now guards.
+     * Fail closed instead, symmetric with it, so the caller ends the stream and
+     * falls back (do_grab propagates this; e.g. rustdesk demotes to PipeWire). */
+    drmtap_debug_log(ctx, "auto-process: unknown driver '%s' mod=0x%lx cannot "
+                     "deswizzle and EGL unavailable -- failing closed",
                      driver, (unsigned long)modifier);
-    return 0;
+    return -ENOTSUP;
 }
 
 /* ========================================================================= */

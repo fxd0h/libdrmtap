@@ -31,6 +31,7 @@
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <linux/dma-buf.h>  /* struct dma_buf_sync, DMA_BUF_IOCTL_SYNC */
 
 #include "drmtap_internal.h"
 
@@ -211,6 +212,16 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
                 void *mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED,
                                     prime_fd, 0);
                 if (mapped != MAP_FAILED) {
+                    /* Bracket the CPU read with a DMA-BUF sync, exactly as the
+                     * main frame path does. DMA-BUF CPU access is not guaranteed
+                     * coherent, so a non-coherent exporter (ARM / Tegra / Jetson)
+                     * can otherwise hand back stale or partially-updated cursor
+                     * pixels -- which the caller's content hash then suppresses,
+                     * freezing the remote cursor. */
+                    struct dma_buf_sync sync = {
+                        .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
+                    };
+                    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &sync);
                     size_t tight = (size_t)fb2->width * fb2->height * 4;
                     cursor->pixels = malloc(tight);
                     if (cursor->pixels) {
@@ -223,6 +234,8 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
                                    (size_t)fb2->width * 4);
                         }
                     }
+                    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+                    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &sync);
                     munmap(mapped, map_size);
                 }
             }
