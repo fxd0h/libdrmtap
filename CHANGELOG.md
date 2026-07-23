@@ -4,6 +4,37 @@ Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
 project share one version; the `libdrmtap` wrapper crate is versioned separately.
 
+## [0.4.15] - 2026-07-23
+
+### Fixed
+
+- A CCS-compressed (or otherwise undecodable) scanout reaching the CPU deswizzle
+  path no longer returns the raw compressed bytes relabelled linear as a valid
+  frame. Two defects combined: gpu_auto_process suppressed the deswizzle -ENOTSUP,
+  set the modifier to linear and returned success; and do_grab (the body of both
+  drmtap_grab and drmtap_grab_mapped) discarded gpu_auto_process return value at its
+  direct-mmap, helper-V2 and helper-V3 call sites. Either alone forwarded a corrupt
+  frame instead of failing over. gpu_auto_process now returns -ENOTSUP, and do_grab
+  propagates a non-zero process result (releasing the frame first) at all three
+  sites, so the caller ends the stream and falls back. The symmetric case is closed
+  too: a real (non-linear, non-INVALID) tiling modifier on a driver with no CPU
+  deswizzle and no working EGL now also returns -ENOTSUP instead of the raw tiled
+  bytes relabelled linear. do_grab error exits are uniform (every path leaves the
+  frame owning nothing), so a defensive double-release is a harmless no-op.
+- The cursor DMA-BUF read is now bracketed with the DMA_BUF_IOCTL_SYNC START/END
+  pair the main frame path already uses, in both the direct path and the privileged
+  helper. DMA-BUF CPU access is not guaranteed coherent, so a non-coherent exporter
+  (ARM / Tegra / Jetson) could return stale or partially updated cursor pixels, which
+  a content-hash consumer then suppressed and the remote cursor froze.
+- The EGL XRGB8888 import-retry is now restricted to a single-plane 8-bit RGB source
+  (XRGB8888 / ARGB8888). Reinterpreting anything else as XRGB8888 returned corruption
+  as success: a BGR order swapped red and blue, and a multi-plane / CCS-compressed
+  buffer dropped its auxiliary planes so the shader sampled compressed data. Such an
+  import now fails so the caller falls back, instead of retrying into a wrong layout.
+  The final no-modifier retry is now also gated to a LINEAR source: dropping a real
+  tiling modifier made EGL sample tiled bytes as linear and return corruption as
+  success. (Extends the 0.4.14 high-bit-depth and plane-0-offset retry fixes.)
+
 ## [0.4.14] - 2026-07-22
 
 ### Fixed
@@ -236,6 +267,7 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.4.15]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.15
 [0.4.14]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.14
 [0.4.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.13
 [0.4.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.12

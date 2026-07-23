@@ -698,34 +698,6 @@ static void ensure_linear_texture(egl_state_t *state, uint32_t w, uint32_t h) {
     state->tex_height = h;
 }
 
-/* True for a scanout fourcc carrying more than 8 bits per channel: the 10-bit
- * XR30 family and the 16-bit XR48 family (integer and half-float). Such a buffer
- * must NOT be reinterpreted as XRGB8888 during import retry -- that would sample it
- * at the wrong bit depth (and, for the 16-bit formats, the wrong row width) and
- * hand back a garbage frame reported as success. */
-static int egl_fourcc_high_bit_depth(uint32_t fourcc) {
-    switch (fourcc) {
-    /* 10-bit 2:10:10:10 */
-    case fourcc_code('X', 'R', '3', '0'):
-    case fourcc_code('X', 'B', '3', '0'):
-    case fourcc_code('A', 'R', '3', '0'):
-    case fourcc_code('A', 'B', '3', '0'):
-    /* 16-bit integer */
-    case fourcc_code('X', 'R', '4', '8'):
-    case fourcc_code('X', 'B', '4', '8'):
-    case fourcc_code('A', 'R', '4', '8'):
-    case fourcc_code('A', 'B', '4', '8'):
-    /* 16-bit half-float */
-    case fourcc_code('X', 'R', '4', 'H'):
-    case fourcc_code('X', 'B', '4', 'H'):
-    case fourcc_code('A', 'R', '4', 'H'):
-    case fourcc_code('A', 'B', '4', 'H'):
-        return 1;
-    default:
-        return 0;
-    }
-}
-
 /* Import a DMA-BUF as an EGLImage, retrying with progressively simpler
  * attribute sets (XRGB8888 keeping the modifier, then XRGB8888 alone) the way
  * some drivers need. CCS auxiliary planes come from ctx->fb2_*. Returns
@@ -812,16 +784,27 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
                          first_err, (const char *)&fourcc,
                          (unsigned long)modifier);
 
-        /* The XRGB8888 retries below reinterpret the buffer as 8-bit while keeping
-         * the source stride. That only makes sense for a genuine 8-bit scanout whose
-         * exact fourcc the driver does not recognize. For a high-bit-depth source
-         * (10-bit XR30 / 16-bit XR48 family) it would sample the wrong bit depth and
-         * return corruption as success, so fail the import instead: the caller then
-         * reduces the real bit depth from the raw mapping on the CPU. */
-        if (egl_fourcc_high_bit_depth(fourcc)) {
-            drmtap_debug_log(ctx, "egl: no XRGB8888 retry for high-bit-depth "
-                             "fourcc %.4s (would corrupt); failing import so the "
-                             "CPU reduce path runs", (const char *)&fourcc);
+        /* The XRGB8888 retries below reinterpret the buffer as a single 8-bit RGB
+         * plane at the source stride. That is only safe for a single-plane 8-bit
+         * RGB scanout (XRGB8888 / ARGB8888) whose exact fourcc a driver refuses.
+         * For anything else it samples the wrong layout and returns corruption as
+         * success:
+         *   - a high-bit-depth source (10-bit XR30 / 16-bit XR48 family): wrong bit depth;
+         *   - a BGR order (XBGR / ABGR): swapped red and blue;
+         *   - a multi-plane / CCS-compressed buffer: the retry emits only plane 0, so
+         *     the auxiliary (compression) planes are dropped and the shader samples
+         *     compressed data as pixels.
+         * In every such case, fail the import so the caller falls back (CPU reduce,
+         * or ending the stream) rather than forwarding a corrupt frame. */
+        int retry_safe = (ctx->fb2_num_planes <= 1) &&
+                         (fourcc == DRM_FORMAT_XRGB8888 ||
+                          fourcc == DRM_FORMAT_ARGB8888);
+        if (!retry_safe) {
+            drmtap_debug_log(ctx, "egl: no XRGB8888 retry for fourcc %.4s "
+                             "planes=%d modifier=0x%lx (would corrupt); failing "
+                             "import so the caller falls back",
+                             (const char *)&fourcc, ctx->fb2_num_planes,
+                             (unsigned long)modifier);
             return EGL_NO_IMAGE_KHR;
         }
 
@@ -855,8 +838,16 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
             state.display, EGL_NO_CONTEXT,
             EGL_LINUX_DMA_BUF_EXT, NULL, retry_attribs);
 
-        if (image == EGL_NO_IMAGE_KHR) {
-            /* Last resort: try XRGB8888 without modifier */
+        if (image == EGL_NO_IMAGE_KHR && modifier == DRM_FORMAT_MOD_LINEAR) {
+            /* Last resort: XRGB8888 with NO modifier attributes, for a driver
+             * that rejects the explicit-modifier form but accepts the implicit
+             * one. Gated to a LINEAR source on purpose: dropping a REAL tiling
+             * modifier would make EGL sample the tiled bytes as linear and return
+             * corruption reported as success, so an explicitly-tiled buffer stops
+             * at the modifier retry above and lets the caller fall back. (A LINEAR
+             * source has no tiling to lose; an INVALID modifier already took the
+             * no-modifier path in the retry above, so repeating it here is
+             * pointless -- the same call would fail identically.) */
             ri = 0;
             retry_attribs[ri++] = EGL_WIDTH;
             retry_attribs[ri++] = (EGLint)width;
@@ -872,7 +863,7 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
             retry_attribs[ri++] = (EGLint)stride;
             retry_attribs[ri++] = EGL_NONE;
 
-            drmtap_debug_log(ctx, "egl: retrying XRGB8888 no-modifier");
+            drmtap_debug_log(ctx, "egl: retrying XRGB8888 no-modifier (linear)");
             image = pfn_eglCreateImageKHR(
                 state.display, EGL_NO_CONTEXT,
                 EGL_LINUX_DMA_BUF_EXT, NULL, retry_attribs);

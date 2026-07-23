@@ -53,6 +53,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>  /* DRM_FORMAT_MOD_INVALID */
+#include <linux/dma-buf.h>  /* struct dma_buf_sync, DMA_BUF_IOCTL_SYNC */
 
 #ifdef HAVE_LIBCAP
 #include <sys/capability.h>
@@ -233,6 +234,26 @@ static int install_seccomp(void) {
         if (rc != 0) {
             seccomp_release(ctx);
             fprintf(stderr, "drmtap-helper: seccomp ioctl rule failed: %s\n",
+                    strerror(-rc));
+            return -1;
+        }
+    }
+
+    /* Also allow exactly DMA_BUF_IOCTL_SYNC (type 'b', not DRM's 'd', so it is
+     * NOT covered by the rule above). The cursor path brackets its DMA-BUF CPU
+     * read with this ioctl for cache coherence on non-coherent exporters
+     * (ARM / Tegra / Jetson). Matched by exact request value, not by type byte,
+     * to keep the widened surface to this single stable-ABI ioctl -- without it
+     * the SYNC call would fall through to SCMP_ACT_KILL_PROCESS and take the
+     * helper down on the first cursor poll under seccomp. */
+    {
+        int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(ioctl), 1,
+                                  SCMP_A1(SCMP_CMP_EQ,
+                                          (scmp_datum_t)DMA_BUF_IOCTL_SYNC));
+        if (rc != 0) {
+            seccomp_release(ctx);
+            fprintf(stderr,
+                    "drmtap-helper: seccomp dma-buf ioctl rule failed: %s\n",
                     strerror(-rc));
             return -1;
         }
@@ -420,11 +441,24 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
      * and heap churn. */
     static uint8_t packed[256 * 256 * 4];
     size_t tight = (size_t)cw * ch * 4;
+    /* Bracket the CPU read with a DMA-BUF sync, exactly as cursor.c and the
+     * frame path do. DMA-BUF CPU access is not guaranteed coherent, so a
+     * non-coherent exporter (ARM / Tegra / Jetson) can otherwise hand back
+     * stale cursor pixels -- which the client's content hash then suppresses,
+     * freezing the remote cursor. (DMA_BUF_IOCTL_SYNC is a 'b'-type ioctl, NOT
+     * the 'd' DRM type the other helper ioctls use, so install_seccomp() adds a
+     * dedicated allow rule for it -- otherwise this call would be KILLed.) */
+    struct dma_buf_sync csync = {
+        .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
+    };
+    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &csync);
     for (uint32_t y = 0; y < ch; y++) {
         memcpy(packed + (size_t)y * cw * 4,
                (const uint8_t *)mapped + (size_t)y * cstride,
                (size_t)cw * 4);
     }
+    csync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &csync);
     munmap(mapped, map_size);
     close(prime_fd);
     helper_gem_close(drm_fd, chandle);
