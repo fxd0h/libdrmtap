@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -330,6 +331,179 @@ fail:
     return NULL;
 }
 
+/* ── Render-node selection on a multi-GPU box ─────────────────────────────
+ *
+ * "The first openable /dev/dri/renderD*" is the wrong default when more than
+ * one GPU is present: the scanout DMA-BUF is exported by the card that drives
+ * the display, and importing it into a DIFFERENT vendor's render node can fail
+ * outright (incompatible tiling modifiers) — permanently, since the choice is
+ * made once at open. A Jetson Orin shows this concretely: card1 is `tegra`
+ * (renderD128, NO connectors) while card2 is `nvidia-drm` (renderD129) and owns
+ * the connected DP-1, so the old scan picked exactly the node that does not own
+ * the scanout.
+ *
+ * The unprivileged converter cannot simply open the KMS cards to find out which
+ * one drives a display — it may hold no rights on them — so the ranking is read
+ * from sysfs, which needs no privilege: a card whose connector is `connected`
+ * AND `enabled` is actively scanning out and wins; merely `connected` is the
+ * runner-up; a card with no outputs (a compute/offload GPU) is never preferred.
+ * When sysfs is unavailable (a container without /sys) this yields nothing and
+ * the caller falls back to the historical first-openable scan.
+ *
+ * A caller that KNOWS the exporting device should not rely on this heuristic at
+ * all — drmtap_render_node() on the capture context names the exact node.
+ */
+
+/* Read the first line of a small sysfs file into `buf` (NUL-terminated).
+ * Returns 0 on success. */
+static int read_sysfs_line(const char *path, char *buf, size_t len) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    ssize_t n = read(fd, buf, len - 1);
+    close(fd);
+    if (n <= 0) {
+        return -1;
+    }
+    buf[n] = '\0';
+    char *nl = strchr(buf, '\n');
+    if (nl) {
+        *nl = '\0';
+    }
+    return 0;
+}
+
+/* Name of the KMS card ("card1") backing render node `render_name`
+ * ("renderD128"), via /sys/class/drm/<render>/device/drm/. Returns 0 on
+ * success. */
+static int card_for_render_node(const char *render_name, char *out,
+                                size_t out_len) {
+    char dir_path[320];
+    snprintf(dir_path, sizeof(dir_path), "/sys/class/drm/%s/device/drm",
+             render_name);
+    DIR *dir = opendir(dir_path);
+    if (!dir) {
+        return -1;
+    }
+    int found = -1;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        /* The directory holds the sibling nodes of the same device: cardN,
+         * renderDM and (on older kernels) controlDK. Take the primary node —
+         * "card" with no "-CONNECTOR" suffix. */
+        if (strncmp(ent->d_name, "card", 4) != 0 || !ent->d_name[4] ||
+            strchr(ent->d_name, '-') != NULL) {
+            continue;
+        }
+        size_t len = strlen(ent->d_name);
+        if (len >= out_len) {
+            continue;  /* not a name we could have produced; ignore it */
+        }
+        memcpy(out, ent->d_name, len + 1);
+        found = 0;
+        break;
+    }
+    closedir(dir);
+    return found;
+}
+
+/* How strongly card `card_name` looks like the device driving a display:
+ * 2 = has a connected AND enabled connector (actively scanning out),
+ * 1 = has a connected connector, 0 = none (or sysfs unreadable). */
+static int card_output_rank(const char *card_name) {
+    DIR *dir = opendir("/sys/class/drm");
+    if (!dir) {
+        return 0;
+    }
+    size_t card_len = strlen(card_name);
+    int rank = 0;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        /* Connectors are exposed as "<card>-<CONNECTOR>", e.g. card1-DP-1. */
+        if (strncmp(ent->d_name, card_name, card_len) != 0 ||
+            ent->d_name[card_len] != '-') {
+            continue;
+        }
+        char path[320], val[32];
+        snprintf(path, sizeof(path), "/sys/class/drm/%s/status", ent->d_name);
+        /* "disconnected" also ends in "connected" — compare from the start. */
+        if (read_sysfs_line(path, val, sizeof(val)) != 0 ||
+            strcmp(val, "connected") != 0) {
+            continue;
+        }
+        if (rank < 1) {
+            rank = 1;
+        }
+        snprintf(path, sizeof(path), "/sys/class/drm/%s/enabled", ent->d_name);
+        if (read_sysfs_line(path, val, sizeof(val)) == 0 &&
+            strcmp(val, "enabled") == 0) {
+            rank = 2;
+            break;
+        }
+    }
+    closedir(dir);
+    return rank;
+}
+
+/* Best-ranked render node path into `out`. Returns 0 when one was picked. */
+static int pick_scanout_render_node(char *out, size_t out_len) {
+    DIR *dir = opendir("/sys/class/drm");
+    if (!dir) {
+        return -1;
+    }
+    int best_rank = 0;
+    char best[64] = {0};
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "renderD", 7) != 0) {
+            continue;
+        }
+        char card[64];
+        if (card_for_render_node(ent->d_name, card, sizeof(card)) != 0) {
+            continue;
+        }
+        size_t len = strlen(ent->d_name);
+        if (len >= sizeof(best)) {
+            continue;
+        }
+        int rank = card_output_rank(card);
+        if (rank > best_rank) {
+            best_rank = rank;
+            memcpy(best, ent->d_name, len + 1);
+            if (rank >= 2) {
+                break;  /* actively scanning out — nothing can outrank it */
+            }
+        }
+    }
+    closedir(dir);
+    if (best_rank == 0) {
+        return -1;
+    }
+    snprintf(out, out_len, "/dev/dri/%s", best);
+    return 0;
+}
+
+const char *drmtap_render_node(drmtap_ctx *ctx) {
+    if (!ctx || ctx->drm_fd < 0) {
+        return NULL;
+    }
+    if (ctx->render_node[0]) {
+        return ctx->render_node;
+    }
+    drmDevicePtr dev = NULL;
+    if (drmGetDevice2(ctx->drm_fd, 0, &dev) != 0 || !dev) {
+        return NULL;
+    }
+    if ((dev->available_nodes & (1 << DRM_NODE_RENDER)) &&
+        dev->nodes[DRM_NODE_RENDER]) {
+        snprintf(ctx->render_node, sizeof(ctx->render_node), "%s",
+                 dev->nodes[DRM_NODE_RENDER]);
+    }
+    drmFreeDevice(&dev);
+    return ctx->render_node[0] ? ctx->render_node : NULL;
+}
+
 drmtap_ctx *drmtap_open_render(const char *render_node) {
     drmtap_ctx *ctx = calloc(1, sizeof(drmtap_ctx));
     if (!ctx) {
@@ -364,7 +538,29 @@ drmtap_ctx *drmtap_open_render(const char *render_node) {
             goto fail;
         }
     } else {
-        /* Auto-detect: first openable render node. DRM render minors span the
+        /* Auto-detect. Prefer the render node of the card that actually drives
+         * a display (see pick_scanout_render_node): on a multi-GPU box that is
+         * the device exporting the scanout we will be asked to import, and the
+         * only one guaranteed to understand its tiling modifier. */
+        char preferred[96];
+        if (pick_scanout_render_node(preferred, sizeof(preferred)) == 0) {
+            int fd = open(preferred, O_RDWR | O_CLOEXEC);
+            if (fd >= 0) {
+                snprintf(ctx->device_path, sizeof(ctx->device_path), "%s",
+                         preferred);
+                ctx->drm_fd = fd;
+                drmtap_debug_log(ctx, "render node %s selected: its card "
+                                 "drives a display", preferred);
+            } else {
+                drmtap_debug_log(ctx, "render node %s drives a display but "
+                                 "could not be opened (%s); scanning",
+                                 preferred, strerror(errno));
+            }
+        }
+    }
+
+    if (ctx->drm_fd < 0 && !(render_node && render_node[0])) {
+        /* Fallback: first openable render node. DRM render minors span the
          * whole 128..191 range (up to 64 nodes on a multi-GPU box), so scan all
          * of it — a valid device can sit above renderD143. No KMS probing here
          * on purpose: a render node has no resources. */

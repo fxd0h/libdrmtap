@@ -38,6 +38,9 @@ struct drmtap_ctx {
     int drm_fd;
     char device_path[256];
     char driver_name[64];
+    /* Render node of THIS device, resolved lazily by drmtap_render_node().
+     * Empty until first asked (the device has none, or it was never queried). */
+    char render_node[256];
 
     /* Selected display */
     uint32_t crtc_id;

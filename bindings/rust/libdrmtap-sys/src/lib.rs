@@ -110,6 +110,10 @@ extern "C" {
 
     // Split capture (privileged export + unprivileged convert)
     pub fn drmtap_open_render(render_node: *const c_char) -> *mut drmtap_ctx;
+    /// Render node of the device backing `ctx`, for handing to
+    /// `drmtap_open_render` on the converting side of a split so it binds to the
+    /// GPU that exported the frame. Owned by `ctx`; NULL if it has none.
+    pub fn drmtap_render_node(ctx: *mut drmtap_ctx) -> *const c_char;
     pub fn drmtap_grab_desc(
         ctx: *mut drmtap_ctx,
         desc: *mut drmtap_dmabuf_desc,
