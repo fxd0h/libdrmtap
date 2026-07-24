@@ -221,7 +221,20 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
                     struct dma_buf_sync sync = {
                         .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
                     };
-                    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &sync);
+                    /* Track whether START actually took, and only issue the
+                     * matching END if it did -- an unpaired END would unbalance
+                     * the exporter's CPU-access accounting. A failure is logged
+                     * and the read still proceeds: it degrades to the previous
+                     * (unsynchronised) behaviour rather than dropping the cursor
+                     * on an exporter that does not implement the ioctl, and a
+                     * stale cursor is cosmetic, not corruption. */
+                    int sync_started =
+                        drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &sync) == 0;
+                    if (!sync_started) {
+                        drmtap_debug_log(ctx,
+                            "cursor: DMA_BUF_SYNC_START failed (%s); reading "
+                            "without cache invalidation", strerror(errno));
+                    }
                     size_t tight = (size_t)fb2->width * fb2->height * 4;
                     cursor->pixels = malloc(tight);
                     if (cursor->pixels) {
@@ -234,8 +247,14 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
                                    (size_t)fb2->width * 4);
                         }
                     }
-                    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
-                    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &sync);
+                    if (sync_started) {
+                        sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+                        if (drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &sync) != 0) {
+                            drmtap_debug_log(ctx,
+                                "cursor: DMA_BUF_SYNC_END failed (%s)",
+                                strerror(errno));
+                        }
+                    }
                     munmap(mapped, map_size);
                 }
             }

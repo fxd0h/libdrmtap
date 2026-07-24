@@ -1103,6 +1103,9 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                 "auto-process: CCS modifier 0x%lx needs GPU deswizzle "
                 "(EGL/DMA-BUF), CPU deswizzle not possible -- failing closed",
                 (unsigned long)modifier);
+            drmtap_set_error(ctx,
+                "compressed scanout (modifier 0x%lx) needs a GPU deswizzle, "
+                "which is unavailable on this path", (unsigned long)modifier);
             return -ENOTSUP;
         }
         if (ret == 0) {
@@ -1158,6 +1161,9 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     drmtap_debug_log(ctx, "auto-process: unknown driver '%s' mod=0x%lx cannot "
                      "deswizzle and EGL unavailable -- failing closed",
                      driver, (unsigned long)modifier);
+    drmtap_set_error(ctx,
+        "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle and "
+        "EGL detile is unavailable", driver, (unsigned long)modifier);
     return -ENOTSUP;
 }
 
