@@ -451,14 +451,30 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
     struct dma_buf_sync csync = {
         .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
     };
-    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &csync);
+    /* Track whether START took, and only issue the matching END if it did -- an
+     * unpaired END would unbalance the exporter's CPU-access accounting. On
+     * failure the read still proceeds: it degrades to the previous
+     * (unsynchronised) behaviour rather than dropping the cursor on an exporter
+     * that does not implement the ioctl, and a stale cursor is cosmetic. */
+    int csync_started = drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &csync) == 0;
+    if (!csync_started) {
+        fprintf(stderr,
+                "drmtap-helper: cursor DMA_BUF_SYNC_START failed: %s\n",
+                strerror(errno));
+    }
     for (uint32_t y = 0; y < ch; y++) {
         memcpy(packed + (size_t)y * cw * 4,
                (const uint8_t *)mapped + (size_t)y * cstride,
                (size_t)cw * 4);
     }
-    csync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
-    drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &csync);
+    if (csync_started) {
+        csync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+        if (drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &csync) != 0) {
+            fprintf(stderr,
+                    "drmtap-helper: cursor DMA_BUF_SYNC_END failed: %s\n",
+                    strerror(errno));
+        }
+    }
     munmap(mapped, map_size);
     close(prime_fd);
     helper_gem_close(drm_fd, chandle);

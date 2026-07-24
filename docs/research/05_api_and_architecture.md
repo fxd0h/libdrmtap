@@ -450,7 +450,7 @@ Three layers, published on crates.io:
 └─────────────────────────────────────────────────┘
 ```
 
-> ⚠️ **Testing status**: Both crates are published (libdrmtap-sys 0.4.13,
+> ⚠️ **Testing status**: Both crates are published (libdrmtap-sys 0.4.15,
 > libdrmtap 0.3.4) and verified to build/test in CI on Ubuntu 22.04/24.04.
 > Capture is verified on Intel i915/xe (dual-4K Meteor Lake), Nvidia/Tegra
 > (Jetson Orin Nano, aarch64), virtio-gpu, and AMD amdgpu (RX Vega 64, gfx9,
