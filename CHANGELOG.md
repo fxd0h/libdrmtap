@@ -4,7 +4,7 @@ Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
 project share one version; the `libdrmtap` wrapper crate is versioned separately.
 
-## [0.4.15] - 2026-07-23
+## [0.4.15] - 2026-07-24
 
 ### Added
 
@@ -55,7 +55,6 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
   different device now tears down and rebuilds its GL context rather than
   sampling another GPU display, and EGL availability is cached per device too, so
   a compute GPU without EGL next to one with it is answered correctly.
-
 - A CCS-compressed (or otherwise undecodable) scanout reaching the CPU deswizzle
   path no longer returns the raw compressed bytes relabelled linear as a valid
   frame. Two defects combined: gpu_auto_process suppressed the deswizzle -ENOTSUP,

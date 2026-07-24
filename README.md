@@ -72,6 +72,8 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 |---|---|
 | VMs (virtio_gpu, Parallels, QEMU) | ✅ Verified |
 | Multi-monitor (per-CRTC) | ✅ Implemented |
+| Multi-GPU (enumerate every card + bind convert to the exporting GPU) | ✅ Implemented |
+| Split capture (privileged export + unprivileged convert) | ✅ Implemented |
 | Zero-copy DMA-BUF output (V3) | ✅ Implemented |
 | Mapped RGBA output | ✅ Verified |
 | Continuous capture (polling loop) | ✅ Verified |
@@ -93,6 +95,12 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`, dual 3840x2160,
 > EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64, Wayland).
 > The AMD (`amdgpu`) backend is verified on real hardware (RX Vega 64, gfx9, via the EGL detile path — see [#26](https://github.com/fxd0h/libdrmtap/issues/26)).
+> **Multi-GPU render-node selection is verified on the Jetson Orin's two DRM
+> devices** (`tegra`/renderD128 with no connectors + `nvidia-drm`/renderD129
+> driving the display): the converter now binds renderD129, the node that
+> exported the scanout. The multi-card display *merge* (one monitor per GPU on two
+> display-driving GPUs) is implemented but not yet verified end-to-end for lack of
+> such hardware.
 > If you test on real hardware, please [report results](https://github.com/fxd0h/libdrmtap/issues).
 >
 > ℹ️ **virgl note**: Plain `virtio-gpu` is captured with a direct linear map. A
@@ -274,7 +282,7 @@ Every existing project is either a complete application, a plugin, or PipeWire-b
 │      (RustDesk, Sunshine, VNC, custom)          │
 ├─────────────────────────────────────────────────┤
 │              libdrmtap.h                        │
-│          Public API — ~10 functions             │
+│          Public API — ~20 functions             │
 ├─────────────────────────────────────────────────┤
 │                                                 │
 │  ┌────────────┐  ┌─────────┐  ┌──────────────┐  │
@@ -314,7 +322,7 @@ libdrmtap uses a **dual-path** approach for GPU-tiled framebuffers:
 | Manage permissions transparently | Inject keyboard/mouse input |
 | Support Intel, AMD, Nvidia, VMs | Replace Wayland's screen sharing protocols |
 | Provide cursor position + shape | Implement a VNC/RDP server |
-| Enumerate displays and monitors | |
+| Enumerate displays and monitors across multiple GPUs | |
 | Detect changed regions (dirty rects) | |
 
 **Wayland positioning**: For interactive desktop sharing where user consent matters, use Wayland protocols (`ext-image-capture-source-v1`, PipeWire). For unattended system-level capture (servers, kiosks, CI, remote management, **login screens**), use libdrmtap. We complement Wayland — we don't compete with it.

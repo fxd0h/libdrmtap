@@ -180,6 +180,30 @@ void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 // Returns 1 if display configuration changed since last call, 0 if unchanged.
 int drmtap_displays_changed(drmtap_ctx *ctx);
 
+// --- Split capture: privileged export + unprivileged convert (0.4.9) ---
+// Run the DRM export and the GPU detile/convert in DIFFERENT processes, so the
+// EGL/GLES + vendor GPU stack never loads into the privileged one. The exporter
+// (drmtap_open) grabs a dma-buf fd + descriptor; the fd is passed out of band
+// (e.g. SCM_RIGHTS) to an unprivileged converter (drmtap_open_render) that
+// EGL-detiles it to linear RGBA. drmtap_grab_desc emits the full plane layout +
+// HDR state that drmtap_frame_info cannot carry (CCS aux planes, eotf), so a
+// split consumer must use it, not drmtap_grab alone.
+int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
+                     drmtap_frame_info *frame);
+drmtap_ctx *drmtap_open_render(const char *render_node); // NULL = auto-select
+int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
+                          drmtap_frame_info *frame);
+
+// --- Multi-GPU (0.4.15) ---
+// A context is bound to ONE device. On a multi-GPU host, enumerate every card
+// and open one context per device; and bind the converter to the render node of
+// the GPU that EXPORTED the scanout (cross-vendor import can fail permanently on
+// an incompatible tiling modifier). drmtap_render_node names the exporter's node
+// for the converter; it is a separate accessor, NOT a drmtap_dmabuf_desc field,
+// so the descriptor layout the caller writes stays frozen across .so versions.
+int drmtap_list_devices(drmtap_device *out, int max_count);
+const char *drmtap_render_node(drmtap_ctx *ctx); // NULL if the device has none
+
 // --- HDR (implemented as in-capture tone-mapping to SDR, #16) ---
 // HDR is handled automatically rather than exposed as a passthrough API: the
 // helper reads the connector HDR_OUTPUT_METADATA (EOTF + peak) and, when the
