@@ -492,7 +492,7 @@ static int card_for_render_node(const char *render_name, char *out,
         return -1;
     }
     int found = -1;
-    struct dirent *ent;
+    const struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         /* The directory holds the sibling nodes of the same device: cardN,
          * renderDM and (on older kernels) controlDK. Take the primary node —
@@ -523,7 +523,7 @@ static int card_output_rank(const char *card_name) {
     }
     size_t card_len = strlen(card_name);
     int rank = 0;
-    struct dirent *ent;
+    const struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         /* Connectors are exposed as "<card>-<CONNECTOR>", e.g. card1-DP-1. */
         if (strncmp(ent->d_name, card_name, card_len) != 0 ||
@@ -559,7 +559,7 @@ static int pick_scanout_render_node(char *out, size_t out_len) {
     }
     int best_rank = 0;
     char best[64] = {0};
-    struct dirent *ent;
+    const struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         if (strncmp(ent->d_name, "renderD", 7) != 0) {
             continue;
