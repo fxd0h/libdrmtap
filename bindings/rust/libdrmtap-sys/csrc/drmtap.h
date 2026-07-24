@@ -328,6 +328,45 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
 drmtap_ctx *drmtap_open_render(const char *render_node);
 
 /**
+ * @brief A capturable DRM device, as reported by drmtap_list_devices().
+ *
+ * Layout is FROZEN: like drmtap_dmabuf_desc it is written into caller-owned
+ * storage, so a future addition must come as a new accessor, never as a new
+ * field here (a bigger struct written by a newer .so would overrun a consumer
+ * built against an older header).
+ */
+typedef struct {
+    char path[64];          /**< KMS card node, e.g. "/dev/dri/card1" */
+    char render_node[64];   /**< Render node, or "" if the device has none */
+    char driver[32];        /**< Kernel driver, e.g. "i915", "nvidia-drm" */
+    uint32_t display_count; /**< CRTCs actively scanning out on this device */
+} drmtap_device;
+
+/**
+ * @brief Enumerate every DRM device with KMS resources.
+ *
+ * A drmtap context is bound to ONE device, so on a multi-GPU host a single
+ * context can never advertise the displays of the other cards: drmtap_open()
+ * settles on the first card with an active CRTC and drmtap_list_displays() then
+ * only ever sees that one. This is the discovery step a multi-GPU consumer
+ * needs — open one context per device (drmtap_open with the reported @c path)
+ * and enumerate each, instead of silently capturing a single card.
+ *
+ * Devices with no active display are reported too, with display_count 0, so the
+ * caller can still open one and see its connected-but-dark connectors; sorting
+ * or filtering on display_count is left to the caller. Each card is opened
+ * briefly to read its KMS resources, so this needs the same rights as
+ * drmtap_open (it is meant for the privileged/exporter side); cards that cannot
+ * be opened are skipped rather than failing the whole enumeration. Connector
+ * state is NOT re-probed, so calling this does not disturb a live display.
+ *
+ * @param out       Caller array to fill
+ * @param max_count Capacity of @p out
+ * @return Number of devices written (0 or more), or negative errno on error
+ */
+int drmtap_list_devices(drmtap_device *out, int max_count);
+
+/**
  * @brief Render node (/dev/dri/renderD*) of the device backing @p ctx.
  *
  * The deterministic answer to "which render node can import THIS context's

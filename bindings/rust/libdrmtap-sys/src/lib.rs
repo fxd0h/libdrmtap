@@ -25,6 +25,22 @@ pub struct drmtap_config {
     pub debug: c_int,
 }
 
+/// A capturable DRM device, as reported by `drmtap_list_devices`. Layout is
+/// frozen: it is written into caller-owned storage, so a future addition must
+/// come as a new accessor rather than a new field here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct drmtap_device {
+    /// KMS card node, e.g. `/dev/dri/card1`
+    pub path: [c_char; 64],
+    /// Render node, or an empty string if the device has none
+    pub render_node: [c_char; 64],
+    /// Kernel driver, e.g. `i915`, `nvidia-drm`
+    pub driver: [c_char; 32],
+    /// CRTCs actively scanning out on this device
+    pub display_count: u32,
+}
+
 /// Information about a connected display
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -110,6 +126,10 @@ extern "C" {
 
     // Split capture (privileged export + unprivileged convert)
     pub fn drmtap_open_render(render_node: *const c_char) -> *mut drmtap_ctx;
+    /// Enumerate every DRM device with KMS resources. A context is bound to one
+    /// device, so this is how a multi-GPU consumer finds the other cards instead
+    /// of only ever advertising the displays of the first one.
+    pub fn drmtap_list_devices(out: *mut drmtap_device, max_count: c_int) -> c_int;
     /// Render node of the device backing `ctx`, for handing to
     /// `drmtap_open_render` on the converting side of a split so it binds to the
     /// GPU that exported the frame. Owned by `ctx`; NULL if it has none.
