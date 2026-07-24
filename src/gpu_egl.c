@@ -227,9 +227,23 @@ static int load_gl_libraries(void) {
 /* EGL context (lazily initialized per drmtap_ctx)                           */
 /* ========================================================================= */
 
-/* Global EGL display (one per process, shared across threads) */
-static EGLDisplay g_egl_display = EGL_NO_DISPLAY;
-static int g_egl_display_initialized = 0;
+/* ── EGL displays, one PER DRM DEVICE (shared across threads) ──
+ * A single process-wide EGLDisplay is wrong on a multi-GPU host: the display is
+ * bound to the device it was created from, so whichever GPU happened to convert
+ * first would keep serving imports of scanouts exported by the other one — which
+ * can fail permanently (incompatible tiling modifiers). Keyed by the context's
+ * device path; entries are never torn down (see the CRITICAL note in
+ * drmtap_gpu_egl_available: terminating a display kills other threads' live
+ * detile contexts). An occupied slot memoizes a NEGATIVE outcome too — its
+ * display stays EGL_NO_DISPLAY — so a device with no usable EGL is not
+ * re-probed on every frame. */
+#define DRMTAP_EGL_DISPLAY_SLOTS 4
+static struct {
+    char        device_path[256];
+    EGLDisplay  display;          /* EGL_NO_DISPLAY = this device has no EGL */
+} g_egl_displays[DRMTAP_EGL_DISPLAY_SLOTS];
+static int g_egl_display_count = 0;
+static pthread_mutex_t g_egl_display_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ── Import-once EGLImage cache (keyed by KMS fb_id) ── */
 /* The compositor scans out of a small pool of framebuffers (double/triple
@@ -258,7 +272,8 @@ typedef struct {
 
 /* Per-thread EGL context and GL resources */
 typedef struct {
-    EGLDisplay display;   /* cached copy of g_egl_display */
+    EGLDisplay display;        /* the display of `device_path`'s device */
+    char device_path[256];     /* DRM device this thread's GL state belongs to */
     EGLContext context;
     GLuint program;
     GLuint fbo;
@@ -289,7 +304,7 @@ static _Thread_local egl_state_t state = {0};
 /* Backstop for a capture thread that exits WITHOUT calling drmtap_close (an
  * error/panic path): a pthread TSD destructor frees this thread's EGL context at
  * thread exit, while its context can still be made current. The shared
- * g_egl_display is never terminated, so this is safe. */
+ * per-device displays are never terminated, so this is safe. */
 static pthread_key_t g_egl_tsd_key;
 static int g_egl_tsd_key_ok = 0;   /* set once the key is created successfully */
 static pthread_once_t g_egl_tsd_once = PTHREAD_ONCE_INIT;
@@ -511,6 +526,49 @@ static EGLDisplay get_egl_display_for_card(const char *card_path) {
     return display;
 }
 
+/* The INITIALIZED EGLDisplay for @ctx's DRM device, or EGL_NO_DISPLAY if that
+ * device has none. Memoized per device path; never terminated. Callers must
+ * have loaded the EGL procs (load_egl_procs) first. */
+static EGLDisplay egl_display_for_ctx(const drmtap_ctx *ctx) {
+    const char *path = (ctx && ctx->device_path[0]) ? ctx->device_path : "";
+
+    pthread_mutex_lock(&g_egl_display_lock);
+    for (int i = 0; i < g_egl_display_count; i++) {
+        if (strcmp(g_egl_displays[i].device_path, path) == 0) {
+            EGLDisplay cached = g_egl_displays[i].display;
+            pthread_mutex_unlock(&g_egl_display_lock);
+            return cached;
+        }
+    }
+
+    EGLDisplay display = get_egl_display_for_card(path);
+    if (display != EGL_NO_DISPLAY) {
+        EGLint major = 0, minor = 0;
+        if (eglInitialize(display, &major, &minor)) {
+            drmtap_debug_log(NULL, "EGL: display for %s initialized: %p (%d.%d)",
+                             path, (void *)display, major, minor);
+        } else {
+            drmtap_debug_log(NULL, "EGL: eglInitialize for %s failed: 0x%x",
+                             path, eglGetError());
+            display = EGL_NO_DISPLAY;
+        }
+    }
+
+    if (g_egl_display_count < DRMTAP_EGL_DISPLAY_SLOTS) {
+        int slot = g_egl_display_count;
+        snprintf(g_egl_displays[slot].device_path,
+                 sizeof(g_egl_displays[slot].device_path), "%s", path);
+        g_egl_displays[slot].display = display;
+        g_egl_display_count = slot + 1;
+    } else {
+        /* More distinct devices than slots: still correct (eglInitialize is
+         * idempotent per the spec), just re-resolved each time. */
+        drmtap_debug_log(NULL, "EGL: display table full, %s not memoized", path);
+    }
+    pthread_mutex_unlock(&g_egl_display_lock);
+    return display;
+}
+
 /* ========================================================================= */
 /* EGL state management                                                      */
 /* ========================================================================= */
@@ -521,25 +579,17 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         return -ENOTSUP;
     }
 
-    /* Initialize global display once (thread-safe: eglInitialize is 
-     * idempotent per EGL spec — second call on same display is a no-op) */
-    if (!g_egl_display_initialized) {
-        g_egl_display = get_egl_display_for_card(ctx->device_path);
-        if (g_egl_display == EGL_NO_DISPLAY) {
-            drmtap_debug_log(ctx, "egl: no EGL display available");
-            return -ENODEV;
-        }
-        EGLint major, minor;
-        if (!eglInitialize(g_egl_display, &major, &minor)) {
-            drmtap_debug_log(ctx, "egl: eglInitialize failed: 0x%x",
-                             eglGetError());
-            return -EIO;
-        }
-        g_egl_display_initialized = 1;
-        drmtap_debug_log(NULL, "EGL: global display initialized: %p (%d.%d)",
-                (void*)g_egl_display, major, minor);
+    /* The display belongs to THIS context's device, not to the process (see the
+     * per-device table above). eglInitialize is idempotent per the EGL spec, so
+     * concurrent first-use from several threads is safe. */
+    state->display = egl_display_for_ctx(ctx);
+    if (state->display == EGL_NO_DISPLAY) {
+        drmtap_debug_log(ctx, "egl: no EGL display available for %s",
+                         ctx->device_path);
+        return -ENODEV;
     }
-    state->display = g_egl_display;
+    snprintf(state->device_path, sizeof(state->device_path), "%s",
+             ctx->device_path);
 
     eglBindAPI(EGL_OPENGL_ES_API);
 
@@ -657,13 +707,14 @@ static void egl_cleanup(egl_state_t *st) {
         glDeleteProgram(st->program);
     }
     /* Release the context from this thread before destroying it. MUST NOT
-     * eglTerminate(st->display): g_egl_display is shared across all capture
-     * threads; terminating it invalidates other threads' live detile contexts
-     * (see the CRITICAL note in drmtap_gpu_egl_available). */
+     * eglTerminate(st->display): that display is shared by every capture thread
+     * using the same DRM device; terminating it invalidates those threads' live
+     * detile contexts (see the CRITICAL note in drmtap_gpu_egl_available). */
     eglMakeCurrent(st->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                    EGL_NO_CONTEXT);
     eglDestroyContext(st->display, st->context);
     st->context = EGL_NO_CONTEXT;
+    st->device_path[0] = '\0';
     st->program = 0;
     st->fbo = 0;
     st->linear_texture = 0;
@@ -926,34 +977,30 @@ int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
         return 0;
     }
     /* EGL availability is a static property of the GPU, but this is called on
-     * every captured frame. Cache it once.
+     * every captured frame — so it must stay cheap. It is a property PER DEVICE
+     * (a compute GPU with no EGL next to one with it), so the answer comes from
+     * the per-device display table, which memoizes both outcomes; after the
+     * first call this is a locked string compare.
      *
-     * CRITICAL: this must NOT call eglTerminate() on the display. The display
-     * returned by get_egl_display_for_card() is the SAME shared EGLDisplay used
-     * by the live detile contexts. Terminating it here — while another capture
-     * thread is mid-eglCreateImage — invalidates that thread's display and makes
-     * its detile fail with EGL_NOT_INITIALIZED, so it falls back to returning the
-     * raw tiled/compressed buffer (garbage/color corruption). Concurrent captures
+     * CRITICAL: this must NOT call eglTerminate() on the display. That display
+     * is the SAME one used by the live detile contexts on this device.
+     * Terminating it here — while another capture thread is mid-eglCreateImage —
+     * invalidates that thread's display and makes its detile fail with
+     * EGL_NOT_INITIALIZED, so it falls back to returning the raw
+     * tiled/compressed buffer (garbage/color corruption). Concurrent captures
      * (e.g. two monitors viewed at once) hit this constantly. */
-    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
-    static int cached = -1;
-    pthread_mutex_lock(&lk);
-    if (cached < 0) {
-        if (load_egl_procs() < 0) {
-            cached = 0;
-        } else {
-            EGLDisplay display = get_egl_display_for_card(ctx->device_path);
-            if (display == EGL_NO_DISPLAY) {
-                cached = 0;
-            } else {
-                EGLint major, minor;
-                cached = eglInitialize(display, &major, &minor) ? 1 : 0;
-                /* Intentionally no eglTerminate(display) — see above. */
-            }
-        }
+    static pthread_mutex_t procs_lk = PTHREAD_MUTEX_INITIALIZER;
+    static int procs_ok = -1;
+    pthread_mutex_lock(&procs_lk);
+    if (procs_ok < 0) {
+        procs_ok = load_egl_procs() < 0 ? 0 : 1;
     }
-    pthread_mutex_unlock(&lk);
-    return cached;
+    pthread_mutex_unlock(&procs_lk);
+    if (!procs_ok) {
+        return 0;
+    }
+    /* Intentionally no eglTerminate() on the returned display — see above. */
+    return egl_display_for_ctx(ctx) != EGL_NO_DISPLAY;
 }
 
 /**
@@ -1022,6 +1069,18 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     int ret;
 
     drmtap_debug_log(NULL, "EGL: state.initialized=%d", state.initialized);
+    /* The GL context, its shaders and the cached EGLImages all belong to ONE
+     * EGLDisplay, i.e. one DRM device. If this thread previously converted for
+     * a different device, none of that state can serve the new one — tear it
+     * down and rebuild rather than sample another GPU's display. (Comparing the
+     * device path, not the display handle, keeps this off the lock on the
+     * per-frame path.) */
+    if (state.initialized && strcmp(state.device_path, ctx->device_path) != 0) {
+        drmtap_debug_log(ctx, "egl: thread moved from %s to %s, rebuilding the "
+                         "GL context on the new device",
+                         state.device_path, ctx->device_path);
+        egl_cleanup(&state);
+    }
     if (!state.initialized) {
         ret = egl_init(ctx, &state);
         drmtap_debug_log(NULL, "EGL: egl_init returned %d", ret);

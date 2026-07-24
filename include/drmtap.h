@@ -312,11 +312,43 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
  * privileged helper, or enumerate displays, and it needs no elevated
  * capability. Grab entry points return -ENOTSUP on this context.
  *
+ * On a multi-GPU host the node matters: a scanout DMA-BUF exported by one GPU
+ * can be impossible to import into another vendor's render node (incompatible
+ * tiling modifiers), and the choice is made once, here. Pass the exporting
+ * device's node explicitly whenever it is known — drmtap_render_node() on the
+ * capture context names it. With NULL, auto-selection prefers the render node
+ * of a card that is actively driving a display (read from sysfs, so it needs no
+ * rights on the KMS cards) over a compute/offload GPU with no outputs, and only
+ * falls back to "the first openable node" when nothing can be ranked.
+ *
  * @param render_node Render node path (e.g. "/dev/dri/renderD128"),
- *                    or NULL to auto-select the first usable one.
+ *                    or NULL to auto-select (see above).
  * @return Context handle, or NULL on error (call drmtap_error(NULL) for message)
  */
 drmtap_ctx *drmtap_open_render(const char *render_node);
+
+/**
+ * @brief Render node (/dev/dri/renderD*) of the device backing @p ctx.
+ *
+ * The deterministic answer to "which render node can import THIS context's
+ * scanout": the privileged exporter calls it on its capture context and passes
+ * the string to the unprivileged converter's drmtap_open_render(), so a
+ * multi-GPU host converts on the GPU that exported the frame instead of
+ * whichever node happened to be picked by auto-selection.
+ *
+ * Deliberately NOT part of drmtap_dmabuf_desc: that struct is written by
+ * drmtap_grab_desc() into caller-owned storage, so growing it would corrupt a
+ * consumer built against an older header but running against a newer .so (the
+ * dlopen-by-soname deployment this library is designed for). Carrying the node
+ * as its own accessor keeps the descriptor layout frozen; a consumer that
+ * dlopens can simply treat an absent symbol as "old library, keep the previous
+ * behaviour".
+ *
+ * @param ctx Context (typically a capture context from drmtap_open)
+ * @return Node path owned by @p ctx and valid until drmtap_close(), or NULL if
+ *         the device exposes no render node (e.g. a display-only KMS device)
+ */
+const char *drmtap_render_node(drmtap_ctx *ctx);
 
 /**
  * @brief Convert an externally-supplied scanout frame to linear RGBA.

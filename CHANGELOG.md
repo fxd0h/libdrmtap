@@ -6,7 +6,40 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 
 ## [0.4.15] - 2026-07-23
 
+### Added
+
+- drmtap_render_node(): the render node of the DRM device a context is bound to.
+  On a split deployment the privileged exporter calls it on its capture context
+  and hands the path to the unprivileged converter, so drmtap_open_render()
+  binds to the GPU that exported the frame rather than to whichever node
+  auto-selection happened to reach. Deliberately a separate accessor and not a
+  new field in drmtap_dmabuf_desc: that struct is written by drmtap_grab_desc()
+  into caller-owned storage, so growing it would corrupt a consumer built
+  against an older header but running against a newer .so, which is exactly the
+  dlopen-by-soname deployment this library targets. The descriptor layout stays
+  frozen, and a consumer that dlopens can treat an absent symbol as an older
+  library.
+
 ### Fixed
+
+- drmtap_open_render(NULL) no longer takes the first openable render node, which
+  was the wrong device on a multi-GPU host: the scanout is exported by the card
+  that drives the display, and importing it into another vendor render node can
+  fail permanently on an incompatible tiling modifier. Auto-selection now
+  prefers the render node of a card with a connected and enabled connector, then
+  a card with a connected connector, and only then falls back to the historical
+  first-openable scan. The ranking is read from sysfs so it needs no rights on
+  the KMS cards, which the unprivileged converter may not have. Verified on a
+  Jetson Orin, where card1 is tegra with no connectors and card2 is nvidia-drm
+  driving the connected DP-1: selection moved from renderD128 to renderD129, the
+  node that actually exports the scanout.
+- The EGL display is now resolved and cached per DRM device instead of once per
+  process. A single process-wide display is bound to whichever GPU converted
+  first, so on a multi-GPU host it kept serving imports of scanouts exported by
+  the other card, which can fail permanently. A capture thread that moves to a
+  different device now tears down and rebuilds its GL context rather than
+  sampling another GPU display, and EGL availability is cached per device too, so
+  a compute GPU without EGL next to one with it is answered correctly.
 
 - A CCS-compressed (or otherwise undecodable) scanout reaching the CPU deswizzle
   path no longer returns the raw compressed bytes relabelled linear as a valid
