@@ -116,11 +116,24 @@ static int open_drm_auto(drmtap_ctx *ctx) {
     }
 
     /* Two-pass scan of /dev/dri/card0..card15:
-     *   Pass 1: find a device with an ACTIVE CRTC (monitor connected)
+     *   Pass 1: find the device driving the MOST displays (active CRTCs)
      *   Pass 2: fallback to any device with KMS resources
+     *
+     * A context covers ONE device, so on a multi-GPU host this pick decides
+     * which displays are capturable at all; drmtap_list_devices() is the way to
+     * reach the others. Until 0.4.15 this took the FIRST card with any active
+     * CRTC, which is just "lowest minor wins" and can be badly wrong: load vkms
+     * next to a real GPU and it registers as card0 with one 1024x768 virtual
+     * output, so auto-detect captured that instead of the three real monitors on
+     * card1. Ranking by active-CRTC count makes the single-card choice land on
+     * the GPU actually driving the desktop. It remains a heuristic — a caller
+     * that wants every display must enumerate devices.
      */
     int fallback_fd = -1;
     char fallback_path[64] = {0};
+    int best_fd = -1;
+    int best_active = 0;
+    char best_path[64] = {0};
 
     for (int i = 0; i < 16; i++) {
         snprintf(path, sizeof(path), "/dev/dri/card%d", i);
@@ -138,27 +151,34 @@ static int open_drm_auto(drmtap_ctx *ctx) {
             continue;
         }
 
-        /* Check for active CRTCs (monitor driving a display) */
-        int has_active = 0;
+        /* Count active CRTCs (monitors this device is driving) */
+        int active = 0;
         for (int j = 0; j < res->count_crtcs; j++) {
             drmModeCrtc *crtc = drmModeGetCrtc(fd, res->crtcs[j]);
             if (crtc) {
                 if (crtc->mode_valid && crtc->buffer_id > 0) {
                     drmtap_debug_log(ctx, "  CRTC %u active (%dx%d)",
                                      crtc->crtc_id, crtc->width, crtc->height);
-                    has_active = 1;
+                    active++;
                 }
                 drmModeFreeCrtc(crtc);
-                if (has_active) break;
             }
         }
         drmModeFreeResources(res);
 
-        if (has_active) {
-            /* Found the GPU driving a monitor — use this one */
-            if (fallback_fd >= 0) close(fallback_fd);
-            snprintf(ctx->device_path, sizeof(ctx->device_path), "%s", path);
-            return fd;
+        if (active > 0) {
+            /* Keep the best candidate so far; ties keep the lower minor. */
+            if (active > best_active) {
+                if (best_fd >= 0) {
+                    close(best_fd);
+                }
+                best_fd = fd;
+                best_active = active;
+                snprintf(best_path, sizeof(best_path), "%s", path);
+            } else {
+                close(fd);
+            }
+            continue;
         }
 
         /* Keep as fallback (first device with KMS but no active CRTC) */
@@ -169,6 +189,17 @@ static int open_drm_auto(drmtap_ctx *ctx) {
         } else {
             close(fd);
         }
+    }
+
+    /* The GPU driving the most displays wins. */
+    if (best_fd >= 0) {
+        if (fallback_fd >= 0) {
+            close(fallback_fd);
+        }
+        snprintf(ctx->device_path, sizeof(ctx->device_path), "%s", best_path);
+        drmtap_debug_log(ctx, "using %s (%d active display(s))", best_path,
+                         best_active);
+        return best_fd;
     }
 
     /* No device with active CRTC found — use fallback if available */
@@ -329,6 +360,80 @@ fail:
     }
     free(ctx);
     return NULL;
+}
+
+int drmtap_list_devices(drmtap_device *out, int max_count) {
+    if (!out || max_count <= 0) {
+        return -EINVAL;
+    }
+
+    int found = 0;
+    for (int i = 0; i < 16 && found < max_count; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/dri/card%d", i);
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            continue;
+        }
+
+        /* Opening a card node while nobody holds master grants US implicit
+         * master, which would block a compositor from acquiring it on a VT
+         * switch. Enumeration never modesets, so give it straight back — same
+         * reasoning as drmtap_open, and the gate is the capability, not the uid
+         * (drmModeGetResources works without master either way). */
+        if (drmtap_have_cap_sys_admin()) {
+            drmDropMaster(fd);
+        }
+
+        drmModeRes *res = drmModeGetResources(fd);
+        if (!res) {
+            close(fd);   /* render-only or no KMS: not a capturable device */
+            continue;
+        }
+
+        drmtap_device *dev = &out[found];
+        memset(dev, 0, sizeof(*dev));
+        snprintf(dev->path, sizeof(dev->path), "%s", path);
+
+        /* Count CRTCs actually scanning out. Deliberately NOT walking the
+         * connectors: drmModeGetConnector re-probes the link (DDC), and doing
+         * that across every card of every GPU just to enumerate can disturb a
+         * live display. An active CRTC is also the exact thing a capture needs. */
+        for (int j = 0; j < res->count_crtcs; j++) {
+            drmModeCrtc *crtc = drmModeGetCrtc(fd, res->crtcs[j]);
+            if (!crtc) {
+                continue;
+            }
+            if (crtc->mode_valid && crtc->buffer_id > 0) {
+                dev->display_count++;
+            }
+            drmModeFreeCrtc(crtc);
+        }
+        drmModeFreeResources(res);
+
+        drmVersionPtr ver = drmGetVersion(fd);
+        if (ver) {
+            if (ver->name) {
+                snprintf(dev->driver, sizeof(dev->driver), "%s", ver->name);
+            }
+            drmFreeVersion(ver);
+        }
+
+        drmDevicePtr dd = NULL;
+        if (drmGetDevice2(fd, 0, &dd) == 0 && dd) {
+            if ((dd->available_nodes & (1 << DRM_NODE_RENDER)) &&
+                dd->nodes[DRM_NODE_RENDER]) {
+                snprintf(dev->render_node, sizeof(dev->render_node), "%s",
+                         dd->nodes[DRM_NODE_RENDER]);
+            }
+            drmFreeDevice(&dd);
+        }
+
+        close(fd);
+        found++;
+    }
+
+    return found;
 }
 
 /* ── Render-node selection on a multi-GPU box ─────────────────────────────

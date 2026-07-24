@@ -8,6 +8,14 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 
 ### Added
 
+- drmtap_list_devices(): enumerate every DRM device with KMS resources, with its
+  card node, render node, driver and active-display count. A context is bound to
+  ONE device, so drmtap_list_displays() could only ever advertise the displays of
+  the card drmtap_open() settled on, and the monitors of every other GPU were
+  invisible. This is the discovery step a multi-GPU consumer needs to open one
+  context per device. Connector state is not re-probed, so enumerating does not
+  disturb a live display. The drmtap_device layout is frozen for the same reason
+  drmtap_dmabuf_desc is.
 - drmtap_render_node(): the render node of the DRM device a context is bound to.
   On a split deployment the privileged exporter calls it on its capture context
   and hands the path to the unprivileged converter, so drmtap_open_render()
@@ -22,6 +30,13 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 
 ### Fixed
 
+- Device auto-detection now picks the GPU driving the MOST displays instead of
+  the first card with any active CRTC, which was really just "lowest minor
+  wins". Loading vkms next to a real GPU demonstrates the old behaviour: vkms
+  registers as card0 with a single 1024x768 virtual output, so auto-detect
+  captured that and not the three real monitors on card1. It stays a heuristic
+  for the single-context case; a caller that wants every display enumerates with
+  drmtap_list_devices().
 - drmtap_open_render(NULL) no longer takes the first openable render node, which
   was the wrong device on a multi-GPU host: the scanout is exported by the card
   that drives the display, and importing it into another vendor render node can

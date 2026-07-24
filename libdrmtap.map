@@ -16,6 +16,7 @@
         drmtap_version;
         drmtap_open;
         drmtap_open_render;
+        drmtap_list_devices;
         drmtap_render_node;
         drmtap_close;
         drmtap_list_displays;
