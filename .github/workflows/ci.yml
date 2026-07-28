@@ -37,7 +37,8 @@ jobs:
             meson ninja-build gcc \
             libdrm-dev \
             libva-dev libva-drm2 \
-            libseccomp-dev libcap-dev
+            libseccomp-dev libcap-dev \
+            libegl-dev libgles2-mesa-dev
           # Try to get vkms module (may not exist on Azure kernel)
           sudo apt-get install -y linux-modules-extra-$(uname -r) 2>/dev/null || true
 
@@ -60,6 +61,7 @@ jobs:
           meson setup build \
             -Dbuildtype=debug \
             -Db_sanitize=address,undefined \
+            -Degl=enabled \
             -Dwerror=true
           meson compile -C build
 
@@ -75,8 +77,28 @@ jobs:
         run: |
           meson setup build-release \
             -Dbuildtype=release \
+            -Degl=enabled \
             -Dwerror=true
           meson compile -C build-release
+
+      - name: Assert the built .so carries the EGL detile path
+        run: |
+          # -type f on purpose: the versioned .so sits next to meson's
+          # libdrmtap.so.0.4.15.p/ build directory, and a glob matches that too.
+          so="$(find build-release -maxdepth 1 -type f -name 'libdrmtap.so.0.*' | head -1)"
+          test -n "$so" || { echo "::error::no versioned libdrmtap.so in build-release"; exit 1; }
+          echo "checking $so"
+          # EGL is reached by lazy dlopen, on purpose, so that a privileged consumer never links the
+          # vendor GL stack. There is therefore NO DT_NEEDED entry and no undefined egl* symbol to
+          # look for: the obvious ELF check reports "no EGL" on a perfectly good library. What a
+          # stub build really lacks is the dlopen target name and the import call itself.
+          for sym in "libEGL.so.1" "eglCreateImageKHR"; do
+            if ! strings "$so" | grep -qF "$sym"; then
+              echo "::error::$so has no $sym: this is a CPU-only stub, the shipped detile path is missing"
+              exit 1
+            fi
+          done
+          echo "::notice::EGL detile path present in $so"
 
   static-analysis:
     name: Static Analysis
@@ -93,11 +115,12 @@ jobs:
             meson ninja-build gcc \
             libdrm-dev libva-dev libva-drm2 \
             libseccomp-dev libcap-dev \
+            libegl-dev libgles2-mesa-dev \
             cppcheck
 
       - name: Build
         run: |
-          meson setup build -Dbuildtype=debug
+          meson setup build -Dbuildtype=debug -Degl=enabled
           meson compile -C build
 
       - name: cppcheck

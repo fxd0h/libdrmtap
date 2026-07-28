@@ -116,9 +116,17 @@ lib_sources += files('src/gpu_nvidia.c')
 # dirs in as plain compile args. dl IS a real link dep (dlopen) and stays.
 dl_dep = cc.find_library('dl', required: false)
 lib_sources += files('src/gpu_egl.c')
-have_egl = egl_dep.found() and glesv2_dep.found() \
+egl_opt = get_option('egl')
+have_egl = not egl_opt.disabled() \
+    and egl_dep.found() and glesv2_dep.found() \
     and cc.has_header('EGL/egl.h') and cc.has_header('EGL/eglext.h') \
     and cc.has_header('GLES2/gl2.h') and cc.has_header('GLES2/gl2ext.h')
+# -Degl=enabled means "this build must ship the real detiling backend": fail here
+# rather than hand back a .so that looks fine and cannot detile a tiled scanout.
+if egl_opt.enabled() and not have_egl
+    error('egl=enabled but the egl/glesv2 pkg-config files or headers are missing '
+          + '(install libegl-dev and libgles2-mesa-dev)')
+endif
 if have_egl
     # Add the pkg-config include dirs (if any) as compile args, without making
     # egl/glesv2 dependencies of the target — so they stay out of the .pc.

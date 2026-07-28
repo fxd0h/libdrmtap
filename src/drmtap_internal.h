@@ -88,6 +88,13 @@ struct drmtap_ctx {
     uint32_t fast_plane_id;         /* cached primary plane id */
     uint32_t fast_last_fb_id;       /* fb_id from last capture (change detect) */
     int      fast_initialized;      /* 1 = plane found, slots ready */
+    /* 1 = this device's scanout refused a CPU mmap, so the fast path serves
+     * every frame through the EGL fd fallback and caches no slot. Sticky per
+     * context: whether a scanout BO is CPU-mappable is a property of the driver
+     * and the placement (amdgpu GFX9+ keeps it in VRAM), not of one frame, so
+     * retrying the mmap on every frame only buys a failing syscall. Also makes
+     * the per-frame "miss" honest in the log: nothing was ever cached to hit. */
+    int      fast_no_cpu_map;
 
     /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs).
      * Grow-once and reused across grabs; capped at DRMTAP_MAX_FB_BYTES;

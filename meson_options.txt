@@ -8,3 +8,14 @@
 #   'disabled': do not build the helper at all.
 option('helper', type: 'feature', value: 'auto',
     description: 'Build the privileged drmtap-helper (requires libseccomp + libcap)')
+
+# The EGL/GLES2 detiling backend is the SHIPPED hot path: a tiled or compressed
+# scanout is detiled on the GPU there, and without it libdrmtap falls back to the
+# CPU deswizzle or fails. It is opt-out for the same reason the helper is, some
+# build hosts genuinely have no EGL headers, but a build that silently produces
+# the stub is a trap: nothing downstream notices until a real scanout arrives.
+#   'enabled' : hard-fail if the egl/glesv2 headers are missing.
+#   'auto'    : use them if present, build the stub otherwise (historical default).
+#   'disabled': build the stub even where the headers exist.
+option('egl', type: 'feature', value: 'auto',
+    description: 'Build the EGL/GLES2 GPU detiling backend (requires egl + glesv2 headers)')
