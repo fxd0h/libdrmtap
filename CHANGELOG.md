@@ -4,6 +4,21 @@ Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
 project share one version; the `libdrmtap` wrapper crate is versioned separately.
 
+## [Unreleased]
+
+### Changed
+
+- New meson option `egl` (feature, default `auto`, so the historical behaviour is
+  unchanged). `enabled` hard-fails when the egl/glesv2 pkg-config files or
+  headers are missing, instead of quietly building the CPU-only stub. CI now
+  passes `-Degl=enabled` on every C build and installs libegl-dev plus
+  libgles2-mesa-dev, because it had neither: every C job was building and testing
+  the stub, so the GPU detiling backend that real deployments run had no
+  automated coverage at all, and nothing would have reported it. The release job
+  additionally asserts the built .so carries the dlopen target name and an EGL
+  entry point, since the backend is reached by lazy dlopen and therefore leaves
+  no DT_NEEDED entry for the obvious ELF check to find.
+
 ## [0.4.15] - 2026-07-24
 
 ### Added
