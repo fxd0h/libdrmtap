@@ -1299,6 +1299,7 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx) {
     ctx->fast_plane_id = 0;
     ctx->fast_last_fb_id = 0;
     ctx->fast_initialized = 0;
+    ctx->fast_no_cpu_map = 0;
 }
 
 // Find or allocate a slot for the given fb_id
@@ -1367,6 +1368,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             ctx->fast_slots[i].prime_fd = -1;
         }
         ctx->fast_last_fb_id = 0;
+        ctx->fast_no_cpu_map = 0;
         ctx->fast_initialized = 1;
         drmtap_debug_log(ctx, "fast2: initialized plane=%u", ctx->fast_plane_id);
     }
@@ -1374,6 +1376,10 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     /* Step 2: Refresh fb_id (cheap ioctl, ~0.05ms) */
     drmModePlane *plane = drmModeGetPlane(ctx->drm_fd, ctx->fast_plane_id);
     if (!plane || plane->fb_id == 0) {
+        drmtap_set_error(ctx, plane
+            ? "fast2: plane %u has no framebuffer bound (display asleep or a modeset in flight)"
+            : "fast2: plane %u disappeared (a modeset changed the plane layout)",
+            ctx->fast_plane_id);
         if (plane) drmModeFreePlane(plane);
         drmtap_fast_cleanup(ctx);
         return -ENODEV;
@@ -1472,9 +1478,14 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         return 0;   /* new frame */
     }
 
-    /* ═══ CACHE MISS ═══ First time seeing this fb_id — full setup */
-    drmtap_debug_log(ctx, "fast2: CACHE MISS fb=%u slot=%d (cold start)",
-                     fb_id, slot);
+    /* ═══ CACHE MISS ═══ First time seeing this fb_id — full setup.
+     * On a device whose scanout cannot be CPU-mapped this is EVERY frame, and
+     * it is not a cold start: the EGL fd path below has no CPU mapping to cache,
+     * so there is never anything to hit. Say which one it is, or the log reads
+     * like a cache that is broken rather than one that does not apply. */
+    drmtap_debug_log(ctx, "fast2: CACHE MISS fb=%u slot=%d (%s)", fb_id, slot,
+                     ctx->fast_no_cpu_map ? "uncached: scanout is not CPU-mappable"
+                                          : "cold start");
 
     drmModeFB2 *fb2 = drmModeGetFB2(ctx->drm_fd, fb_id);
     if (!fb2) {
@@ -1517,6 +1528,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                               O_RDONLY | O_CLOEXEC, &prime_fd);
     if (ret < 0) {
         ret = -errno;
+        drmtap_set_error(ctx, "fast2: exporting fb=%u as a DMA-BUF failed: %s",
+                         fb_id, strerror(errno));
         drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
         return ret;
@@ -1534,17 +1547,33 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         }
     }
 
-    if (mapped == MAP_FAILED) {
+    /* Skip the mmap once this context has learned it cannot work here: it is a
+     * property of the driver and the buffer placement, not of one frame, so
+     * retrying it per frame only costs a failing syscall. */
+    if (mapped == MAP_FAILED && !ctx->fast_no_cpu_map) {
         dmabuf_sync_start(prime_fd);
         mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
                       prime_fd, fb2->offsets[0]);
-    }
-
-    /* Test hook (drmtap_force_mmap_fail): drop a successful mapping so the EGL fd
-     * fallback below is exercised on a GPU whose scanout IS cpu-mappable. */
-    if (mapped != MAP_FAILED && drmtap_force_mmap_fail()) {
-        munmap(mapped, size);
-        mapped = MAP_FAILED;
+        /* Test hook (drmtap_force_mmap_fail): drop a successful mapping so the
+         * EGL fd fallback is exercised on a GPU whose scanout IS CPU-mappable.
+         * Inside this block on purpose, so a forced failure takes exactly the
+         * same path as a real one, sticky flag and log line included. */
+        if (mapped != MAP_FAILED && drmtap_force_mmap_fail()) {
+            munmap(mapped, size);
+            mapped = MAP_FAILED;
+            errno = ENOTSUP;
+        }
+        if (mapped == MAP_FAILED) {
+            /* Log the reason ONCE, at the transition. Without this the fast path
+             * looks identical to a working one that simply never hits, which is
+             * exactly how it was reported: pages of "CACHE MISS ... cold start"
+             * and no explanation. */
+            drmtap_debug_log(ctx,
+                "fast2: scanout fb=%u is not CPU-mappable (%s); serving every frame "
+                "through the EGL fd path, no slot is cached",
+                fb_id, strerror(errno));
+            ctx->fast_no_cpu_map = 1;
+        }
     }
 
     if (mapped == MAP_FAILED) {
@@ -1589,6 +1618,15 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             return 0;
         }
 #endif
+        /* Neither a CPU mapping nor EGL: there is no way to read this scanout.
+         * Say so through drmtap_error, not only the debug log -- a caller that
+         * sees the failure otherwise has nothing to go on, which is how this
+         * arrived as a bug report full of log lines instead of a message. */
+        drmtap_set_error(ctx,
+            "fast2: scanout fb=%u cannot be CPU-mapped and no EGL backend is "
+            "available (built without egl/glesv2, or no usable render node). "
+            "This GPU needs the EGL detile path; use drmtap_grab_mapped() or "
+            "build with -Degl=enabled.", fb_id);
         close(prime_fd);
         drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);

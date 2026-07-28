@@ -6,6 +6,24 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 
 ## [Unreleased]
 
+### Fixed
+
+- drmtap_grab_mapped_fast() said nothing useful when it could not read the
+  scanout (issue #36, a Radeon Vega 64 on amdgpu where the tiled VRAM scanout
+  refuses a CPU mmap). Three separate silences: the no-mapping-and-no-EGL exit
+  returned -ENOMEM without ever calling drmtap_set_error, so drmtap_error() was
+  empty and the only symptom was a wall of cache-miss lines; the per-frame miss
+  line said "cold start" on a device where every frame is a miss BY DESIGN,
+  because the EGL fd fallback has no CPU mapping to cache; and the fallback
+  itself was never announced. Now the reason is logged once with the errno, the
+  per-frame line distinguishes an uncachable scanout from a genuine cold start,
+  and the no-EGL exit names the cause and the remedy. The failing mmap is no
+  longer retried per frame either: whether a scanout BO is CPU-mappable is a
+  property of the driver and the placement, so a context learns it once.
+  The capture itself has worked since 0.4.14, which added the mmap-to-EGL
+  fallback; on 0.4.13 that path returned -ENOMEM on every frame, which is why
+  the reporter saw black.
+
 ### Changed
 
 - New meson option `egl` (feature, default `auto`, so the historical behaviour is
