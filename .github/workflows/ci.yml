@@ -83,7 +83,10 @@ jobs:
 
       - name: Assert the built .so carries the EGL detile path
         run: |
-          so="$(ls build-release/libdrmtap.so.0.*.*)"
+          # -type f on purpose: the versioned .so sits next to meson's
+          # libdrmtap.so.0.4.15.p/ build directory, and a glob matches that too.
+          so="$(find build-release -maxdepth 1 -type f -name 'libdrmtap.so.0.*' | head -1)"
+          test -n "$so" || { echo "::error::no versioned libdrmtap.so in build-release"; exit 1; }
           echo "checking $so"
           # EGL is reached by lazy dlopen, on purpose, so that a privileged consumer never links the
           # vendor GL stack. There is therefore NO DT_NEEDED entry and no undefined egl* symbol to
