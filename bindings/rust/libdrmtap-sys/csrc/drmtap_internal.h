@@ -96,6 +96,17 @@ struct drmtap_ctx {
      * the per-frame "miss" honest in the log: nothing was ever cached to hit. */
     int      fast_no_cpu_map;
 
+    /* Set once drmtap_grab_mapped_fast has established that this process cannot
+     * export the scanout itself (drmModeGetFB2 returns handles[0]==0 without
+     * CAP_SYS_ADMIN). Unlike drmtap_grab_mapped, the fast path has no helper
+     * fallback -- caching a persistent CPU mapping per framebuffer is its whole
+     * purpose, and a helper hands over a fresh fd per grab, so there is nothing
+     * stable to cache. It therefore cannot work for an unprivileged caller on
+     * any GPU. Sticky so the diagnosis is stated once instead of once per frame:
+     * reported as pages of "CACHE MISS ... cold start" with the real reason only
+     * in drmtap_error(), it read as a broken cache (issue #36). */
+    int      fast_no_privilege;
+
     /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs).
      * Grow-once and reused across grabs; capped at DRMTAP_MAX_FB_BYTES;
      * freed in drmtap_close(). */
