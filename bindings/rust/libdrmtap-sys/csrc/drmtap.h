@@ -134,7 +134,14 @@ int drmtap_displays_changed(drmtap_ctx *ctx);
 
 /** Captured frame metadata and pixel data. */
 typedef struct {
-    void *data;             /**< Pixel data (mapped path) or NULL (zero-copy) */
+    /** Pixel data. Always set on the mapped paths (drmtap_grab_mapped,
+     *  drmtap_grab_mapped_fast). On the zero-copy path (drmtap_grab,
+     *  drmtap_grab_desc) it is NOT guaranteed: it holds the raw, UNCONVERTED
+     *  scanout mapping where one was possible and NULL where the scanout cannot
+     *  be CPU-mapped (amdgpu GFX9+, discrete VRAM, nvidia). Do not read it after
+     *  a zero-copy grab -- that it happens to work on one GPU and returns NULL on
+     *  another is exactly how issue #36 was mistaken for a driver bug. */
+    void *data;
     int dma_buf_fd;         /**< DMA-BUF fd (zero-copy) or -1 (mapped) */
     uint32_t width;         /**< Frame width in pixels */
     uint32_t height;        /**< Frame height in pixels */
@@ -151,10 +158,11 @@ typedef struct {
  * Returns a DMA-BUF file descriptor in frame->dma_buf_fd that can be
  * passed directly to VAAPI/V4L2 encoders without copying pixel data.
  *
- * THERE ARE NO CPU PIXELS HERE. This call does no conversion and no detiling, so
- * `frame->data` is whatever the raw scanout mapping happened to give: on a GPU whose
- * scanout cannot be CPU-mapped (amdgpu GFX9+, discrete VRAM, nvidia) it is NULL, and
- * the call still returns 0. Reading `frame->data` after a successful `drmtap_grab` is
+ * THERE ARE NO USABLE CPU PIXELS HERE. This call does no conversion and no detiling.
+ * `frame->data` is whatever the raw scanout mapping happened to give: still tiled where
+ * the scanout is tiled, and NULL on a GPU whose scanout cannot be CPU-mapped at all
+ * (amdgpu GFX9+, discrete VRAM, nvidia) -- and the call still returns 0 in both cases.
+ * Reading `frame->data` after a successful `drmtap_grab` is
  * therefore not portable and renders black on those GPUs -- it was reported as a
  * capture bug (issue #36). For pixels in this process use `drmtap_grab_mapped()`;
  * to hand the buffer to another process use `drmtap_grab_desc()` plus
