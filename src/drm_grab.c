@@ -1300,6 +1300,10 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx) {
     ctx->fast_last_fb_id = 0;
     ctx->fast_initialized = 0;
     ctx->fast_no_cpu_map = 0;
+    /* fast_no_privilege is deliberately NOT cleared: it records a property of the
+     * PROCESS (no CAP_SYS_ADMIN), not of the plane, the framebuffer or the device,
+     * so re-discovering it after every teardown would repeat the whole GetFB2 dance
+     * to reach the same verdict. */
 }
 
 // Find or allocate a slot for the given fb_id
@@ -1352,6 +1356,17 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         drmtap_set_error(ctx, "context is render-only (drmtap_open_render); "
                          "grab needs a KMS context from drmtap_open");
         return -ENOTSUP;
+    }
+
+    /* Established on an earlier call that this process cannot export the scanout and
+     * that this entry point has no helper fallback. Answer immediately and quietly:
+     * the caller has the reason in drmtap_error() from the first failure, and a
+     * capture loop calling this at frame rate must not produce a line per frame. */
+    if (ctx->fast_no_privilege) {
+        drmtap_set_error(ctx,
+            "drmtap_grab_mapped_fast needs CAP_SYS_ADMIN in this process and has no "
+            "helper fallback; use drmtap_grab_mapped()");
+        return -EACCES;
     }
 
     int ret;
@@ -1496,8 +1511,30 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     }
 
     if (fb2->handles[0] == 0) {
+        /* drmModeGetFB2 zeroes the GEM handles for a caller without CAP_SYS_ADMIN.
+         * drmtap_grab_mapped treats that as "go through the helper"; this entry point
+         * has no such branch, so it cannot serve an unprivileged caller on ANY gpu.
+         * Say that, name the call that does work, and latch it so the next frame is
+         * answered at the top of the function instead of repeating this whole dance.
+         * Reported as endless cache-miss lines with the cause buried, which sent both
+         * the reporter and me after a tiling bug that was not there (issue #36). */
         drmModeFreeFB2(fb2);
-        drmtap_set_error(ctx, "fast2: handles[0]==0, no CAP_SYS_ADMIN");
+        ctx->fast_no_privilege = 1;
+        /* Nothing on this path can be served again, so release whatever the slots hold
+         * (prime fds, mappings, GEM handles) now instead of at drmtap_close. Normally
+         * there is nothing: an unprivileged process never populated a slot in the first
+         * place. It matters for the one case that can, a process that captured with
+         * CAP_SYS_ADMIN and then dropped it, where the slots are live and unusable.
+         * Runs AFTER the flag is set, since cleanup deliberately leaves it alone. */
+        drmtap_fast_cleanup(ctx);
+        drmtap_debug_log(ctx,
+            "fast2: this process has no CAP_SYS_ADMIN, and the fast path has no helper "
+            "fallback (it caches a CPU mapping per framebuffer; a helper hands over a "
+            "fresh fd per grab, so there is nothing to cache). Use drmtap_grab_mapped(), "
+            "which falls back to the helper. Not repeated per frame.");
+        drmtap_set_error(ctx,
+            "drmtap_grab_mapped_fast needs CAP_SYS_ADMIN in this process and has no "
+            "helper fallback; use drmtap_grab_mapped()");
         return -EACCES;
     }
 

@@ -134,7 +134,14 @@ int drmtap_displays_changed(drmtap_ctx *ctx);
 
 /** Captured frame metadata and pixel data. */
 typedef struct {
-    void *data;             /**< Pixel data (mapped path) or NULL (zero-copy) */
+    /** Pixel data. Always set on the mapped paths (drmtap_grab_mapped,
+     *  drmtap_grab_mapped_fast). On the zero-copy path (drmtap_grab,
+     *  drmtap_grab_desc) it is NOT guaranteed: it holds the raw, UNCONVERTED
+     *  scanout mapping where one was possible and NULL where the scanout cannot
+     *  be CPU-mapped (amdgpu GFX9+, discrete VRAM, nvidia). Do not read it after
+     *  a zero-copy grab -- that it happens to work on one GPU and returns NULL on
+     *  another is exactly how issue #36 was mistaken for a driver bug. */
+    void *data;
     int dma_buf_fd;         /**< DMA-BUF fd (zero-copy) or -1 (mapped) */
     uint32_t width;         /**< Frame width in pixels */
     uint32_t height;        /**< Frame height in pixels */
@@ -150,6 +157,16 @@ typedef struct {
  *
  * Returns a DMA-BUF file descriptor in frame->dma_buf_fd that can be
  * passed directly to VAAPI/V4L2 encoders without copying pixel data.
+ *
+ * THERE ARE NO USABLE CPU PIXELS HERE. This call does no conversion and no detiling.
+ * `frame->data` is whatever the raw scanout mapping happened to give: still tiled where
+ * the scanout is tiled, and NULL on a GPU whose scanout cannot be CPU-mapped at all
+ * (amdgpu GFX9+, discrete VRAM, nvidia) -- and the call still returns 0 in both cases.
+ * Reading `frame->data` after a successful `drmtap_grab` is
+ * therefore not portable and renders black on those GPUs -- it was reported as a
+ * capture bug (issue #36). For pixels in this process use `drmtap_grab_mapped()`;
+ * to hand the buffer to another process use `drmtap_grab_desc()` plus
+ * `drmtap_convert_dmabuf()` on the receiving side.
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)
@@ -198,9 +215,16 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * function OR until drmtap_close(). Do NOT call drmtap_frame_release()
  * on frames from this function — cleanup is automatic.
  *
+ * REQUIRES CAP_SYS_ADMIN IN THE CALLING PROCESS. Unlike `drmtap_grab_mapped()`, this
+ * entry point has NO helper fallback: caching a persistent CPU mapping per framebuffer
+ * is the whole point of it, and the helper hands over a fresh fd per grab, so there is
+ * nothing stable to cache. Without the capability it returns -EACCES on every call, on
+ * any GPU, and `drmtap_error()` names `drmtap_grab_mapped()` as the call to use instead.
+ *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated, reused between calls)
  * @return 0 = frame captured, negative errno on error
+ * @retval -EACCES The process lacks CAP_SYS_ADMIN (no helper fallback on this path)
  */
 int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame);
 
