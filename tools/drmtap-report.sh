@@ -61,10 +61,15 @@ for card in /sys/class/drm/card[0-9]*; do
     drv=$(basename "$(readlink -f "$card/device/driver" 2>/dev/null)" 2>/dev/null)
     val "$name driver" "${drv:-unknown}"
 done
-say "connectors (status / modes)"
+say "connectors (status, current mode)"
 for conn in /sys/class/drm/card[0-9]*-*; do
     [ -r "$conn/status" ] || continue
-    val "$(basename "$conn")" "$(cat "$conn/status" 2>/dev/null)"
+    st=$(cat "$conn/status" 2>/dev/null)
+    # First entry of modes is the active/preferred one. A capture bug is often about
+    # a specific mode (a refresh rate, or a resolution that does not match the fb),
+    # so do not label this "modes" and then print only the status.
+    mode=$(head -1 "$conn/modes" 2>/dev/null)
+    val "$(basename "$conn")" "$st${mode:+ $mode}"
 done
 
 # ------------------------------------------------------------------ the build
@@ -152,17 +157,48 @@ val ppm_bytes "$(stat -c %s "$img" 2>/dev/null || echo 0)"
 # not 0x00. A correct desktop has millions; a black frame has none. This is the
 # single number that separates "the detile produced nothing" from "it produced
 # a wrong image" from "it worked".
+ppm_ok=0
 if [ -s "$img" ]; then
-    # Skip exactly the PPM header ("P6\n<w> <h>\n255\n"), by finding the byte after
-    # its third newline. A fixed guess leaves header bytes in the count, and "255\n"
-    # alone is enough non-zero data to stop a fully black frame from reading as black,
-    # which is the one case this whole section exists to catch.
-    hdr_len=$(head -c 64 "$img" | LC_ALL=C awk 'BEGIN{RS="\n"} {n++; len+=length($0)+1; if(n==3){print len; exit}}')
-    : "${hdr_len:=15}"
+    # Parse the PPM header ("P6\n<w> <h>\n255\n") rather than assuming it: the byte
+    # after its third newline is where pixels start, and a fixed guess leaves header
+    # bytes in the count -- "255\n" alone is enough non-zero data to stop a fully
+    # black frame from reading as black, the one case this section exists to catch.
+    #
+    # And validate it before drawing any conclusion. A truncated write, or anything
+    # else that lands on stdout, would otherwise be reported as "every pixel is
+    # black", which accuses the EGL path of a failure that did not happen.
+    read -r magic ppm_w ppm_h ppm_max hdr_len < <(
+        head -c 64 "$img" | LC_ALL=C awk '
+            BEGIN { RS="\n" }
+            { n++; len += length($0) + 1
+              # $1, not $0: arbitrary stdout can have spaces on its first line, and a
+              # multi-word field here would shift every later one in the read below,
+              # leaving hdr_len holding words instead of a number.
+              if (n == 1) m = $1
+              else if (n == 2) { w = $1; h = $2 }
+              else if (n == 3) { print m, w+0, h+0, $0+0, len; exit } }')
     body() { tail -c "+$((hdr_len + 1))" "$img"; }
+    if [ "$magic" != "P6" ]; then
+        val ppm_valid "no (stdout is not a P6 ppm)"
+    elif [ "${ppm_w:-0}" -le 0 ] || [ "${ppm_h:-0}" -le 0 ] || [ "${ppm_max:-0}" -ne 255 ]; then
+        val ppm_valid "no (bad header ${ppm_w}x${ppm_h} max=${ppm_max})"
+    else
+        want=$(( ppm_w * ppm_h * 3 ))
+        got=$(( $(stat -c %s "$img") - hdr_len ))
+        if [ "$got" -ne "$want" ]; then
+            val ppm_valid "no (truncated: ${got} pixel bytes, expected ${want} for ${ppm_w}x${ppm_h})"
+        else
+            ppm_valid=yes
+            ppm_ok=1
+            val ppm_valid "yes (${ppm_w}x${ppm_h})"
+        fi
+    fi
+fi
+
+if [ "$ppm_ok" = 1 ]; then
     nonzero=$(body | tr -d '\000' | wc -c)
     val nonblack_bytes "$nonzero"
-    total=$(( $(stat -c %s "$img") - hdr_len ))
+    total=$(( ppm_w * ppm_h * 3 ))
     if [ "$total" -gt 0 ]; then
         val nonblack_pct "$(( nonzero * 100 / total ))%"
     fi
@@ -181,13 +217,24 @@ if grep -q 'unknown command' "$log"; then
     # "unknown command" plus a generic helper-failed errno. Name it here, because
     # nothing in that pair points at the actual cause.
     echo "the INSTALLED HELPER IS STALE: it does not speak this library's helper"
-    echo "protocol. reinstall it from the same build as the .so above:"
-    echo "    sudo install -m 0755 $BUILD_DIR/drmtap-helper /usr/local/bin/"
+    echo "protocol. reinstall it from the same build as the .so above. keep it"
+    echo "restricted while you do -- it carries CAP_SYS_ADMIN, so it must not be"
+    echo "world-executable (SECURITY.md), which is why this is not a plain install:"
+    # %q so a build dir with a space or a quote in it cannot produce a copy-paste
+    # line that means something other than what it looks like.
+    printf '    sudo install -m 0750 -o root -g <capture-group> %q /usr/local/bin/drmtap-helper\n' \
+        "$BUILD_DIR/drmtap-helper"
     echo "    sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper"
     echo "then re-run this script. everything below is downstream of that."
+elif [ "$ppm_ok" = 0 ] && [ "$rc" -eq 0 ]; then
+    echo "the capture reported success but its output is not a usable ppm (see"
+    echo "ppm_valid above). that is a problem with the run, not with the detile;"
+    echo "the debug log below says what happened."
 elif [ "$rc" -ne 0 ]; then
     echo "capture FAILED. the error line from the log:"
-    grep -iE 'Capture failed|No pixel data' "$log" | head -3
+    # screenshot.c has three failure messages, not two: drmtap_open failing prints
+    # "Failed to open". Without it this heading is printed with nothing under it.
+    grep -iE 'Capture failed|No pixel data|Failed to open' "$log" | head -3
 elif [ "${nonzero:-0}" -eq 0 ]; then
     echo "capture returned a frame but every pixel is black."
     echo "the EGL convert result below is the diagnosis."
