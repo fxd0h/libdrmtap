@@ -1520,6 +1520,13 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
          * the reporter and me after a tiling bug that was not there (issue #36). */
         drmModeFreeFB2(fb2);
         ctx->fast_no_privilege = 1;
+        /* Nothing on this path can be served again, so release whatever the slots hold
+         * (prime fds, mappings, GEM handles) now instead of at drmtap_close. Normally
+         * there is nothing: an unprivileged process never populated a slot in the first
+         * place. It matters for the one case that can, a process that captured with
+         * CAP_SYS_ADMIN and then dropped it, where the slots are live and unusable.
+         * Runs AFTER the flag is set, since cleanup deliberately leaves it alone. */
+        drmtap_fast_cleanup(ctx);
         drmtap_debug_log(ctx,
             "fast2: this process has no CAP_SYS_ADMIN, and the fast path has no helper "
             "fallback (it caches a CPU mapping per framebuffer; a helper hands over a "
