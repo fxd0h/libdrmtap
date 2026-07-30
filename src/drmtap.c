@@ -770,3 +770,27 @@ int drmtap_drm_fd(drmtap_ctx *ctx) {
     }
     return ctx->drm_fd;
 }
+
+int drmtap_set_output_buffer(drmtap_ctx *ctx, void *dst, size_t len) {
+    if (!ctx) {
+        return -EINVAL;
+    }
+    if (!dst) {
+        /* Explicit reset: go back to the library-owned buffer. len is ignored so a
+         * caller can clear with (ctx, NULL, 0) without having to remember a size. */
+        ctx->user_out = NULL;
+        ctx->user_out_len = 0;
+        drmtap_debug_log(ctx, "output buffer cleared; conversions go back to the "
+                              "library-owned buffer");
+        return 0;
+    }
+    if (len == 0) {
+        drmtap_set_error(ctx, "output buffer length is 0 "
+                              "(pass dst=NULL to clear it instead)");
+        return -EINVAL;
+    }
+    ctx->user_out = dst;
+    ctx->user_out_len = len;
+    drmtap_debug_log(ctx, "output buffer set: %p (%zu bytes)", dst, len);
+    return 0;
+}

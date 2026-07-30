@@ -33,6 +33,10 @@
  * ~126 MB). */
 #define DRMTAP_MAX_FB_BYTES ((size_t)7680 * 4320 * 4)
 
+/* Per-dimension ceiling, used to make width*height wrap-proof before the multiply.
+ * Far above any real scanout; the byte cap above is what actually binds. */
+#define DRMTAP_MAX_DIM 32768u
+
 struct drmtap_ctx {
     /* DRM device */
     int drm_fd;
@@ -112,6 +116,16 @@ struct drmtap_ctx {
      * deliberately NOT narrowed) is stated once per context instead of per
      * frame. See drmtap_scanout_width() in drm_grab.c. */
     int      logged_scanout_crop;
+
+    /* Caller-supplied destination for converted pixels (drmtap_set_output_buffer).
+     * NULL means "use the ctx-owned deswizzle_buf". Set once by the caller, who
+     * owns the memory and must keep it alive; libdrmtap never frees or reallocates
+     * it, and refuses a frame that would not fit rather than writing short. Every
+     * path that produces converted pixels resolves its destination through
+     * drmtap_ensure_out(), so the EGL detile and the CPU conversions behave
+     * identically -- a caller must not have to know which one ran. */
+    void   *user_out;
+    size_t  user_out_len;
 
     /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs).
      * Grow-once and reused across grabs; capped at DRMTAP_MAX_FB_BYTES;
@@ -238,6 +252,25 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
  * at DRMTAP_MAX_FB_BYTES. Contents are not preserved across a grow. Returns
  * 0, -EINVAL (zero size), -EFBIG (over the cap) or -ENOMEM. (drm_grab.c) */
 int drmtap_ensure_buf(void **buf, size_t *cap, size_t size);
+
+/* Resolve where this frame's converted pixels must be written: the caller's
+ * buffer when drmtap_set_output_buffer() set one (checked against `size`, so a
+ * geometry change that no longer fits fails the grab instead of writing short or
+ * overflowing), otherwise the ctx-owned grow-once deswizzle buffer. Returns 0 and
+ * sets *out, or -ENOSPC / whatever drmtap_ensure_buf returns. Every producer of
+ * converted pixels must go through this and must NOT reference
+ * ctx->deswizzle_buf directly, or the caller's buffer would be honoured on some
+ * paths and silently ignored on others. (drm_grab.c) */
+int drmtap_ensure_out(drmtap_ctx *ctx, size_t size, void **out);
+
+/* Reject framebuffer DIMENSIONS that cannot be a real scanout, before anything
+ * multiplies them. validate_fb_size() bounds stride*height, which does NOT bound
+ * width: a wire or IPC peer that sends a huge width with a small stride passes it,
+ * and every converted output is sized width*height*4 -- a product that can wrap
+ * size_t and hand a large write a small destination. Returns 0, -EINVAL (a zero
+ * dimension) or -EFBIG (a dimension over DRMTAP_MAX_DIM, or more than
+ * DRMTAP_MAX_FB_BYTES worth of pixels). (drm_grab.c) */
+int validate_fb_dims(uint32_t width, uint32_t height);
 
 /* GPU backend: EGL/GLES2 universal detiling (gpu_egl.c).
  * On success *out_data points at ctx->deswizzle_buf (ctx-owned, grow-once,

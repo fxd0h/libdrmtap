@@ -6,6 +6,38 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 
 ## [Unreleased]
 
+### Added
+
+- drmtap_set_output_buffer(ctx, dst, len): have conversions write into a
+  caller-owned buffer instead of a library-owned one, so a consumer that must end
+  up with the pixels in specific memory (a memfd it already shares downstream, a
+  pre-registered upload buffer) stops paying a full-frame memcpy per frame -- at
+  2560x1440 that was 14.7 MB a frame for nothing (issue #36). Nothing required the
+  copy: the EGL detile ends in a glReadPixels and the CPU converters take a
+  destination pointer, and both write wherever they are pointed.
+  Applies to every path that materializes pixels -- EGL detile, CPU deswizzle,
+  10/16-bit and HDR reductions, padded-linear repack -- so a caller does not have
+  to know which one ran, and on an unprivileged drmtap_open_render() context too,
+  so the converting half of the split can write straight into the consumer's
+  buffer. It does NOT apply where there is nothing to materialize: a linear 8-bit
+  scanout is handed back as a direct pointer into the mapped scanout, with no
+  intermediate buffer to redirect. A frame that would not fit is REFUSED with
+  -ENOSPC, leaving the buffer untouched and naming the required size through
+  drmtap_error(), rather than writing short.
+
+### Security
+
+- Framebuffer DIMENSIONS are now bounded at every entry point, not just
+  stride * height. validate_fb_size() never constrained width, yet every converted
+  output is sized width * height * 4 -- a product that can wrap size_t and hand a
+  large write a small destination. Reachable with a width from the helper wire or
+  an IPC-supplied descriptor. Each dimension is now bounded before anything
+  multiplies it (so the product cannot wrap even where size_t is 32-bit) and the
+  pixel count is bounded after. The frame cap also applies to a caller-supplied
+  output buffer, so owning a large mapping cannot unlock a frame larger than this
+  library handles. Verified under ASan and UBSan against a real tiled scanout,
+  with guard bytes either side of the destination.
+
 ### Fixed
 
 - A grab reported the width of the framebuffer OBJECT instead of the width the
