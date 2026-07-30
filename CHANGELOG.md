@@ -38,6 +38,14 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
   output buffer, so owning a large mapping cannot unlock a frame larger than this
   library handles. Verified under ASan and UBSan against a real tiled scanout,
   with guard bytes either side of the destination.
+- The privileged-helper wire is now bounded on stride-covers-width, which the two
+  existing checks did not imply. validate_fb_size bounds stride * height and
+  validate_fb_dims bounds the dimensions, but a wire frame claiming
+  width * bpp > stride still reached the per-pixel CPU converters, which read
+  y * stride + width * bpp per row with no size argument, so the last rows ran off
+  the end of the receive buffer (a heap over-read). drmtap_convert_dmabuf already
+  applied this check to its IPC descriptor; the two trust boundaries are bounded
+  alike now.
 
 ### Fixed
 

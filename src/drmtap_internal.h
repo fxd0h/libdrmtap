@@ -282,9 +282,10 @@ int drmtap_ensure_out(drmtap_ctx *ctx, size_t size, void **out);
 int validate_fb_dims(uint32_t width, uint32_t height);
 
 /* GPU backend: EGL/GLES2 universal detiling (gpu_egl.c).
- * On success *out_data points at ctx->deswizzle_buf (ctx-owned, grow-once,
- * valid until the next convert or drmtap_close) — the caller must NOT free
- * it. fb_id keys the import-once EGLImage cache (0 = no caching); for an
+ * On success *out_data points at the resolved conversion destination: the caller's
+ * output buffer when drmtap_set_output_buffer() set one, otherwise
+ * ctx->deswizzle_buf (ctx-owned, grow-once,
+ * valid until the next convert or drmtap_close) — which the caller must NOT free. fb_id keys the import-once EGLImage cache (0 = no caching); for an
  * fb_id already cached with matching geometry dma_buf_fd may be -1. */
 int drmtap_gpu_egl_available(drmtap_ctx *ctx);
 int drmtap_gpu_egl_convert(drmtap_ctx *ctx,

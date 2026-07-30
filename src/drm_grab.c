@@ -353,6 +353,10 @@ int drmtap_ensure_buf(void **buf, size_t *cap, size_t size) {
     return 0;
 }
 
+/* Defined further down with the convert path that first needed it. Declared here
+ * because the helper wire has to apply the same stride-covers-width bound. */
+static uint32_t format_min_bpp(uint32_t fourcc);
+
 int validate_fb_dims(uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) {
         return -EINVAL;
@@ -894,6 +898,20 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         ret = validate_fb_dims(frame->width, frame->height);
         if (ret == 0) {
             ret = validate_fb_size(frame->stride, frame->height);
+        }
+        if (ret == 0 &&
+            (uint64_t)frame->width * format_min_bpp(frame->format) > frame->stride) {
+            /* THIRD bound, and the one the other two do not imply: the stride must
+             * actually cover width pixels. Without it a wire frame claiming
+             * width*bpp > stride reaches the per-pixel CPU converters, which read
+             * y*stride + width*bpp per row with no size argument, and the last rows
+             * run off the end of the receive buffer. drmtap_convert_dmabuf applies
+             * the same check to its IPC descriptor; the two trust boundaries must be
+             * bounded alike, and this one was not. */
+            drmtap_set_error(ctx, "helper sent stride %u too small for width %u "
+                             "(fourcc %.4s)", frame->stride, frame->width,
+                             (const char *)&frame->format);
+            ret = -EINVAL;
         }
         if (ret != 0) {
             drmtap_set_error(ctx, "helper sent invalid geometry %ux%u stride=%u",
@@ -1956,8 +1974,10 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             if (pr == 0 && !frame->data) {
                 pr = -EIO;
             }
-            /* gpu_auto_process EGL-read the fd back into ctx->deswizzle_buf, so the
-             * fd and handle are no longer needed and nothing is cached for fb_id. */
+            /* gpu_auto_process EGL-read the fd back into the conversion destination
+             * (the caller's output buffer if one was set, otherwise the ctx-owned
+             * one), so the fd and handle are no longer needed and nothing is cached
+             * for fb_id. */
             close(prime_fd);
             frame->dma_buf_fd = -1;  /* prime_fd is closed; don't hand back a stale fd */
             drmtap_gem_close(ctx, fb2->handles[0]);
@@ -2167,7 +2187,8 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                                      desc->modifier, desc->fb_id,
                                      &egl_data, &egl_size);
         if (ret == 0 && egl_data) {
-            frame->data = egl_data;   /* ctx-owned grow-once buffer */
+            frame->data = egl_data;   /* the resolved destination: caller's output
+                                       * buffer if set, else the ctx-owned one */
             frame->format = DRM_FORMAT_XRGB8888;
             frame->stride = desc->width * 4;
             frame->modifier = DRM_FORMAT_MOD_LINEAR;
