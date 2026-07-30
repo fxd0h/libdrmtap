@@ -566,6 +566,11 @@ int drmtap_drm_fd(drmtap_ctx *ctx);
  * stride, and a scanout whose pitch is padded wider than the visible width needs
  * that padded size. On a geometry change, re-mmap and call this again.
  *
+ * @p dst must not OVERLAP the frame source. The CPU converters read the scanout and
+ * write the destination with different strides, so pointing this at a mapping of the
+ * very dma-buf being captured would have them read bytes they have already written.
+ * Nothing detects it; before this call no such aliasing was possible.
+ *
  * LIFETIME. You own @p dst. libdrmtap never frees, reallocates or retains it past
  * a frame, and drmtap_close() does not touch it, so it must stay valid and
  * unmapped-from-under-us for as long as it is set and for as long as you hold a
