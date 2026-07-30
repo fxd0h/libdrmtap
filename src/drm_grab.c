@@ -518,41 +518,132 @@ static uint64_t fb2_effective_modifier(const drmModeFB2 *fb2) {
  * allocation is still the full padded framebuffer. Only the REPORTED geometry
  * narrows, and the caller reads rows out of it at the unchanged stride.
  */
-/* The decision alone, with no DRM fd, so it is unit-testable on any machine:
- * the padded-scanout case needs hardware that pads (Apple's Touch Bar) to
- * observe, and a rule this easy to get subtly wrong should not be reachable
- * only through that one laptop. Reports through *why which branch was taken. */
-uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
-                                 uint32_t hdisplay, int crtc_x, int crtc_y,
-                                 int layout_is_linear, drmtap_scanout_why *why) {
+/* The decision alone, with no DRM fd, so it is unit-testable on any machine: the
+ * padded-scanout case needs hardware that pads (Apple's Touch Bar) to observe, and a
+ * rule this easy to get subtly wrong should not be reachable only through that one
+ * laptop. Reports through *why which branch was taken.
+ *
+ * Only ever SHRINKS, and only the width. Every branch that declines to narrow is a
+ * case where the framebuffer width IS the right answer:
+ *
+ *  - TILED. The CPU deswizzle derives its tile grid from the width and uses it to
+ *    address the SOURCE (deswizzle_nvidia_x_tiled: tiles_x = ceil(width/tile_w), then
+ *    src_off = (tile_row * tiles_x + tx) * tile_size; it ignores src_stride). A width
+ *    short by a tile or more mis-addresses every tile row after the first and silently
+ *    mangles the image. The visible width and the width the tiling was laid out for
+ *    are different quantities. No padded tiled scanout has been observed here, so it
+ *    is left alone rather than narrowed on a guess.
+ *  - SCALING. A plane whose SRC rect is larger than its CRTC rect is genuinely
+ *    downscaling: the whole framebuffer IS being displayed, just smaller. Narrowing
+ *    would hand the caller the left part of the image and call it the whole screen.
+ *    A framebuffer wider than the mode looks IDENTICAL to pitch padding until the
+ *    plane rect is read, which is the entire reason this needs the plane and cannot
+ *    be decided from the mode alone. Note a pitch test cannot substitute:
+ *    fb_width * bpp == pitches[0] holds for a 3840-wide downscaled framebuffer just
+ *    as it does for the padded 64-wide one.
+ *  - OFFSET. The plane reads from a non-zero SRC_X/SRC_Y, i.e. several heads out of
+ *    one big framebuffer. That needs an offset crop, and drmtap_dmabuf_desc has a
+ *    frozen layout with nowhere to carry a crop origin. No hardware here has it.
+ *  - UNREADABLE. Without the plane rect the padding and the downscale are
+ *    indistinguishable, so the safe answer is the pre-existing behaviour.
+ */
+uint32_t drmtap_scanout_width_of(uint32_t fb_width,
+                                 const drmtap_plane_rect *rect,
+                                 int layout_is_linear,
+                                 drmtap_scanout_why *why) {
     drmtap_scanout_why w = DRMTAP_SCANOUT_AS_IS;
     uint32_t out = fb_width;
-    if (mode_valid && hdisplay > 0 && hdisplay < fb_width) {
-        if (!layout_is_linear) {
-            /* A TILED scanout must be reported at its framebuffer width, because
-             * the CPU deswizzle derives the tile grid from the width and uses it to
-             * address the SOURCE (deswizzle_*_tiled: tiles_x = ceil(width/tile_w),
-             * src_off = (tile_row * tiles_x + tx) * tile_size). Narrowing the width
-             * by a tile or more would shrink tiles_x and mis-address every tile row
-             * after the first -- a silently mangled image. The visible width and the
-             * width the tiling was laid out for are two different things, one level
-             * down from the mode-vs-framebuffer distinction this function exists for.
-             * No padded TILED scanout has been observed here, so this stays at the
-             * pre-existing behaviour rather than being narrowed on a guess. */
+
+    if (!layout_is_linear) {
+        if (rect && rect->valid && rect->src_w > 0 && rect->src_w < fb_width) {
             w = DRMTAP_SCANOUT_TILED_NOT_NARROWED;
-        } else if (crtc_x == 0 && crtc_y == 0) {
-            out = hdisplay;
-            w = DRMTAP_SCANOUT_NARROWED;
-        } else {
-            w = DRMTAP_SCANOUT_OFFSET_UNSUPPORTED;
         }
+    } else if (!rect || !rect->valid) {
+        /* Only worth reporting when there was something to decide. */
+        w = (fb_width > 0) ? DRMTAP_SCANOUT_NO_PLANE_RECT : DRMTAP_SCANOUT_AS_IS;
+    } else if (rect->src_x != 0 || rect->src_y != 0) {
+        w = DRMTAP_SCANOUT_OFFSET_UNSUPPORTED;
+    } else if (rect->src_w != rect->crtc_w || rect->src_h != rect->crtc_h) {
+        w = DRMTAP_SCANOUT_SCALING_NOT_NARROWED;
+    } else if (rect->src_w > 0 && rect->src_w < fb_width) {
+        out = rect->src_w;
+        w = DRMTAP_SCANOUT_NARROWED;
     }
+
     if (why) {
         *why = w;
     }
     return out;
 }
 
+/* Read the primary plane rectangle of the context's CRTC. The SRC and CRTC properties
+ * are atomic-only: a client that has not asked for DRM_CLIENT_CAP_ATOMIC is shown
+ * none of them (measured on appletbdrm -- SRC_W present with the cap, absent without).
+ * The cap is therefore requested here, LAZILY: this function is only called once a
+ * framebuffer has turned out to be wider than its mode, so the common case never
+ * touches it. It is a per-fd flag, needs no privilege and no DRM master, no atomic
+ * commit is ever issued, and no other client is affected. rect->valid stays 0 when
+ * anything is missing, which the decision above treats as "cannot tell". */
+static void read_primary_plane_rect(drmtap_ctx *ctx, drmtap_plane_rect *rect) {
+    memset(rect, 0, sizeof(*rect));
+
+    if (!ctx->atomic_cap_tried) {
+        ctx->atomic_cap_tried = 1;
+        if (drmSetClientCap(ctx->drm_fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
+            drmtap_debug_log(ctx,
+                "DRM_CLIENT_CAP_ATOMIC refused (%s); plane SRC_W is unreadable, so a "
+                "padded scanout will be reported at its framebuffer width",
+                strerror(errno));
+        }
+    }
+
+    uint32_t plane_id = find_primary_plane(ctx);
+    if (plane_id == 0) {
+        return;
+    }
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(ctx->drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (!props) {
+        return;
+    }
+
+    /* 16.16 fixed point for the SRC rect, plain pixels for the CRTC rect. Fractions are dropped:
+     * a fractional source rect is a scaling plane, and the equality test below
+     * already declines to narrow that. */
+    int got = 0;
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        drmModePropertyRes *p = drmModeGetProperty(ctx->drm_fd, props->props[i]);
+        if (!p) {
+            continue;
+        }
+        uint64_t v = props->prop_values[i];
+        if      (!strcmp(p->name, "SRC_X"))  { rect->src_x  = (uint32_t)(v >> 16); got |= 1; }
+        else if (!strcmp(p->name, "SRC_Y"))  { rect->src_y  = (uint32_t)(v >> 16); got |= 2; }
+        else if (!strcmp(p->name, "SRC_W"))  { rect->src_w  = (uint32_t)(v >> 16); got |= 4; }
+        else if (!strcmp(p->name, "SRC_H"))  { rect->src_h  = (uint32_t)(v >> 16); got |= 8; }
+        else if (!strcmp(p->name, "CRTC_W")) { rect->crtc_w = (uint32_t)v;         got |= 16; }
+        else if (!strcmp(p->name, "CRTC_H")) { rect->crtc_h = (uint32_t)v;         got |= 32; }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+    rect->valid = (got == 63);
+}
+
+/* Report the width the CRTC actually scans out, not the width of the framebuffer
+ * OBJECT. A driver may allocate the scanout fb wider than the mode to satisfy a pitch
+ * alignment: Apple's appletbdrm (the Touch Bar strip) drives a 60x2170 mode from a
+ * 64x2170 fb with a 256-byte pitch, and its primary plane reads SRC_W=60 -- those four
+ * columns are padding that is never scanned out. Reporting the fb width hands the
+ * caller an image wider than the display it asked to capture. In rustdesk that read as
+ * "this display never matched its advertised geometry" -- the display list carries the
+ * mode -- so every frame was rejected, the display was demoted to PipeWire, and the
+ * client sat on "waiting for image".
+ *
+ * The mode is only the CHEAP GATE here: it says "worth looking closer", and the plane
+ * rect decides. Buffer-size arithmetic must keep using fb2->width and fb2->pitches:
+ * the allocation is still the full padded framebuffer. Only the REPORTED geometry
+ * narrows, and the caller reads rows out of it at the unchanged stride.
+ */
 static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
                                      uint64_t modifier) {
     if (ctx->crtc_id == 0) {
@@ -562,40 +653,69 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
     if (!crtc) {
         return fb_width;
     }
+    int worth_looking = crtc->mode_valid && crtc->mode.hdisplay > 0 &&
+                        crtc->mode.hdisplay < fb_width;
+    uint32_t hdisplay = crtc->mode.hdisplay;
+    uint32_t vdisplay = crtc->mode.vdisplay;
+    drmModeFreeCrtc(crtc);
+    if (!worth_looking) {
+        return fb_width;
+    }
+
     /* LINEAR and INVALID (unknown layout, handled downstream as linear) are the
      * layouts whose only width-dependent consumer is the OUTPUT: rows are addressed
-     * through the stride, so narrowing the reported width is safe. Anything else is
-     * a real tiling. */
+     * through the stride, so narrowing the reported width is safe. Anything else is a
+     * real tiling -- see drmtap_scanout_width_of. */
     int linear = (modifier == DRM_FORMAT_MOD_LINEAR ||
                   modifier == DRM_FORMAT_MOD_INVALID);
+
+    drmtap_plane_rect rect;
+    read_primary_plane_rect(ctx, &rect);
+
     drmtap_scanout_why why = DRMTAP_SCANOUT_AS_IS;
-    uint32_t out = drmtap_scanout_width_of(fb_width, crtc->mode_valid,
-                                           crtc->mode.hdisplay, crtc->x,
-                                           crtc->y, linear, &why);
+    uint32_t out = drmtap_scanout_width_of(fb_width, &rect, linear, &why);
+
     if (why != DRMTAP_SCANOUT_AS_IS && !ctx->logged_scanout_crop) {
         ctx->logged_scanout_crop = 1;
-        if (why == DRMTAP_SCANOUT_NARROWED) {
+        switch (why) {
+        case DRMTAP_SCANOUT_NARROWED:
             drmtap_debug_log(ctx,
-                "crtc %u scans out %u of the %u-pixel-wide scanout fb "
-                "(pitch padding); reporting %u",
-                ctx->crtc_id, crtc->mode.hdisplay, fb_width, out);
-        } else if (why == DRMTAP_SCANOUT_TILED_NOT_NARROWED) {
+                "crtc %u scans out %u of the %u-pixel-wide scanout fb (pitch padding; "
+                "plane reads SRC %ux%u 1:1); reporting %u",
+                ctx->crtc_id, rect.src_w, fb_width, rect.src_w, rect.src_h, out);
+            break;
+        case DRMTAP_SCANOUT_TILED_NOT_NARROWED:
             drmtap_debug_log(ctx,
-                "crtc %u scans out %u of the %u-pixel-wide scanout fb, but the "
-                "layout is tiled (modifier 0x%llx); reporting the whole fb "
-                "(narrowing a tiled width would mis-address the deswizzle)",
-                ctx->crtc_id, crtc->mode.hdisplay, fb_width,
-                (unsigned long long)modifier);
-        } else {
+                "crtc %u scans out %u of the %u-pixel-wide scanout fb, but the layout "
+                "is tiled (modifier 0x%llx); reporting the whole fb (narrowing a tiled "
+                "width would mis-address the deswizzle)",
+                ctx->crtc_id, hdisplay, fb_width, (unsigned long long)modifier);
+            break;
+        case DRMTAP_SCANOUT_SCALING_NOT_NARROWED:
             drmtap_debug_log(ctx,
-                "crtc %u viewport is %ux%u at +%d+%d inside a %u-pixel-wide "
-                "scanout fb; reporting the whole fb (the frame descriptor has "
-                "no crop origin)",
-                ctx->crtc_id, crtc->mode.hdisplay, crtc->mode.vdisplay,
-                crtc->x, crtc->y, fb_width);
+                "crtc %u plane scales %ux%u -> %ux%u, so the whole %u-pixel-wide fb is "
+                "displayed; reporting it unchanged (this is not pitch padding)",
+                ctx->crtc_id, rect.src_w, rect.src_h, rect.crtc_w, rect.crtc_h,
+                fb_width);
+            break;
+        case DRMTAP_SCANOUT_OFFSET_UNSUPPORTED:
+            drmtap_debug_log(ctx,
+                "crtc %u plane reads from +%u+%u inside a %u-pixel-wide scanout fb "
+                "(mode %ux%u); reporting the whole fb (the frame descriptor has no "
+                "crop origin)",
+                ctx->crtc_id, rect.src_x, rect.src_y, fb_width, hdisplay, vdisplay);
+            break;
+        case DRMTAP_SCANOUT_NO_PLANE_RECT:
+            drmtap_debug_log(ctx,
+                "crtc %u has a %u-pixel-wide scanout fb for a %u-pixel mode, but the "
+                "plane SRC rect is unreadable, so pitch padding cannot be told from a "
+                "scaling plane; reporting the whole fb",
+                ctx->crtc_id, fb_width, hdisplay);
+            break;
+        case DRMTAP_SCANOUT_AS_IS:
+            break;
         }
     }
-    drmModeFreeCrtc(crtc);
     return out;
 }
 

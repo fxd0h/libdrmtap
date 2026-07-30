@@ -117,6 +117,15 @@ struct drmtap_ctx {
      * frame. See drmtap_scanout_width() in drm_grab.c. */
     int      logged_scanout_crop;
 
+    /* 1 = DRM_CLIENT_CAP_ATOMIC has been requested on drm_fd. Set LAZILY, only when
+     * a scanout framebuffer turns out to be wider than its mode, because the plane
+     * SRC_W/CRTC_W properties that settle whether that is pitch padding or a scaling
+     * plane are hidden from a non-atomic client (measured: the same plane reports
+     * SRC_W with the cap and nothing without it). Per-fd, needs no privilege, no
+     * atomic commit is ever made, and no other client is affected. Sticky so the
+     * cap is requested once rather than per frame. */
+    int      atomic_cap_tried;
+
     /* Caller-supplied destination for converted pixels (drmtap_set_output_buffer).
      * NULL means "use the ctx-owned deswizzle_buf". Set once by the caller, who
      * owns the memory and must keep it alive; libdrmtap never frees or reallocates
@@ -312,17 +321,31 @@ int drmtap_convert_rgb16f(const void *src, void *dst,
 /* Which branch drmtap_scanout_width_of() took, so the caller can log the reason
  * once and a test can assert the branch and not just the number. */
 typedef enum {
-    DRMTAP_SCANOUT_AS_IS = 0,          /* fb reported unchanged */
-    DRMTAP_SCANOUT_NARROWED,           /* padded fb narrowed to the mode width */
-    DRMTAP_SCANOUT_OFFSET_UNSUPPORTED, /* CRTC viewport is offset in a bigger fb */
-    DRMTAP_SCANOUT_TILED_NOT_NARROWED, /* padded, but tiled: width feeds tile math */
+    DRMTAP_SCANOUT_AS_IS = 0,           /* fb reported unchanged */
+    DRMTAP_SCANOUT_NARROWED,            /* padded fb narrowed to what is scanned out */
+    DRMTAP_SCANOUT_OFFSET_UNSUPPORTED,  /* plane reads from an offset in a bigger fb */
+    DRMTAP_SCANOUT_TILED_NOT_NARROWED,  /* padded, but tiled: width feeds tile math */
+    DRMTAP_SCANOUT_SCALING_NOT_NARROWED,/* plane genuinely scales; fb is all visible */
+    DRMTAP_SCANOUT_NO_PLANE_RECT,       /* plane rect unreadable: cannot tell, so do not */
 } drmtap_scanout_why;
+
+/* The primary plane rectangle: which region of the framebuffer the plane reads and
+ * where it lands on the CRTC. Whole pixels (the kernel SRC_* properties are 16.16
+ * fixed point; the fractional part is dropped by the reader). `valid` is 0 when the
+ * properties could not be read, which is a distinct case from "no scaling" and must
+ * not be treated as one. */
+typedef struct {
+    int      valid;
+    uint32_t src_x, src_y, src_w, src_h;
+    uint32_t crtc_w, crtc_h;
+} drmtap_plane_rect;
 
 /* Decide the width a CRTC actually scans out of a framebuffer that may be wider
  * than its mode. Pure (no DRM fd) so it is testable without the padding hardware.
  * See the comment on the definition in drm_grab.c for the rules. */
-uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
-                                 uint32_t hdisplay, int crtc_x, int crtc_y,
-                                 int layout_is_linear, drmtap_scanout_why *why);
+uint32_t drmtap_scanout_width_of(uint32_t fb_width,
+                                 const drmtap_plane_rect *rect,
+                                 int layout_is_linear,
+                                 drmtap_scanout_why *why);
 
 #endif /* DRMTAP_INTERNAL_H */
