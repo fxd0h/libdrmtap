@@ -8,6 +8,26 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 
 ### Fixed
 
+- A grab reported the width of the framebuffer OBJECT instead of the width the
+  CRTC actually scans out, so a display whose scanout fb is padded wider than its
+  mode could not be captured at all by a consumer that had enumerated the mode.
+  Measured on an Apple T2 MacBook: the Touch Bar card (appletbdrm) drives a
+  60x2170 mode from a 64x2170 framebuffer with a 256-byte pitch, and those four
+  columns are alignment padding that is never scanned out. Every frame came back
+  64 wide against a display advertised as 60, which rustdesk read as "this
+  display never matched its advertised geometry"; it rejected the frames,
+  demoted the display to PipeWire, and the client sat on "waiting for image".
+  Reported geometry is now narrowed to the mode. It only ever shrinks and only
+  the width: a framebuffer NARROWER than the mode is a CRTC scaling a smaller
+  buffer up, which is a different image and is left alone. A CRTC whose viewport
+  does not start at the framebuffer origin (several heads scanning out of one big
+  fb) would need an offset crop, which drmtap_dmabuf_desc has no field for, so
+  such a frame is reported whole and the reason is logged once. Buffer-size
+  arithmetic is unchanged -- the mapping is still of the whole padded fb, only
+  the reported width narrows and the caller reads rows at the unchanged stride.
+  No ABI change: the decision is an internal function, the exported symbol set is
+  untouched.
+
 - drmtap_grab_mapped_fast() said nothing useful when it could not read the
   scanout (issue #36, a Radeon Vega 64 on amdgpu where the tiled VRAM scanout
   refuses a CPU mmap). Three separate silences: the no-mapping-and-no-EGL exit

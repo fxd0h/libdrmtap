@@ -107,6 +107,12 @@ struct drmtap_ctx {
      * in drmtap_error(), it read as a broken cache (issue #36). */
     int      fast_no_privilege;
 
+    /* Set once the CRTC mode and the scanout framebuffer have been found to
+     * disagree on width, so the reason a frame is narrower than the fb (or is
+     * deliberately NOT narrowed) is stated once per context instead of per
+     * frame. See drmtap_scanout_width() in drm_grab.c. */
+    int      logged_scanout_crop;
+
     /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs).
      * Grow-once and reused across grabs; capped at DRMTAP_MAX_FB_BYTES;
      * freed in drmtap_close(). */
@@ -269,5 +275,20 @@ int drmtap_convert_rgb16(const void *src, void *dst,
 int drmtap_convert_rgb16f(const void *src, void *dst,
                           uint32_t width, uint32_t height,
                           uint32_t src_stride, uint32_t dst_stride, int bgr);
+
+/* Which branch drmtap_scanout_width_of() took, so the caller can log the reason
+ * once and a test can assert the branch and not just the number. */
+typedef enum {
+    DRMTAP_SCANOUT_AS_IS = 0,          /* fb reported unchanged */
+    DRMTAP_SCANOUT_NARROWED,           /* padded fb narrowed to the mode width */
+    DRMTAP_SCANOUT_OFFSET_UNSUPPORTED, /* CRTC viewport is offset in a bigger fb */
+} drmtap_scanout_why;
+
+/* Decide the width a CRTC actually scans out of a framebuffer that may be wider
+ * than its mode. Pure (no DRM fd) so it is testable without the padding hardware.
+ * See the comment on the definition in drm_grab.c for the rules. */
+uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
+                                 uint32_t hdisplay, int crtc_x, int crtc_y,
+                                 drmtap_scanout_why *why);
 
 #endif /* DRMTAP_INTERNAL_H */
