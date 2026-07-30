@@ -8,8 +8,14 @@
 #   4. bindings/rust/libdrmtap-sys/Cargo.toml    (crate version)
 #   5. bindings/rust/libdrmtap/Cargo.toml        (its libdrmtap-sys dependency)
 #
-# It does NOT touch the libdrmtap wrapper crate's own version (that is an
-# intentionally separate 0.3.x line), nor prose in docs/READMEs. Run
+#   6. bindings/rust/libdrmtap/Cargo.toml        (the wrapper crate's OWN version)
+#
+# All six carry ONE number. The wrapper used to keep a separate 0.3.x line, which
+# meant a MINOR bump of -sys left the published wrapper pinned to `^0.4.x` -- a
+# range that does not reach 0.5.0 -- so every crates.io user of the wrapper silently
+# kept the old library. Lockstep costs a wrapper republish on a minor bump only:
+# its dependency is a caret range, so a PATCH of -sys is still picked up with no
+# republish at all. It does NOT touch prose in docs/READMEs. Run
 # tools/check-version.sh afterwards (CI does) to catch anything left behind.
 #
 # Usage: tools/set-version.sh X.Y.Z
@@ -44,10 +50,16 @@ sed -i -E \
     "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$ver\"/" \
     "$root/bindings/rust/libdrmtap-sys/Cargo.toml"
 
-# The wrapper crate's dependency ON libdrmtap-sys (not the wrapper's own line).
+# The wrapper crate's dependency ON libdrmtap-sys.
 sed -i -E \
     "s/(libdrmtap-sys = \{ version = )\"[0-9]+\.[0-9]+\.[0-9]+\"/\1\"$ver\"/" \
     "$root/bindings/rust/libdrmtap/Cargo.toml"
 
-echo "stamped version $ver across the 5 code sites"
+# The wrapper crate's OWN [package] version — the FIRST `version = "<semver>"` line,
+# same shape as libdrmtap-sys above. In lockstep since 0.5.0; see the header.
+sed -i -E \
+    "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$ver\"/" \
+    "$root/bindings/rust/libdrmtap/Cargo.toml"
+
+echo "stamped version $ver across the 6 code sites"
 echo "next: tools/check-version.sh  (verify) and, if C sources changed, tools/sync-crate.sh"

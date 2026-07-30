@@ -1,8 +1,9 @@
 # Changelog
 
 Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
-semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
-project share one version; the `libdrmtap` wrapper crate is versioned separately.
+semantic versioning. The C library, the meson project, the `libdrmtap-sys` crate and
+the `libdrmtap` wrapper crate all share ONE version (since 0.5.0; before that the
+wrapper had its own 0.3.x line).
 
 ## [0.5.0] - 2026-07-30
 
@@ -113,6 +114,15 @@ entry point is additive and would not on its own have justified more than a patc
 
 ### Changed
 
+- The `libdrmtap` wrapper crate joins the single version line instead of keeping its
+  own 0.3.x track, going 0.3.4 -> 0.5.0. The separate track was not free: a MINOR
+  bump of `libdrmtap-sys` leaves a published wrapper pinned to `^0.4.7`, a range that
+  cannot reach 0.5.0, so every crates.io user of the wrapper would have silently kept
+  a library without the scanout-width fix or the dimension bounds in it, with nothing
+  anywhere reporting a problem. Lockstep costs a wrapper republish on a minor bump
+  only -- its dependency is a caret range, so a PATCH of `libdrmtap-sys` is still
+  picked up with no republish. tools/set-version.sh stamps all six sites now and
+  tools/check-version.sh verifies the wrapper version instead of filtering it out.
 - New meson option `egl` (feature, default `auto`, so the historical behaviour is
   unchanged). `enabled` hard-fails when the egl/glesv2 pkg-config files or
   headers are missing, instead of quietly building the CPU-only stub. CI now

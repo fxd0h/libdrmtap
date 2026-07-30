@@ -41,6 +41,14 @@ dver=$(grep -E "libdrmtap-sys = \{ version = \"$sem\"" \
     "$root/bindings/rust/libdrmtap/Cargo.toml" | grep -oE "$sem" | head -1)
 check "wrapper's libdrmtap-sys dependency" "$dver" "$ver"
 
+# The wrapper crate's OWN version, in lockstep with the library since 0.5.0. It used
+# to be a separate 0.3.x track, and that is precisely how -sys 0.5.0 shipped while the
+# published wrapper still depended on `^0.4.7` -- a range that cannot reach it -- so
+# crates.io users of the wrapper kept the old library with no warning anywhere.
+wver=$(sed -nE '0,/^version = "([0-9]+\.[0-9]+\.[0-9]+)"/s//\1/p' \
+    "$root/bindings/rust/libdrmtap/Cargo.toml")
+check "wrapper crate own version" "$wver" "$ver"
+
 # The crate's bundled C sources must match the library byte-for-byte
 # (modulo the packaging include-path fixup that sync-crate.sh applies).
 echo "checking csrc/ source drift..."
@@ -56,20 +64,21 @@ fi
 # just the top-level READMEs: contrib/ + patches/ + docs/research/ carry
 # current-pointer versions (integration snippets, "published on crates.io" status
 # lines, scrap dependency pins) that a 4-file scan silently missed and let ship
-# stale. Build artifacts are excluded. The wrapper's own 0.3.x line is filtered
-# out (its version is intentionally a separate track).
+# stale. Build artifacts are excluded. (Up to 0.4.15 the wrapper's own 0.3.x line was
+# filtered out of this scan because it was a separate track; it is in lockstep now, so
+# nothing is filtered and a stale wrapper version shows up as a real mismatch above.)
 echo "advisory: libdrmtap version strings that are not $ver (review: stale current-pointer vs intentional history):"
 # Scan with RELATIVE paths (cd "$root") so the repo dir name ("libdrmtap") is not
 # in the path — otherwise the drmtap scope filter below would match every line.
 # Keep only lines whose CONTENT mentions drmtap (a libdrmtap version reference),
 # dropping unrelated deps (rustdesk 1.x, tokio, etc.); drop the canonical version
-# and the wrapper's separate 0.3.x line.
+# and nothing else -- the wrapper is in lockstep now.
 ( cd "$root" && grep -rnE "$sem" . \
     --include='*.md' --include='*.toml' --include='*.rs' \
     --exclude-dir='.git' --exclude-dir='build' --exclude-dir='build-pkg' --exclude-dir='target' \
     2>/dev/null ) \
     | grep -iE 'drmtap' \
-    | grep -vF "$ver" | grep -vE "0\.3\.[0-9]+" \
+    | grep -vF "$ver" \
     | sed 's/^/    /' || echo "    (none)"
 
 if [ $fail -ne 0 ]; then
