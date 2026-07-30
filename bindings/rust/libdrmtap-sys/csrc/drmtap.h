@@ -550,10 +550,13 @@ int drmtap_drm_fd(drmtap_ctx *ctx);
  * drmtap_open_render() context too, so the converting half of the split
  * (drmtap_convert_dmabuf) can write straight into the consumer's buffer.
  *
- * It does NOT apply when there is nothing to materialize: a linear 8-bit scanout
- * needs no conversion, so the frame points directly at the mapped scanout and no
- * intermediate buffer exists to redirect. Compare drmtap_frame_info.data against
- * @p dst if your code must know which happened.
+ * It does NOT apply when there is nothing to materialize. A linear 8-bit scanout
+ * needs no conversion, so the frame is reported where the pixels already are and no
+ * conversion destination is chosen at all: that is the mapped scanout on the direct
+ * path (already zero-copy, nothing to redirect), and the library receive buffer on
+ * the privileged-helper pixel path (where a caller that must own the memory still
+ * has to copy). Compare drmtap_frame_info.data against @p dst if your code needs to
+ * know which happened.
  *
  * SIZE. A grab that would need more than @p len bytes FAILS with -ENOSPC and
  * leaves your buffer untouched, rather than writing a short frame you could not

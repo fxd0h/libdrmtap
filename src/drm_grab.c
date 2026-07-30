@@ -484,6 +484,17 @@ static int validate_fb_size(uint32_t stride, uint32_t height) {
     return 0;
 }
 
+/* fb2->modifier is only meaningful when the framebuffer was created with the
+ * DRM_MODE_FB_MODIFIERS flag; with the flag clear the field is undefined (commonly
+ * 0, garbage on some drivers). Trusting a bogus LINEAR on a driver that is actually
+ * tiling corrupts the import, so report INVALID and let the layout be inferred.
+ * Open-coded identically at every frame-filling site; named here because the
+ * scanout-width decision needs the same answer. */
+static uint64_t fb2_effective_modifier(const drmModeFB2 *fb2) {
+    return (fb2->flags & DRM_MODE_FB_MODIFIERS) ? fb2->modifier
+                                                : DRM_FORMAT_MOD_INVALID;
+}
+
 /* Report the width the CRTC actually scans out, not the width of the framebuffer
  * OBJECT. A driver may allocate the scanout fb wider than the mode to satisfy a
  * pitch alignment: Apple's appletbdrm (the Touch Bar strip) drives a 60x2170 mode
@@ -513,11 +524,23 @@ static int validate_fb_size(uint32_t stride, uint32_t height) {
  * only through that one laptop. Reports through *why which branch was taken. */
 uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
                                  uint32_t hdisplay, int crtc_x, int crtc_y,
-                                 drmtap_scanout_why *why) {
+                                 int layout_is_linear, drmtap_scanout_why *why) {
     drmtap_scanout_why w = DRMTAP_SCANOUT_AS_IS;
     uint32_t out = fb_width;
     if (mode_valid && hdisplay > 0 && hdisplay < fb_width) {
-        if (crtc_x == 0 && crtc_y == 0) {
+        if (!layout_is_linear) {
+            /* A TILED scanout must be reported at its framebuffer width, because
+             * the CPU deswizzle derives the tile grid from the width and uses it to
+             * address the SOURCE (deswizzle_*_tiled: tiles_x = ceil(width/tile_w),
+             * src_off = (tile_row * tiles_x + tx) * tile_size). Narrowing the width
+             * by a tile or more would shrink tiles_x and mis-address every tile row
+             * after the first -- a silently mangled image. The visible width and the
+             * width the tiling was laid out for are two different things, one level
+             * down from the mode-vs-framebuffer distinction this function exists for.
+             * No padded TILED scanout has been observed here, so this stays at the
+             * pre-existing behaviour rather than being narrowed on a guess. */
+            w = DRMTAP_SCANOUT_TILED_NOT_NARROWED;
+        } else if (crtc_x == 0 && crtc_y == 0) {
             out = hdisplay;
             w = DRMTAP_SCANOUT_NARROWED;
         } else {
@@ -530,7 +553,8 @@ uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
     return out;
 }
 
-static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width) {
+static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
+                                     uint64_t modifier) {
     if (ctx->crtc_id == 0) {
         return fb_width;
     }
@@ -538,10 +562,16 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width) {
     if (!crtc) {
         return fb_width;
     }
+    /* LINEAR and INVALID (unknown layout, handled downstream as linear) are the
+     * layouts whose only width-dependent consumer is the OUTPUT: rows are addressed
+     * through the stride, so narrowing the reported width is safe. Anything else is
+     * a real tiling. */
+    int linear = (modifier == DRM_FORMAT_MOD_LINEAR ||
+                  modifier == DRM_FORMAT_MOD_INVALID);
     drmtap_scanout_why why = DRMTAP_SCANOUT_AS_IS;
     uint32_t out = drmtap_scanout_width_of(fb_width, crtc->mode_valid,
                                            crtc->mode.hdisplay, crtc->x,
-                                           crtc->y, &why);
+                                           crtc->y, linear, &why);
     if (why != DRMTAP_SCANOUT_AS_IS && !ctx->logged_scanout_crop) {
         ctx->logged_scanout_crop = 1;
         if (why == DRMTAP_SCANOUT_NARROWED) {
@@ -549,6 +579,13 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width) {
                 "crtc %u scans out %u of the %u-pixel-wide scanout fb "
                 "(pitch padding); reporting %u",
                 ctx->crtc_id, crtc->mode.hdisplay, fb_width, out);
+        } else if (why == DRMTAP_SCANOUT_TILED_NOT_NARROWED) {
+            drmtap_debug_log(ctx,
+                "crtc %u scans out %u of the %u-pixel-wide scanout fb, but the "
+                "layout is tiled (modifier 0x%llx); reporting the whole fb "
+                "(narrowing a tiled width would mis-address the deswizzle)",
+                ctx->crtc_id, crtc->mode.hdisplay, fb_width,
+                (unsigned long long)modifier);
         } else {
             drmtap_debug_log(ctx,
                 "crtc %u viewport is %ux%u at +%d+%d inside a %u-pixel-wide "
@@ -717,7 +754,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         /* Narrow to what the CRTC scans out, exactly as the direct path does.
          * The helper reports the framebuffer, and the padding is the driver's,
          * so it is present on this path too. */
-        frame->width = drmtap_scanout_width(ctx, hresult.wire.width);
+        frame->width = drmtap_scanout_width(ctx, hresult.wire.width,
+                                            hresult.wire.modifier);
         frame->height = hresult.wire.height;
         frame->stride = hresult.wire.stride;
         frame->format = hresult.wire.format;
@@ -876,7 +914,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
     /* Fill frame info */
     memset(frame, 0, sizeof(*frame));
-    frame->width = drmtap_scanout_width(ctx, fb2->width);
+    frame->width = drmtap_scanout_width(ctx, fb2->width,
+                                        fb2_effective_modifier(fb2));
     frame->height = fb2->height;
     frame->stride = fb2->pitches[0];
     frame->format = fb2->pixel_format;
@@ -1778,7 +1817,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         if (drmtap_gpu_egl_available(ctx)) {
             frame->data = NULL;
             frame->dma_buf_fd = prime_fd;
-            frame->width = drmtap_scanout_width(ctx, fb2->width);
+            frame->width = drmtap_scanout_width(ctx, fb2->width,
+                                                fb2_effective_modifier(fb2));
             frame->height = fb2->height;
             frame->stride = fb2->pitches[0];
             frame->format = fb2->pixel_format;
@@ -1834,7 +1874,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
      * geometry without paying another drmModeGetCrtc on the hot path. The mmap
      * size below deliberately stays on fb2->pitches[0] * fb2->height: the mapping
      * is of the whole padded framebuffer. */
-    ctx->fast_slots[slot].width = drmtap_scanout_width(ctx, fb2->width);
+    ctx->fast_slots[slot].width =
+        drmtap_scanout_width(ctx, fb2->width, fb2_effective_modifier(fb2));
     ctx->fast_slots[slot].height = fb2->height;
     ctx->fast_slots[slot].stride = fb2->pitches[0];
     ctx->fast_slots[slot].format = fb2->pixel_format;

@@ -20,8 +20,9 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
   to know which one ran, and on an unprivileged drmtap_open_render() context too,
   so the converting half of the split can write straight into the consumer's
   buffer. It does NOT apply where there is nothing to materialize: a linear 8-bit
-  scanout is handed back as a direct pointer into the mapped scanout, with no
-  intermediate buffer to redirect. A frame that would not fit is REFUSED with
+  scanout is reported where the pixels already are -- the mapped scanout on the
+  direct path, the library receive buffer on the privileged-helper pixel path -- so
+  no conversion destination is chosen. A frame that would not fit is REFUSED with
   -ENOSPC, leaving the buffer untouched and naming the required size through
   drmtap_error(), rather than writing short.
 
@@ -49,10 +50,15 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
   64 wide against a display advertised as 60, which rustdesk read as "this
   display never matched its advertised geometry"; it rejected the frames,
   demoted the display to PipeWire, and the client sat on "waiting for image".
-  Reported geometry is now narrowed to the mode. It only ever shrinks and only
-  the width: a framebuffer NARROWER than the mode is a CRTC scaling a smaller
-  buffer up, which is a different image and is left alone. A CRTC whose viewport
-  does not start at the framebuffer origin (several heads scanning out of one big
+  Reported geometry is now narrowed to the mode. It only ever shrinks, only the
+  width, and only for a LINEAR layout: a framebuffer NARROWER than the mode is a
+  CRTC scaling a smaller buffer up, which is a different image and is left alone,
+  and a padded TILED scanout is left alone too, because the CPU deswizzle derives
+  its tile grid from the width and uses it to address the SOURCE, so a narrowed
+  width there would mis-address every tile row after the first and silently mangle
+  the image. No padded tiled scanout has been seen on any hardware here, so that
+  branch keeps the previous behaviour rather than being narrowed on a guess.
+  A CRTC whose viewport does not start at the framebuffer origin (several heads scanning out of one big
   fb) would need an offset crop, which drmtap_dmabuf_desc has no field for, so
   such a frame is reported whole and the reason is logged once. Buffer-size
   arithmetic is unchanged -- the mapping is still of the whole padded fb, only
