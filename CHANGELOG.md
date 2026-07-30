@@ -50,21 +50,34 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
   64 wide against a display advertised as 60, which rustdesk read as "this
   display never matched its advertised geometry"; it rejected the frames,
   demoted the display to PipeWire, and the client sat on "waiting for image".
-  Reported geometry is now narrowed to the mode. It only ever shrinks, only the
-  width, and only for a LINEAR layout: a framebuffer NARROWER than the mode is a
-  CRTC scaling a smaller buffer up, which is a different image and is left alone,
-  and a padded TILED scanout is left alone too, because the CPU deswizzle derives
-  its tile grid from the width and uses it to address the SOURCE, so a narrowed
-  width there would mis-address every tile row after the first and silently mangle
-  the image. No padded tiled scanout has been seen on any hardware here, so that
-  branch keeps the previous behaviour rather than being narrowed on a guess.
-  A CRTC whose viewport does not start at the framebuffer origin (several heads scanning out of one big
-  fb) would need an offset crop, which drmtap_dmabuf_desc has no field for, so
-  such a frame is reported whole and the reason is logged once. Buffer-size
-  arithmetic is unchanged -- the mapping is still of the whole padded fb, only
-  the reported width narrows and the caller reads rows at the unchanged stride.
-  No ABI change: the decision is an internal function, the exported symbol set is
-  untouched.
+  Reported geometry is now narrowed to what the primary plane actually reads, and
+  the mode is only the cheap gate that says "worth looking closer". The plane rect
+  is what decides, because a framebuffer wider than the mode looks IDENTICAL to
+  pitch padding whether it is padding or a plane that genuinely downscales, and
+  getting that wrong returns part of the image as if it were the whole screen. On
+  the measured machine the plane reports SRC 60x2170 onto a 60x2170 CRTC rect, so
+  the four columns are provably not scanned out. A pitch test cannot substitute:
+  fb_width * bpp == pitches[0] holds for a 3840-wide downscaled framebuffer exactly
+  as it does for the padded 64-wide one.
+  It only ever SHRINKS, and only the width, and every refusal is a case where the
+  framebuffer width is the right answer: a scaling plane (the whole fb is
+  displayed, just smaller), a plane reading from a non-zero origin (several heads
+  out of one framebuffer, which would need an offset crop that the frozen
+  drmtap_dmabuf_desc has nowhere to carry), a TILED layout (the CPU deswizzle
+  derives its tile grid from the width and uses it to address the SOURCE, so a
+  narrowed width there mis-addresses every tile row after the first and silently
+  mangles the image), and an unreadable plane rect -- which is NOT the same as "no
+  scaling" and is not treated as one.
+  Reading the plane rect needs DRM_CLIENT_CAP_ATOMIC, since the SRC and CRTC
+  properties are hidden from a non-atomic client (measured: the same plane reports
+  SRC_W with the cap and nothing without it). The cap is requested LAZILY, only
+  once a framebuffer has turned out to be wider than its mode, so the common path
+  never touches it; it is per-fd, needs no privilege and no DRM master, no atomic
+  commit is ever issued, and no other client is affected.
+  Buffer-size arithmetic is unchanged -- the mapping is still of the whole padded
+  fb, only the reported width narrows and the caller reads rows at the unchanged
+  stride. No ABI change: the decision is an internal function, the exported symbol
+  set is untouched.
 
 - drmtap_grab_mapped_fast() said nothing useful when it could not read the
   scanout (issue #36, a Radeon Vega 64 on amdgpu where the tiled VRAM scanout
