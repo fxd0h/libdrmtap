@@ -315,6 +315,7 @@ typedef enum {
     DRMTAP_SCANOUT_AS_IS = 0,          /* fb reported unchanged */
     DRMTAP_SCANOUT_NARROWED,           /* padded fb narrowed to the mode width */
     DRMTAP_SCANOUT_OFFSET_UNSUPPORTED, /* CRTC viewport is offset in a bigger fb */
+    DRMTAP_SCANOUT_TILED_NOT_NARROWED, /* padded, but tiled: width feeds tile math */
 } drmtap_scanout_why;
 
 /* Decide the width a CRTC actually scans out of a framebuffer that may be wider
@@ -322,6 +323,6 @@ typedef enum {
  * See the comment on the definition in drm_grab.c for the rules. */
 uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
                                  uint32_t hdisplay, int crtc_x, int crtc_y,
-                                 drmtap_scanout_why *why);
+                                 int layout_is_linear, drmtap_scanout_why *why);
 
 #endif /* DRMTAP_INTERNAL_H */
