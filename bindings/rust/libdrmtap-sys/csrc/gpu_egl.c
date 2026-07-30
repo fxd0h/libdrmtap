@@ -1061,6 +1061,18 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     if (!ctx || !out_data || !out_size) {
         return -EINVAL;
     }
+    /* Bound the dimensions before anything multiplies them. The readback below is
+     * sized width*height*4, and width does not go through validate_fb_size (which
+     * bounds stride*height only), so an out-of-range width from a wire/IPC peer
+     * could wrap that product and give a large glReadPixels a small destination --
+     * now more than a library-internal concern, since the destination can be the
+     * caller's buffer (drmtap_set_output_buffer). */
+    int dim = validate_fb_dims(width, height);
+    if (dim != 0) {
+        drmtap_set_error(ctx, "refusing %ux%u scanout: implausible geometry", width,
+                         height);
+        return dim;
+    }
 
     /* Lazy-init this thread's EGL context. `state` is the file-scope
      * thread-local defined above; it is freed by drmtap_gpu_egl_thread_cleanup()
@@ -1272,20 +1284,22 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     /* Ensure GPU rendering is complete before reading back */
     glFinish();
 
-    /* Read linear pixels straight into the ctx-owned grow-once buffer
-     * (drmtap_ensure_buf caps it at DRMTAP_MAX_FB_BYTES), so steady-state
-     * conversion performs zero per-frame allocations. The buffer belongs to
-     * the context and is freed in drmtap_close(); callers must not free it. */
+    /* Read the linear pixels straight into the destination, which is the CALLER's
+     * buffer when it set one (drmtap_set_output_buffer) and otherwise the ctx-owned
+     * grow-once buffer (capped at DRMTAP_MAX_FB_BYTES), so steady-state conversion
+     * performs zero per-frame allocations. glReadPixels writes wherever it is
+     * pointed, so a caller-supplied destination costs nothing here and removes the
+     * caller's whole-frame memcpy. The internal buffer belongs to the context and
+     * is freed in drmtap_close(); callers must not free it. */
     size_t rgba_size = (size_t)width * height * 4;
-    ret = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
-                            rgba_size);
+    void *dst = NULL;
+    ret = drmtap_ensure_out(ctx, rgba_size, &dst);
     if (ret != 0) {
         goto cleanup;
     }
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
-                 ctx->deswizzle_buf);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, dst);
     /* A GL error across the render + readback (notably GL_CONTEXT_LOST after a GPU
-     * reset/TDR) means deswizzle_buf holds stale or undefined pixels. Fail closed
+     * reset/TDR) means the destination holds stale or undefined pixels. Fail closed
      * instead of returning them as a valid frame. This glGetError also drains the
      * error state so the next convert starts clean. */
     GLenum gl_err = glGetError();
@@ -1300,7 +1314,7 @@ static int egl_convert_impl(drmtap_ctx *ctx,
      * orientation. The previous CPU flip was compensating for a shader-
      * based X flip (1.0 - v_texcoord.x) that has since been removed. */
 
-    *out_data = ctx->deswizzle_buf;
+    *out_data = dst;
     *out_size = rgba_size;
     ret = 0;
 
