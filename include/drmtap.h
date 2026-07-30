@@ -533,6 +533,49 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  */
 int drmtap_drm_fd(drmtap_ctx *ctx);
 
+/**
+ * @brief Have conversions write into YOUR buffer instead of a library-owned one.
+ *
+ * By default a converted frame lands in a context-owned buffer and
+ * drmtap_frame_info.data points at it, so a caller that must end up with the
+ * pixels somewhere specific (a memfd it already shares with a consumer, a
+ * pre-registered upload buffer) pays a full-frame memcpy per frame. Nothing
+ * requires that: the EGL detile ends in a glReadPixels and the CPU converters
+ * take a destination pointer, and both write wherever they are pointed. Point
+ * them at your memory and the copy disappears.
+ *
+ * Applies to every path that MATERIALIZES pixels, so a caller does not have to
+ * know which one ran: the EGL detile, the CPU deswizzle, the 10/16-bit and HDR
+ * reductions, and the padded-linear repack. It applies on an unprivileged
+ * drmtap_open_render() context too, so the converting half of the split
+ * (drmtap_convert_dmabuf) can write straight into the consumer's buffer.
+ *
+ * It does NOT apply when there is nothing to materialize: a linear 8-bit scanout
+ * needs no conversion, so the frame points directly at the mapped scanout and no
+ * intermediate buffer exists to redirect. Compare drmtap_frame_info.data against
+ * @p dst if your code must know which happened.
+ *
+ * SIZE. A grab that would need more than @p len bytes FAILS with -ENOSPC and
+ * leaves your buffer untouched, rather than writing a short frame you could not
+ * tell from a good one; drmtap_error() then names the exact number of bytes the
+ * frame needed. Size it from the frame you actually get -- stride * height of a
+ * first grab -- not from width * height * 4: the CPU deswizzle keeps the source
+ * stride, and a scanout whose pitch is padded wider than the visible width needs
+ * that padded size. On a geometry change, re-mmap and call this again.
+ *
+ * LIFETIME. You own @p dst. libdrmtap never frees, reallocates or retains it past
+ * a frame, and drmtap_close() does not touch it, so it must stay valid and
+ * unmapped-from-under-us for as long as it is set and for as long as you hold a
+ * frame that points into it. Call with @p dst NULL to go back to the
+ * library-owned buffer (@p len is then ignored).
+ *
+ * @param ctx Capture or render context
+ * @param dst Destination for converted pixels, or NULL to clear
+ * @param len Bytes available at @p dst (must be > 0 when dst is non-NULL)
+ * @return 0 on success, -EINVAL on a NULL ctx or a zero len with a non-NULL dst
+ */
+int drmtap_set_output_buffer(drmtap_ctx *ctx, void *dst, size_t len);
+
 /* ========================================================================= */
 /* Pixel Conversion                                                          */
 /* ========================================================================= */

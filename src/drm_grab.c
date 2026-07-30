@@ -353,6 +353,60 @@ int drmtap_ensure_buf(void **buf, size_t *cap, size_t size) {
     return 0;
 }
 
+int validate_fb_dims(uint32_t width, uint32_t height) {
+    if (width == 0 || height == 0) {
+        return -EINVAL;
+    }
+    /* Bound each dimension BEFORE any multiply, so the product below cannot wrap
+     * (even where size_t is 32-bit): 32768*32768 == 2^30, and *4 == 2^32. -EFBIG,
+     * not -EINVAL: an over-range dimension is the too-large case, and callers
+     * (and tests) already distinguish "oversized geometry" from "malformed". */
+    if (width > DRMTAP_MAX_DIM || height > DRMTAP_MAX_DIM) {
+        return -EFBIG;
+    }
+    if ((size_t)width * height > DRMTAP_MAX_FB_BYTES / 4) {
+        return -EFBIG;
+    }
+    return 0;
+}
+
+int drmtap_ensure_out(drmtap_ctx *ctx, size_t size, void **out) {
+    if (size == 0) {
+        return -EINVAL;
+    }
+    /* Cap the frame itself even when the destination is the caller's: a caller
+     * that happens to own a huge mapping must not be able to unlock a frame
+     * larger than this library is willing to handle, and keeping the cap on both
+     * paths means the caller-supplied case is not the loose one. */
+    if (size > DRMTAP_MAX_FB_BYTES) {
+        return -EFBIG;
+    }
+    if (ctx->user_out) {
+        if (size > ctx->user_out_len) {
+            /* Refuse rather than write short. The caller sized its buffer for a
+             * geometry; if the display changed under it, a partial frame would be
+             * indistinguishable from a good one, and the caller cannot re-mmap what
+             * it does not know went stale. Named through drmtap_error so this is
+             * actionable and not just an errno. */
+            drmtap_set_error(ctx,
+                "output buffer is %zu bytes but this frame needs %zu "
+                "(geometry changed?); call drmtap_set_output_buffer again with a "
+                "buffer of at least that size, or pass NULL to go back to the "
+                "library-owned buffer",
+                ctx->user_out_len, size);
+            return -ENOSPC;
+        }
+        *out = ctx->user_out;
+        return 0;
+    }
+    int ret = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size, size);
+    if (ret != 0) {
+        return ret;
+    }
+    *out = ctx->deswizzle_buf;
+    return 0;
+}
+
 /* ========================================================================= */
 /* virtio_gpu transfer helpers                                               */
 /* ========================================================================= */
@@ -555,7 +609,12 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                      (const char *)&fb2->pixel_format,
                      (unsigned long)fb2->modifier);
 
-    ret = validate_fb_size(fb2->pitches[0], fb2->height);
+    /* Bound the DIMENSIONS too, not just stride*height: width is unconstrained by
+     * validate_fb_size, and every converted output is sized width*height*4. */
+    ret = validate_fb_dims(fb2->width, fb2->height);
+    if (ret == 0) {
+        ret = validate_fb_size(fb2->pitches[0], fb2->height);
+    }
     if (ret != 0) {
         drmtap_set_error(ctx, "rejecting framebuffer geometry %ux%u stride=%u",
                          fb2->width, fb2->height, fb2->pitches[0]);
@@ -668,9 +727,16 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         ctx->cur_hdr_eotf = hresult.wire.hdr_eotf;
         ctx->cur_hdr_max_nits = hresult.wire.hdr_max_nits;
 
-        /* The helper validates its own geometry, but it sends stride/height over
-         * the wire — re-check before we mmap/size anything from those values. */
-        ret = validate_fb_size(frame->stride, frame->height);
+        /* The helper validates its own geometry, but it sends it over the wire —
+         * re-check before we mmap/size anything from those values. BOTH checks are
+         * needed: validate_fb_size bounds stride*height (what we mmap/receive) and
+         * validate_fb_dims bounds width, which the first one does not constrain at
+         * all. An unbounded width reaches the conversion paths, where every output
+         * is sized width*height*4 and that product can wrap. */
+        ret = validate_fb_dims(frame->width, frame->height);
+        if (ret == 0) {
+            ret = validate_fb_size(frame->stride, frame->height);
+        }
         if (ret != 0) {
             drmtap_set_error(ctx, "helper sent invalid geometry %ux%u stride=%u",
                              frame->width, frame->height, frame->stride);
@@ -974,8 +1040,8 @@ static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
     }
 
     size_t out_size = (size_t)frame->width * frame->height * 4u;
-    int b = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
-                              out_size);
+    void *out = NULL;
+    int b = drmtap_ensure_out(ctx, out_size, &out);
     if (b != 0) return b;
     uint32_t dst_stride = frame->width * 4u;
     int hdr = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ);
@@ -983,23 +1049,23 @@ static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
 
     if (is_ar30) {
         if (hdr) {
-            ret = drmtap_tonemap_hdr10(data, ctx->deswizzle_buf,
+            ret = drmtap_tonemap_hdr10(data, out,
                     frame->width, frame->height, frame->stride, dst_stride,
                     fmt, ctx->cur_hdr_max_nits);
         } else {
-            ret = drmtap_convert_format(data, ctx->deswizzle_buf,
+            ret = drmtap_convert_format(data, out,
                     frame->width, frame->height, frame->stride, dst_stride,
                     fmt, DRMTAP_FMT_XR24);
         }
     } else if (is_rgb16) {
         int bgr = (fmt == DRMTAP_FMT_XB48 || fmt == DRMTAP_FMT_AB48);
-        ret = drmtap_convert_rgb16(data, ctx->deswizzle_buf,
+        ret = drmtap_convert_rgb16(data, out,
                 frame->width, frame->height, frame->stride, dst_stride,
                 bgr, ctx->cur_hdr_eotf, ctx->cur_hdr_max_nits);
     } else {
         /* Half-float FP16 (XR4H family): linear-light decode + sRGB re-encode. */
         int bgr = (fmt == DRMTAP_FMT_XB4H || fmt == DRMTAP_FMT_AB4H);
-        ret = drmtap_convert_rgb16f(data, ctx->deswizzle_buf,
+        ret = drmtap_convert_rgb16f(data, out,
                 frame->width, frame->height, frame->stride, dst_stride, bgr);
     }
     if (ret != 0) return ret;
@@ -1007,7 +1073,7 @@ static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
     drmtap_debug_log(ctx, "auto-process: linear %s -> XRGB8888 (%s)",
                      is_ar30 ? "10-bit" : (is_rgb16f ? "FP16" : "16-bit"),
                      hdr ? "HDR tone-mapped" : "SDR");
-    frame->data = ctx->deswizzle_buf;
+    frame->data = out;
     frame->format = DRMTAP_FMT_XR24;
     frame->stride = dst_stride;
     return 1;
@@ -1067,24 +1133,6 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
      */
 
 
-    /* Ensure the CPU-deswizzle shadow buffer is allocated (grow-once, capped —
-     * see drmtap_ensure_buf). frame->stride/height are validated at every entry point
-     * (validate_fb_size), so this multiply cannot overflow. NOTE: this does NOT
-     * bound the EGL output, which is always 4-byte RGBA — a sub-4-byte source
-     * (e.g. RG16) can expand past stride*height, so the EGL path caps egl_size
-     * separately below. */
-    size_t size = (size_t)frame->stride * frame->height;
-    int bres = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
-                                 size);
-    if (bres != 0) {
-        if (bres == -EFBIG) {
-            drmtap_set_error(ctx,
-                "framebuffer too large for deswizzle: %zu bytes (max %zu)",
-                size, (size_t)DRMTAP_MAX_FB_BYTES);
-        }
-        return bres;
-    }
-
     /* --- EGL path: import DMA-BUF, GPU renders to linear RGBA ---
      *
      * This path requires a valid dma_buf_fd, which is only available when
@@ -1109,9 +1157,10 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                                           &egl_data, &egl_size);
         drmtap_debug_log(ctx, "EGL convert: ret=%d data=%p", ret, egl_data);
         if (ret == 0 && egl_data) {
-            /* egl_data IS ctx->deswizzle_buf: the convert reads back into the
-             * ctx-owned grow-once buffer (size-capped inside), so adopting it
-             * is just repointing the frame — no allocation churn. */
+            /* egl_data is whatever drmtap_ensure_out resolved inside the convert:
+             * the caller's output buffer if it set one, otherwise the ctx-owned
+             * grow-once buffer (size-capped inside). Either way adopting it is just
+             * repointing the frame — no allocation churn, and no copy. */
             frame->data = egl_data;
             /* EGL outputs RGBA/BGRA 8-bit */
             frame->format = DRM_FORMAT_XRGB8888;
@@ -1161,14 +1210,33 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
         return 0;
     }
 
-    /* --- CPU deswizzle for classic tiling (buffer already allocated above) --- */
+    /* --- CPU deswizzle for classic tiling --- */
+    /* Resolve the destination HERE and not before the EGL attempt above. The CPU
+     * deswizzle keeps the SOURCE stride, so it needs stride*height bytes, which on a
+     * padded scanout is MORE than the width*height*4 the EGL detile produces (a
+     * 60-wide mode on a 256-byte pitch: 555520 vs 520800). Sizing it up front would
+     * refuse a caller-supplied output buffer that the EGL path would have filled
+     * perfectly, and on the EGL path it also allocated a shadow buffer that was then
+     * never used. frame->stride/height are validated at every entry point
+     * (validate_fb_size), so this multiply cannot overflow. */
+    size_t size = (size_t)frame->stride * frame->height;
+    void *out = NULL;
+    int bres = drmtap_ensure_out(ctx, size, &out);
+    if (bres != 0) {
+        if (bres == -EFBIG) {
+            drmtap_set_error(ctx,
+                "framebuffer too large for deswizzle: %zu bytes (max %zu)",
+                size, (size_t)DRMTAP_MAX_FB_BYTES);
+        }
+        return bres;
+    }
     const char *driver = ctx->driver_name;
     if (drmtap_gpu_intel_match(driver) ||
         drmtap_gpu_nvidia_match(driver) ||
         drmtap_gpu_amd_match(driver)) {
         drmtap_debug_log(ctx, "auto-process: %s CPU deswizzle (mod=0x%lx)",
                          driver, (unsigned long)modifier);
-        int ret = drmtap_deswizzle(data, ctx->deswizzle_buf,
+        int ret = drmtap_deswizzle(data, out,
                                    frame->width, frame->height,
                                    frame->stride, frame->stride, modifier,
                                    (size_t)frame->stride * frame->height);
@@ -1190,7 +1258,7 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
             return -ENOTSUP;
         }
         if (ret == 0) {
-            frame->data = ctx->deswizzle_buf;
+            frame->data = out;
             drmtap_debug_log(ctx, "auto-process: CPU deswizzled to linear");
 
             /* Reduce 10-bit X/AR30 and X/AB30 to 8-bit XRGB8888. An HDR10 (PQ)
@@ -1207,7 +1275,7 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                         "auto-process: HDR10 AR30 -> tone-map to SDR (peak=%u)",
                         ctx->cur_hdr_max_nits);
                     conv = drmtap_tonemap_hdr10(
-                        ctx->deswizzle_buf, ctx->deswizzle_buf,
+                        out, out,
                         frame->width, frame->height,
                         frame->stride, frame->stride,
                         frame->format, ctx->cur_hdr_max_nits);
@@ -1215,7 +1283,7 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                     drmtap_debug_log(ctx,
                         "auto-process: SDR 10-bit AR30 -> 8-bit XRGB8888");
                     conv = drmtap_convert_format(
-                        ctx->deswizzle_buf, ctx->deswizzle_buf,
+                        out, out,
                         frame->width, frame->height,
                         frame->stride, frame->stride,
                         frame->format, DRMTAP_FMT_XR24);
@@ -1619,7 +1687,12 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         return -EACCES;
     }
 
-    ret = validate_fb_size(fb2->pitches[0], fb2->height);
+    /* Bound the DIMENSIONS too, not just stride*height: width is unconstrained by
+     * validate_fb_size, and every converted output is sized width*height*4. */
+    ret = validate_fb_dims(fb2->width, fb2->height);
+    if (ret == 0) {
+        ret = validate_fb_size(fb2->pitches[0], fb2->height);
+    }
     if (ret != 0) {
         drmtap_set_error(ctx, "fast2: rejecting geometry %ux%u stride=%u",
                          fb2->width, fb2->height, fb2->pitches[0]);
@@ -1844,7 +1917,11 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                          desc->width, desc->num_planes);
         return -EINVAL;
     }
-    int ret = validate_fb_size(desc->pitches[0], desc->height);
+    /* Bound the DIMENSIONS too (see the GetFB2 entry points): desc comes over IPC. */
+    int ret = validate_fb_dims(desc->width, desc->height);
+    if (ret == 0) {
+        ret = validate_fb_size(desc->pitches[0], desc->height);
+    }
     if (ret != 0) {
         drmtap_set_error(ctx, "convert: rejecting geometry %ux%u stride=%u",
                          desc->width, desc->height, desc->pitches[0]);
@@ -2017,11 +2094,11 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
          * bound checked above keeps every per-row read inside the mapping. */
         uint32_t out_stride = desc->width * 4u;
         size_t out_size = (size_t)out_stride * desc->height;
-        ret = drmtap_ensure_buf(&ctx->deswizzle_buf, &ctx->deswizzle_buf_size,
-                                out_size);
+        void *out = NULL;
+        ret = drmtap_ensure_out(ctx, out_size, &out);
         if (ret == 0) {
             const uint8_t *src = mapped;
-            uint8_t *dst = ctx->deswizzle_buf;
+            uint8_t *dst = out;
             if (desc->pitches[0] == out_stride) {
                 memcpy(dst, src, out_size);
             } else {
@@ -2030,7 +2107,7 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                            src + (size_t)y * desc->pitches[0], out_stride);
                 }
             }
-            frame->data = ctx->deswizzle_buf;
+            frame->data = out;
             frame->stride = out_stride;
         }
     }
