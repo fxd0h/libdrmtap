@@ -37,8 +37,8 @@ entry point is additive and would not on its own have justified more than a patc
 ### Security
 
 - Framebuffer DIMENSIONS are now bounded at every entry point, not just
-  stride * height. validate_fb_size() never constrained width, yet every converted
-  output is sized width * height * 4 -- a product that can wrap size_t and hand a
+  `stride * height`. validate_fb_size() never constrained width, yet every converted
+  output is sized `width * height * 4` -- a product that can wrap size_t and hand a
   large write a small destination. Reachable with a width from the helper wire or
   an IPC-supplied descriptor. Each dimension is now bounded before anything
   multiplies it (so the product cannot wrap even where size_t is 32-bit) and the
@@ -47,10 +47,10 @@ entry point is additive and would not on its own have justified more than a patc
   library handles. Verified under ASan and UBSan against a real tiled scanout,
   with guard bytes either side of the destination.
 - The privileged-helper wire is now bounded on stride-covers-width, which the two
-  existing checks did not imply. validate_fb_size bounds stride * height and
+  existing checks did not imply. validate_fb_size bounds `stride * height` and
   validate_fb_dims bounds the dimensions, but a wire frame claiming
-  width * bpp > stride still reached the per-pixel CPU converters, which read
-  y * stride + width * bpp per row with no size argument, so the last rows ran off
+  `width * bpp > stride` still reached the per-pixel CPU converters, which read
+  `y * stride + width * bpp` per row with no size argument, so the last rows ran off
   the end of the receive buffer (a heap over-read). drmtap_convert_dmabuf already
   applied this check to its IPC descriptor; the two trust boundaries are bounded
   alike now.
@@ -73,7 +73,7 @@ entry point is additive and would not on its own have justified more than a patc
   getting that wrong returns part of the image as if it were the whole screen. On
   the measured machine the plane reports SRC 60x2170 onto a 60x2170 CRTC rect, so
   the four columns are provably not scanned out. A pitch test cannot substitute:
-  fb_width * bpp == pitches[0] holds for a 3840-wide downscaled framebuffer exactly
+  `fb_width * bpp == pitches[0]` holds for a 3840-wide downscaled framebuffer exactly
   as it does for the padded 64-wide one.
   It only ever SHRINKS, and only the width, and every refusal is a case where the
   framebuffer width is the right answer: a scaling plane (the whole fb is

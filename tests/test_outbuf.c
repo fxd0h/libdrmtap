@@ -77,8 +77,12 @@ static void test_one_byte_too_small_is_refused_untouched(void) {
     unsigned char mine[64];
     memset(mine, 0xAB, sizeof mine);
     TEST_ASSERT(drmtap_set_output_buffer(ctx, mine, sizeof mine) == 0);
-    void *out = (void *)0x1;
+    /* Pre-set with a valid address, not an integer cast, so the assertion below is
+     * about ensure_out leaving *out alone on refusal and not about a bogus pointer. */
+    void *sentinel = &ctx;
+    void *out = sentinel;
     TEST_ASSERT(drmtap_ensure_out(ctx, sizeof mine + 1, &out) == -ENOSPC);
+    TEST_ASSERT(out == sentinel);   /* untouched on refusal */
     for (size_t i = 0; i < sizeof mine; i++) {
         TEST_ASSERT(mine[i] == 0xAB);
     }
@@ -128,9 +132,11 @@ static void test_argument_checks(void) {
  * unlock a frame bigger than this library handles. */
 static void test_the_frame_cap_still_applies(void) {
     drmtap_ctx *ctx = bare_ctx();
-    /* Claim a length past the cap without allocating it -- ensure_out must refuse
-     * on the size alone, before it ever looks at the pointer. */
-    ctx->user_out = (void *)0xDEAD0000;
+    /* A REAL address with a length that lies about how much is behind it: ensure_out
+     * must refuse on the size alone and never dereference, so a valid pointer is
+     * enough and an integer cast would only muddy what is being asserted. */
+    unsigned char small[16];
+    ctx->user_out = small;
     ctx->user_out_len = DRMTAP_MAX_FB_BYTES * 4;
     void *out = NULL;
     TEST_ASSERT(drmtap_ensure_out(ctx, DRMTAP_MAX_FB_BYTES + 1, &out) == -EFBIG);
@@ -150,18 +156,18 @@ static void test_zero_size_is_rejected(void) {
  * a hostile or corrupt geometry could size a destination small and then have the
  * detile write the real, much larger frame into it. */
 static void test_dimension_bound_is_wrap_proof(void) {
-    TEST_ASSERT(validate_fb_dims(1920, 1080) == 0);
-    TEST_ASSERT(validate_fb_dims(7680, 4320) == 0);      /* 8K, the documented cap */
-    TEST_ASSERT(validate_fb_dims(0, 1080) == -EINVAL);
-    TEST_ASSERT(validate_fb_dims(1920, 0) == -EINVAL);
+    TEST_ASSERT(drmtap_validate_fb_dims(1920, 1080) == 0);
+    TEST_ASSERT(drmtap_validate_fb_dims(7680, 4320) == 0);      /* 8K, the documented cap */
+    TEST_ASSERT(drmtap_validate_fb_dims(0, 1080) == -EINVAL);
+    TEST_ASSERT(drmtap_validate_fb_dims(1920, 0) == -EINVAL);
     /* Over the per-dimension ceiling: refused before anything multiplies it. */
-    TEST_ASSERT(validate_fb_dims(DRMTAP_MAX_DIM + 1, 1) == -EFBIG);
-    TEST_ASSERT(validate_fb_dims(1, DRMTAP_MAX_DIM + 1) == -EFBIG);
+    TEST_ASSERT(drmtap_validate_fb_dims(DRMTAP_MAX_DIM + 1, 1) == -EFBIG);
+    TEST_ASSERT(drmtap_validate_fb_dims(1, DRMTAP_MAX_DIM + 1) == -EFBIG);
     /* The exact values that would wrap a 64-bit width*height*4. */
-    TEST_ASSERT(validate_fb_dims(0xFFFFFFFFu, 0xFFFFFFFFu) == -EFBIG);
-    TEST_ASSERT(validate_fb_dims(0x80000000u, 0x80000000u) == -EFBIG);
+    TEST_ASSERT(drmtap_validate_fb_dims(0xFFFFFFFFu, 0xFFFFFFFFu) == -EFBIG);
+    TEST_ASSERT(drmtap_validate_fb_dims(0x80000000u, 0x80000000u) == -EFBIG);
     /* In range per dimension, but too many pixels together. */
-    TEST_ASSERT(validate_fb_dims(DRMTAP_MAX_DIM, DRMTAP_MAX_DIM) == -EFBIG);
+    TEST_ASSERT(drmtap_validate_fb_dims(DRMTAP_MAX_DIM, DRMTAP_MAX_DIM) == -EFBIG);
 }
 
 int main(void) {

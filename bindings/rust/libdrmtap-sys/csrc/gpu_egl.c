@@ -1067,7 +1067,7 @@ static int egl_convert_impl(drmtap_ctx *ctx,
      * could wrap that product and give a large glReadPixels a small destination --
      * now more than a library-internal concern, since the destination can be the
      * caller's buffer (drmtap_set_output_buffer). */
-    int dim = validate_fb_dims(width, height);
+    int dim = drmtap_validate_fb_dims(width, height);
     if (dim != 0) {
         drmtap_set_error(ctx, "refusing %ux%u scanout: implausible geometry", width,
                          height);
@@ -1295,6 +1295,13 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     void *dst = NULL;
     ret = drmtap_ensure_out(ctx, rgba_size, &dst);
     if (ret != 0) {
+        /* ensure_out names the caller-buffer refusal itself; say something for the
+         * library-owned allocation failure too, or the caller gets a bare errno out
+         * of a detile with drmtap_error() still holding an older message. */
+        if (ret != -ENOSPC) {
+            drmtap_set_error(ctx, "cannot allocate %zu bytes for the %ux%u detile "
+                             "output: %s", rgba_size, width, height, strerror(-ret));
+        }
         goto cleanup;
     }
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, dst);
