@@ -5,6 +5,28 @@ semantic versioning. The C library, the meson project, the `libdrmtap-sys` crate
 the `libdrmtap` wrapper crate all share ONE version (since 0.5.0; before that the
 wrapper had its own 0.3.x line).
 
+## [0.5.1] - 2026-07-30
+
+A packaging release: no C code changed from 0.5.0. It exists so the two published
+crates carry the SAME number as the library, which 0.5.0 could not.
+
+0.5.0 shipped `libdrmtap-sys` while the `libdrmtap` wrapper was still on its own
+0.3.x track, and a published wrapper depending on `^0.4.7` cannot resolve to a 0.5.x
+`-sys` at all -- so a crates.io user of the wrapper would have kept a library with
+neither the scanout-width fix nor the dimension bounds, silently. The wrapper is on
+the shared version line now (0.3.4 -> 0.5.1), `tools/set-version.sh` stamps all six
+sites, and `tools/check-version.sh` VERIFIES the wrapper version instead of
+filtering it out of its scan -- that filter is what let this hide, since the one
+number that could be wrong was the one excluded from the check.
+
+Both crates are published at 0.5.1 together, so `libdrmtap 0.5.1` and
+`libdrmtap-sys 0.5.1` are the pair to use. `libdrmtap-sys` 0.5.0 remains on
+crates.io and is functionally identical; nothing needs to move off it except a
+wrapper user, who could never reach it in the first place.
+
+No effect on rustdesk, which dlopens `libdrmtap.so.0` and deliberately depends on
+neither crate.
+
 ## [0.5.0] - 2026-07-30
 
 A MINOR bump, not a patch, for one reason: the scanout-width fix below changes the
@@ -444,6 +466,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.1]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.1
 [0.5.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.0
 [0.4.15]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.15
 [0.4.14]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.14
