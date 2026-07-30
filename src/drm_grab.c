@@ -430,6 +430,84 @@ static int validate_fb_size(uint32_t stride, uint32_t height) {
     return 0;
 }
 
+/* Report the width the CRTC actually scans out, not the width of the framebuffer
+ * OBJECT. A driver may allocate the scanout fb wider than the mode to satisfy a
+ * pitch alignment: Apple's appletbdrm (the Touch Bar strip) drives a 60x2170 mode
+ * from a 64x2170 fb with a 256-byte pitch, and those four columns are padding that
+ * is never scanned out. Reporting the fb width hands the caller an image wider
+ * than the display it asked to capture. In rustdesk that read as "this display
+ * never matched its advertised geometry" -- the display list carries the mode --
+ * so every frame was rejected, the display was demoted to PipeWire, and the
+ * client sat on "waiting for image".
+ *
+ * This only ever SHRINKS, and only the width:
+ *  - An fb NARROWER than the mode means the CRTC is scaling a smaller buffer up
+ *    to its mode. That is a genuinely different image, not padding, so it stays
+ *    reported as it is and the caller can decide.
+ *  - A CRTC whose viewport does not start at the fb origin (crtc->x/y != 0, i.e.
+ *    several heads scanning out of one big framebuffer) needs an OFFSET crop too.
+ *    drmtap_dmabuf_desc has a frozen layout with no crop origin, so such a frame
+ *    is left whole; untested here, hence the one-time log rather than a guess.
+ *
+ * Buffer-size arithmetic must keep using fb2->width and fb2->pitches: the
+ * allocation is still the full padded framebuffer. Only the REPORTED geometry
+ * narrows, and the caller reads rows out of it at the unchanged stride.
+ */
+/* The decision alone, with no DRM fd, so it is unit-testable on any machine:
+ * the padded-scanout case needs hardware that pads (Apple's Touch Bar) to
+ * observe, and a rule this easy to get subtly wrong should not be reachable
+ * only through that one laptop. Reports through *why which branch was taken. */
+uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
+                                 uint32_t hdisplay, int crtc_x, int crtc_y,
+                                 drmtap_scanout_why *why) {
+    drmtap_scanout_why w = DRMTAP_SCANOUT_AS_IS;
+    uint32_t out = fb_width;
+    if (mode_valid && hdisplay > 0 && hdisplay < fb_width) {
+        if (crtc_x == 0 && crtc_y == 0) {
+            out = hdisplay;
+            w = DRMTAP_SCANOUT_NARROWED;
+        } else {
+            w = DRMTAP_SCANOUT_OFFSET_UNSUPPORTED;
+        }
+    }
+    if (why) {
+        *why = w;
+    }
+    return out;
+}
+
+static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width) {
+    if (ctx->crtc_id == 0) {
+        return fb_width;
+    }
+    drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, ctx->crtc_id);
+    if (!crtc) {
+        return fb_width;
+    }
+    drmtap_scanout_why why = DRMTAP_SCANOUT_AS_IS;
+    uint32_t out = drmtap_scanout_width_of(fb_width, crtc->mode_valid,
+                                           crtc->mode.hdisplay, crtc->x,
+                                           crtc->y, &why);
+    if (why != DRMTAP_SCANOUT_AS_IS && !ctx->logged_scanout_crop) {
+        ctx->logged_scanout_crop = 1;
+        if (why == DRMTAP_SCANOUT_NARROWED) {
+            drmtap_debug_log(ctx,
+                "crtc %u scans out %u of the %u-pixel-wide scanout fb "
+                "(pitch padding); reporting %u",
+                ctx->crtc_id, crtc->mode.hdisplay, fb_width, out);
+        } else {
+            drmtap_debug_log(ctx,
+                "crtc %u viewport is %ux%u at +%d+%d inside a %u-pixel-wide "
+                "scanout fb; reporting the whole fb (the frame descriptor has "
+                "no crop origin)",
+                ctx->crtc_id, crtc->mode.hdisplay, crtc->mode.vdisplay,
+                crtc->x, crtc->y, fb_width);
+        }
+    }
+    drmModeFreeCrtc(crtc);
+    return out;
+}
+
 // Internal capture that populates frame_info
 // If do_mmap is true, also maps the pixel data to frame->data
 static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
@@ -577,7 +655,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
         /* Fill frame info from helper metadata */
         memset(frame, 0, sizeof(*frame));
-        frame->width = hresult.wire.width;
+        /* Narrow to what the CRTC scans out, exactly as the direct path does.
+         * The helper reports the framebuffer, and the padding is the driver's,
+         * so it is present on this path too. */
+        frame->width = drmtap_scanout_width(ctx, hresult.wire.width);
         frame->height = hresult.wire.height;
         frame->stride = hresult.wire.stride;
         frame->format = hresult.wire.format;
@@ -729,7 +810,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
     /* Fill frame info */
     memset(frame, 0, sizeof(*frame));
-    frame->width = fb2->width;
+    frame->width = drmtap_scanout_width(ctx, fb2->width);
     frame->height = fb2->height;
     frame->stride = fb2->pitches[0];
     frame->format = fb2->pixel_format;
@@ -1624,7 +1705,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         if (drmtap_gpu_egl_available(ctx)) {
             frame->data = NULL;
             frame->dma_buf_fd = prime_fd;
-            frame->width = fb2->width;
+            frame->width = drmtap_scanout_width(ctx, fb2->width);
             frame->height = fb2->height;
             frame->stride = fb2->pitches[0];
             frame->format = fb2->pixel_format;
@@ -1676,7 +1757,11 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     ctx->fast_slots[slot].prime_fd = prime_fd;
     ctx->fast_slots[slot].mmap_ptr = mapped;
     ctx->fast_slots[slot].mmap_size = size;
-    ctx->fast_slots[slot].width = fb2->width;
+    /* Cache the SCANNED-OUT width, so every later cache hit replays the narrowed
+     * geometry without paying another drmModeGetCrtc on the hot path. The mmap
+     * size below deliberately stays on fb2->pitches[0] * fb2->height: the mapping
+     * is of the whole padded framebuffer. */
+    ctx->fast_slots[slot].width = drmtap_scanout_width(ctx, fb2->width);
     ctx->fast_slots[slot].height = fb2->height;
     ctx->fast_slots[slot].stride = fb2->pitches[0];
     ctx->fast_slots[slot].format = fb2->pixel_format;

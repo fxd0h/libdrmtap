@@ -323,6 +323,11 @@ test_hdr = executable('test_hdr',
     dependencies: [libdrmtap_test_dep, m_dep],
     include_directories: lib_include,
 )
+test_scanout = executable('test_scanout',
+    'tests/test_scanout.c',
+    dependencies: [libdrmtap_test_dep, libdrm_dep],
+    include_directories: lib_include,
+)
 test_convert = executable('test_convert',
     'tests/test_convert.c',
     dependencies: [libdrmtap_test_dep],
@@ -338,6 +343,7 @@ test_wire = executable('test_wire',
 # Unit tests (no hardware needed)
 test('formats', test_formats, suite: 'unit')
 test('deswizzle', test_deswizzle, suite: 'unit')
+test('scanout', test_scanout, suite: 'unit')
 test('helper', test_helper, suite: 'unit')
 test('hdr', test_hdr, suite: 'unit')
 test('wire', test_wire, suite: 'unit')
