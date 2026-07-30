@@ -80,6 +80,11 @@ struct drmtap_ctx {
         void    *mmap_ptr;      /* persistent mmap */
         size_t   mmap_size;     /* mapped region size */
         uint32_t width, height, stride;
+        /* The framebuffer OBJECT width, kept alongside `width` (which is the
+         * SCANNED-OUT width and may be narrower on a padded scanout). Transfer and
+         * allocation geometry must use this one: a virtio transfer box describes the
+         * buffer being made coherent, not the visible sub-region of it. */
+        uint32_t fb_width;
         uint32_t format;
         uint64_t modifier;
         /* Full plane layout captured at cache-miss (GetFB2) time. Restaged
@@ -125,6 +130,20 @@ struct drmtap_ctx {
      * atomic commit is ever made, and no other client is affected. Sticky so the
      * cap is requested once rather than per frame. */
     int      atomic_cap_tried;
+
+    /* Memoized scanout-width decision for a PADDED scanout. Reading the plane rect
+     * costs a plane-resource sweep plus one drmModeGetProperty per property, and the
+     * answer only changes when the CRTC, the mode, the framebuffer width or the
+     * layout changes -- not per page flip. Keyed on all four so a modeset invalidates
+     * it (a mode change with an identical fb width and modifier would otherwise be
+     * served the stale answer). The cheap drmModeGetCrtc gate still runs per grab: it
+     * is the ioctl the code always did, and it supplies hdisplay for this key. */
+    uint32_t sw_key_crtc;
+    uint32_t sw_key_hdisplay;
+    uint32_t sw_key_fb_width;
+    uint64_t sw_key_modifier;
+    uint32_t sw_cached_width;
+    int      sw_cached;
 
     /* Caller-supplied destination for converted pixels (drmtap_set_output_buffer).
      * NULL means "use the ctx-owned deswizzle_buf". Set once by the caller, who
@@ -279,13 +298,13 @@ int drmtap_ensure_out(drmtap_ctx *ctx, size_t size, void **out);
  * size_t and hand a large write a small destination. Returns 0, -EINVAL (a zero
  * dimension) or -EFBIG (a dimension over DRMTAP_MAX_DIM, or more than
  * DRMTAP_MAX_FB_BYTES worth of pixels). (drm_grab.c) */
-int validate_fb_dims(uint32_t width, uint32_t height);
+int drmtap_validate_fb_dims(uint32_t width, uint32_t height);
 
 /* GPU backend: EGL/GLES2 universal detiling (gpu_egl.c).
  * On success *out_data points at the resolved conversion destination: the caller's
- * output buffer when drmtap_set_output_buffer() set one, otherwise
- * ctx->deswizzle_buf (ctx-owned, grow-once,
- * valid until the next convert or drmtap_close) — which the caller must NOT free. fb_id keys the import-once EGLImage cache (0 = no caching); for an
+ * output buffer when drmtap_set_output_buffer() set one, otherwise ctx->deswizzle_buf
+ * (ctx-owned, grow-once, valid until the next convert or drmtap_close).
+ * The caller must NOT free it. fb_id keys the import-once EGLImage cache (0 = no caching); for an
  * fb_id already cached with matching geometry dma_buf_fd may be -1. */
 int drmtap_gpu_egl_available(drmtap_ctx *ctx);
 int drmtap_gpu_egl_convert(drmtap_ctx *ctx,

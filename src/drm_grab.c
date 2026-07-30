@@ -299,13 +299,19 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
     }
 
     drmModeFreePlaneResources(planes);
-
-    /* Direct (no-helper) path: read the connector HDR metadata for this CRTC so
-     * the conversion path can tone-map. In helper mode this comes over the wire
-     * instead (drmtap_helper_grab sets ctx->cur_hdr_eotf). */
-    read_hdr_metadata_direct(ctx, ctx->crtc_id);
-
     return result;
+}
+
+/* The connector HDR metadata for this CRTC, so the conversion path can tone-map.
+ * Used to live at the end of find_primary_plane, which made a plane LOOKUP rewrite
+ * ctx->cur_hdr_eotf as a side effect. That was invisible until the scanout-width
+ * decision started looking up the plane too: a pure geometry query then clobbered
+ * the HDR state, and on the helper path (where these values arrive over the wire,
+ * see drmtap_helper_grab) only the order of two assignments kept the wire values
+ * from being replaced by a direct read that an unprivileged process cannot even
+ * make. Called explicitly by the paths that want it now. */
+static void read_hdr_for_current_crtc(drmtap_ctx *ctx) {
+    read_hdr_metadata_direct(ctx, ctx->crtc_id);
 }
 
 /* ========================================================================= */
@@ -357,7 +363,7 @@ int drmtap_ensure_buf(void **buf, size_t *cap, size_t size) {
  * because the helper wire has to apply the same stride-covers-width bound. */
 static uint32_t format_min_bpp(uint32_t fourcc);
 
-int validate_fb_dims(uint32_t width, uint32_t height) {
+int drmtap_validate_fb_dims(uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) {
         return -EINVAL;
     }
@@ -666,6 +672,15 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
         return fb_width;
     }
 
+    /* Serve a memoized answer rather than re-reading the plane rect on every frame of
+     * a padded scanout: the decision only changes when this key changes, and the read
+     * costs a plane sweep plus a drmModeGetProperty per property. */
+    if (ctx->sw_cached && ctx->sw_key_crtc == ctx->crtc_id &&
+        ctx->sw_key_hdisplay == hdisplay && ctx->sw_key_fb_width == fb_width &&
+        ctx->sw_key_modifier == modifier) {
+        return ctx->sw_cached_width;
+    }
+
     /* LINEAR and INVALID (unknown layout, handled downstream as linear) are the
      * layouts whose only width-dependent consumer is the OUTPUT: rows are addressed
      * through the stride, so narrowing the reported width is safe. Anything else is a
@@ -720,6 +735,13 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
             break;
         }
     }
+
+    ctx->sw_key_crtc = ctx->crtc_id;
+    ctx->sw_key_hdisplay = hdisplay;
+    ctx->sw_key_fb_width = fb_width;
+    ctx->sw_key_modifier = modifier;
+    ctx->sw_cached_width = out;
+    ctx->sw_cached = 1;
     return out;
 }
 
@@ -739,6 +761,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
     /* Step 1: Find the primary plane */
     uint32_t plane_id = find_primary_plane(ctx);
+    read_hdr_for_current_crtc(ctx);
     if (plane_id == 0) {
         drmtap_set_error(ctx, "No active plane found for capture");
         return -ENODEV;
@@ -772,7 +795,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
 
     /* Bound the DIMENSIONS too, not just stride*height: width is unconstrained by
      * validate_fb_size, and every converted output is sized width*height*4. */
-    ret = validate_fb_dims(fb2->width, fb2->height);
+    ret = drmtap_validate_fb_dims(fb2->width, fb2->height);
     if (ret == 0) {
         ret = validate_fb_size(fb2->pitches[0], fb2->height);
     }
@@ -892,10 +915,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         /* The helper validates its own geometry, but it sends it over the wire —
          * re-check before we mmap/size anything from those values. BOTH checks are
          * needed: validate_fb_size bounds stride*height (what we mmap/receive) and
-         * validate_fb_dims bounds width, which the first one does not constrain at
+         * drmtap_validate_fb_dims bounds width, which the first one does not constrain at
          * all. An unbounded width reaches the conversion paths, where every output
          * is sized width*height*4 and that product can wrap. */
-        ret = validate_fb_dims(frame->width, frame->height);
+        ret = drmtap_validate_fb_dims(frame->width, frame->height);
         if (ret == 0) {
             ret = validate_fb_size(frame->stride, frame->height);
         }
@@ -1219,7 +1242,17 @@ static int reduce_linear_to_xrgb8888(drmtap_ctx *ctx, void *data,
     size_t out_size = (size_t)frame->width * frame->height * 4u;
     void *out = NULL;
     int b = drmtap_ensure_out(ctx, out_size, &out);
-    if (b != 0) return b;
+    if (b != 0) {
+        /* Name it here too. ensure_out only sets a message for the caller-buffer
+         * refusal; an allocation failure for the library-owned buffer would otherwise
+         * return a bare errno and leave drmtap_error() reporting something older. */
+        if (b != -ENOSPC) {
+            drmtap_set_error(ctx, "cannot allocate %zu bytes to reduce a %ux%u frame "
+                             "to XRGB8888: %s", out_size, frame->width, frame->height,
+                             strerror(-b));
+        }
+        return b;
+    }
     uint32_t dst_stride = frame->width * 4u;
     int hdr = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ);
     int ret;
@@ -1712,6 +1745,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     /* Step 1: Find plane on first call only */
     if (!ctx->fast_initialized) {
         ctx->fast_plane_id = find_primary_plane(ctx);
+        read_hdr_for_current_crtc(ctx);
         if (ctx->fast_plane_id == 0) {
             drmtap_set_error(ctx, "No active plane found for capture");
             return -ENODEV;
@@ -1750,7 +1784,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 if (is_virtio_gpu(ctx)) {
                     ret = virtio_transfer_from_host(ctx,
                             ctx->fast_slots[i].gem_handle,
-                            ctx->fast_slots[i].width,
+                            ctx->fast_slots[i].fb_width,
                             ctx->fast_slots[i].height);
                     if (ret < 0) return ret;
                 } else {
@@ -1795,7 +1829,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
 
         if (is_virtio_gpu(ctx)) {
             ret = virtio_transfer_from_host(ctx, ctx->fast_slots[slot].gem_handle,
-                                             ctx->fast_slots[slot].width,
+                                             ctx->fast_slots[slot].fb_width,
                                              ctx->fast_slots[slot].height);
             if (ret < 0) {
                 drmtap_debug_log(ctx, "fast2: cached transfer failed: %d", ret);
@@ -1878,7 +1912,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
 
     /* Bound the DIMENSIONS too, not just stride*height: width is unconstrained by
      * validate_fb_size, and every converted output is sized width*height*4. */
-    ret = validate_fb_dims(fb2->width, fb2->height);
+    ret = drmtap_validate_fb_dims(fb2->width, fb2->height);
     if (ret == 0) {
         ret = validate_fb_size(fb2->pitches[0], fb2->height);
     }
@@ -2023,9 +2057,12 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     ctx->fast_slots[slot].mmap_ptr = mapped;
     ctx->fast_slots[slot].mmap_size = size;
     /* Cache the SCANNED-OUT width, so every later cache hit replays the narrowed
-     * geometry without paying another drmModeGetCrtc on the hot path. The mmap
-     * size below deliberately stays on fb2->pitches[0] * fb2->height: the mapping
-     * is of the whole padded framebuffer. */
+     * geometry without paying another plane query on the hot path, and keep the
+     * framebuffer width beside it for anything that describes the BUFFER rather than
+     * the visible image (a virtio transfer box covers the buffer being made coherent,
+     * not the visible sub-region of it). The mmap size below deliberately stays on
+     * fb2->pitches[0] * fb2->height: the mapping is of the whole padded framebuffer. */
+    ctx->fast_slots[slot].fb_width = fb2->width;
     ctx->fast_slots[slot].width =
         drmtap_scanout_width(ctx, fb2->width, fb2_effective_modifier(fb2));
     ctx->fast_slots[slot].height = fb2->height;
@@ -2111,7 +2148,7 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
         return -EINVAL;
     }
     /* Bound the DIMENSIONS too (see the GetFB2 entry points): desc comes over IPC. */
-    int ret = validate_fb_dims(desc->width, desc->height);
+    int ret = drmtap_validate_fb_dims(desc->width, desc->height);
     if (ret == 0) {
         ret = validate_fb_size(desc->pitches[0], desc->height);
     }
