@@ -4,7 +4,15 @@ Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the `libdrmtap-sys` crate and the meson
 project share one version; the `libdrmtap` wrapper crate is versioned separately.
 
-## [Unreleased]
+## [0.5.0] - 2026-07-30
+
+A MINOR bump, not a patch, for one reason: the scanout-width fix below changes the
+SEMANTICS of an existing call. Any consumer reading drmtap_frame_info.width can now
+get a different number for the same hardware. Nothing was removed and the soname is
+unchanged (still libdrmtap.so.0), so a dlopen-by-soname consumer keeps loading it --
+which is exactly why the version has to say so: a consumer built against 0.4.x
+semantics would otherwise pick up different widths with no signal at all. The new
+entry point is additive and would not on its own have justified more than a patch.
 
 ### Added
 
@@ -426,6 +434,7 @@ project share one version; the `libdrmtap` wrapper crate is versioned separately
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.0
 [0.4.15]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.15
 [0.4.14]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.14
 [0.4.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.13
