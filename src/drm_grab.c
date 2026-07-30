@@ -1345,6 +1345,18 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
             drmtap_debug_log(ctx, "auto-process: EGL detiled to linear XRGB8888");
             return 0;
         }
+        /* An output buffer too small for the frame is a CALLER CONFIGURATION error,
+         * not an EGL failure, and must not fall through. The CPU deswizzle below
+         * needs stride*height, which is never LESS than the width*height*4 the detile
+         * just refused, so it can only fail again -- and it would replace the
+         * actionable -ENOSPC (whose message names the exact size required) with
+         * whatever the CPU path reports. On a scanout with no CPU mapping, which is
+         * precisely the hardware that depends on this detile, that is -ENOTSUP and a
+         * message about a missing mapping: the caller is told its GPU is unsupported
+         * when in truth its buffer was a few bytes short. */
+        if (ret == -ENOSPC) {
+            return ret;
+        }
         drmtap_debug_log(ctx, "auto-process: EGL failed (%d), trying CPU", ret);
     }
 #endif
