@@ -30,8 +30,8 @@ extern "C" {
  * project version; the unit tests cross-check all three. The higher-level
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
-#define DRMTAP_VERSION_MINOR 4
-#define DRMTAP_VERSION_PATCH 15
+#define DRMTAP_VERSION_MINOR 5
+#define DRMTAP_VERSION_PATCH 0
 
 /**
  * @brief Get the library version as a packed integer.
