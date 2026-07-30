@@ -19,7 +19,7 @@
 **Language:** C11  
 **License:** MIT  
 **Tests:** unit (no hardware) + integration via VKMS (Virtual KMS) or a real GPU  
-**Version:** C library `0.5.1` · Rust crates `libdrmtap-sys 0.5.1` / `libdrmtap 0.5.1` (one shared version line since 0.5.1)  
+**Version:** ONE shared line across the C library, meson, `libdrmtap-sys` and `libdrmtap` (since 0.5.1). The canonical number lives in `include/drmtap.h` (`DRMTAP_VERSION_*`); `tools/check-version.sh` verifies every site. Deliberately not repeated here, because a copy of it goes stale on every release  
 
 ---
 

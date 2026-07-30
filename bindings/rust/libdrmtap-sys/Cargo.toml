@@ -1,6 +1,6 @@
 [package]
 name = "libdrmtap-sys"
-version = "0.5.1"
+version = "0.5.2"
 links = "drmtap"
 edition = "2021"
 authors = ["Mariano Abad <weimaraner@gmail.com>"]

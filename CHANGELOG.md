@@ -5,6 +5,24 @@ semantic versioning. The C library, the meson project, the `libdrmtap-sys` crate
 the `libdrmtap` wrapper crate all share ONE version (since 0.5.0; before that the
 wrapper had its own 0.3.x line).
 
+## [0.5.2] - 2026-07-30
+
+Documentation only; no code changed. Published so the crates.io pages carry the
+right text: the `libdrmtap` crate ships its README, and 0.5.1 went out with that
+README still saying it pulls in `libdrmtap-sys` 0.4.14.
+
+The version references in prose are now written so they stop rotting. Copy-pasteable
+dependency snippets use a `"0.5"` caret range, which stays valid across every patch;
+sentences that did not need a number no longer carry one (the crates.io badge is
+dynamic and reports it); dated status tables say `0.5.x`; and AGENTS.md points at
+`include/drmtap.h` as the canonical number instead of keeping a copy that goes stale
+on every release. `tools/check-version.sh` still verifies the six code sites exactly
+-- only the prose stopped duplicating them.
+
+Also drops the CodeRabbit reviews badge: its shields.io endpoint answers "provider or
+repo not found" for every repository, including CodeRabbit's own, so it rendered an
+error to every visitor.
+
 ## [0.5.1] - 2026-07-30
 
 A packaging release: no C code changed from 0.5.0. It exists so the two published
@@ -466,6 +484,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
 [0.5.1]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.1
 [0.5.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.0
 [0.4.15]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.15
