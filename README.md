@@ -94,13 +94,31 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > ⚠️ **Testing status**: Capture pipeline verified with the V3 zero-copy path on
 > `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`, dual 3840x2160,
 > EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64, Wayland).
-> The AMD (`amdgpu`) backend is verified on real hardware (RX Vega 64, gfx9, via the EGL detile path — see [#26](https://github.com/fxd0h/libdrmtap/issues/26)).
+> The AMD (`amdgpu`) backend is verified on real hardware on two generations, by
+> two different people: **RX Vega 64 (gfx9), confirmed by an outside tester** (via
+> the EGL detile path — see [#26](https://github.com/fxd0h/libdrmtap/issues/26)),
+> and **RX560 (Polaris/gfx8), verified here** (2880x1800 `eDP-1`, tiled `XR30`
+> scanout, EGL detile).
 > **Multi-GPU render-node selection is verified on the Jetson Orin's two DRM
 > devices** (`tegra`/renderD128 with no connectors + `nvidia-drm`/renderD129
 > driving the display): the converter now binds renderD129, the node that
-> exported the scanout. The multi-card display *merge* (one monitor per GPU on two
-> display-driving GPUs) is implemented but not yet verified end-to-end for lack of
-> such hardware.
+> exported the scanout.
+> **Multi-card, multi-VENDOR hosts with more than one display-driving GPU are now
+> verified** on an Apple T2 MacBook Pro: three DRM cards — `appletbdrm` (the Touch
+> Bar strip), `i915` (no connected output) and `amdgpu` (the panel) — where two
+> different vendors are each scanning out a display at once, and each was captured
+> from its own card. That machine also covers two cases nothing else here does:
+>
+> - **A display-only card with NO render node.** `appletbdrm` exposes an active
+>   CRTC and no `renderD*`, so a consumer cannot be told which GPU exported the
+>   scanout and must not guess: importing it on the wrong device can corrupt the
+>   image silently. Such a frame takes the CPU path instead.
+> - **A scanout framebuffer PADDED wider than the mode.** That card drives a
+>   60x2170 mode out of a 64x2170 framebuffer (256-byte pitch), and those four
+>   columns are alignment padding that is never scanned out. A grab reports the
+>   width the CRTC scans out, not the framebuffer's, so a consumer that enumerated
+>   the mode is not handed an image wider than the display it asked for. Worth
+>   knowing if you compare a frame's geometry against a display list.
 > If you test on real hardware, please [report results](https://github.com/fxd0h/libdrmtap/issues).
 >
 > ℹ️ **virgl note**: Plain `virtio-gpu` is captured with a direct linear map. A

@@ -33,6 +33,10 @@
  * ~126 MB). */
 #define DRMTAP_MAX_FB_BYTES ((size_t)7680 * 4320 * 4)
 
+/* Per-dimension ceiling, used to make width*height wrap-proof before the multiply.
+ * Far above any real scanout; the byte cap above is what actually binds. */
+#define DRMTAP_MAX_DIM 32768u
+
 struct drmtap_ctx {
     /* DRM device */
     int drm_fd;
@@ -106,6 +110,22 @@ struct drmtap_ctx {
      * reported as pages of "CACHE MISS ... cold start" with the real reason only
      * in drmtap_error(), it read as a broken cache (issue #36). */
     int      fast_no_privilege;
+
+    /* Set once the CRTC mode and the scanout framebuffer have been found to
+     * disagree on width, so the reason a frame is narrower than the fb (or is
+     * deliberately NOT narrowed) is stated once per context instead of per
+     * frame. See drmtap_scanout_width() in drm_grab.c. */
+    int      logged_scanout_crop;
+
+    /* Caller-supplied destination for converted pixels (drmtap_set_output_buffer).
+     * NULL means "use the ctx-owned deswizzle_buf". Set once by the caller, who
+     * owns the memory and must keep it alive; libdrmtap never frees or reallocates
+     * it, and refuses a frame that would not fit rather than writing short. Every
+     * path that produces converted pixels resolves its destination through
+     * drmtap_ensure_out(), so the EGL detile and the CPU conversions behave
+     * identically -- a caller must not have to know which one ran. */
+    void   *user_out;
+    size_t  user_out_len;
 
     /* Deswizzle shadow buffer (for read-only mmap'd DMA-BUFs).
      * Grow-once and reused across grabs; capped at DRMTAP_MAX_FB_BYTES;
@@ -233,6 +253,25 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
  * 0, -EINVAL (zero size), -EFBIG (over the cap) or -ENOMEM. (drm_grab.c) */
 int drmtap_ensure_buf(void **buf, size_t *cap, size_t size);
 
+/* Resolve where this frame's converted pixels must be written: the caller's
+ * buffer when drmtap_set_output_buffer() set one (checked against `size`, so a
+ * geometry change that no longer fits fails the grab instead of writing short or
+ * overflowing), otherwise the ctx-owned grow-once deswizzle buffer. Returns 0 and
+ * sets *out, or -ENOSPC / whatever drmtap_ensure_buf returns. Every producer of
+ * converted pixels must go through this and must NOT reference
+ * ctx->deswizzle_buf directly, or the caller's buffer would be honoured on some
+ * paths and silently ignored on others. (drm_grab.c) */
+int drmtap_ensure_out(drmtap_ctx *ctx, size_t size, void **out);
+
+/* Reject framebuffer DIMENSIONS that cannot be a real scanout, before anything
+ * multiplies them. validate_fb_size() bounds stride*height, which does NOT bound
+ * width: a wire or IPC peer that sends a huge width with a small stride passes it,
+ * and every converted output is sized width*height*4 -- a product that can wrap
+ * size_t and hand a large write a small destination. Returns 0, -EINVAL (a zero
+ * dimension) or -EFBIG (a dimension over DRMTAP_MAX_DIM, or more than
+ * DRMTAP_MAX_FB_BYTES worth of pixels). (drm_grab.c) */
+int validate_fb_dims(uint32_t width, uint32_t height);
+
 /* GPU backend: EGL/GLES2 universal detiling (gpu_egl.c).
  * On success *out_data points at ctx->deswizzle_buf (ctx-owned, grow-once,
  * valid until the next convert or drmtap_close) — the caller must NOT free
@@ -269,5 +308,20 @@ int drmtap_convert_rgb16(const void *src, void *dst,
 int drmtap_convert_rgb16f(const void *src, void *dst,
                           uint32_t width, uint32_t height,
                           uint32_t src_stride, uint32_t dst_stride, int bgr);
+
+/* Which branch drmtap_scanout_width_of() took, so the caller can log the reason
+ * once and a test can assert the branch and not just the number. */
+typedef enum {
+    DRMTAP_SCANOUT_AS_IS = 0,          /* fb reported unchanged */
+    DRMTAP_SCANOUT_NARROWED,           /* padded fb narrowed to the mode width */
+    DRMTAP_SCANOUT_OFFSET_UNSUPPORTED, /* CRTC viewport is offset in a bigger fb */
+} drmtap_scanout_why;
+
+/* Decide the width a CRTC actually scans out of a framebuffer that may be wider
+ * than its mode. Pure (no DRM fd) so it is testable without the padding hardware.
+ * See the comment on the definition in drm_grab.c for the rules. */
+uint32_t drmtap_scanout_width_of(uint32_t fb_width, int mode_valid,
+                                 uint32_t hdisplay, int crtc_x, int crtc_y,
+                                 drmtap_scanout_why *why);
 
 #endif /* DRMTAP_INTERNAL_H */

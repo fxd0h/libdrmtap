@@ -158,6 +158,24 @@ extern "C" {
     pub fn drmtap_grab_mapped(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info) -> c_int;
     pub fn drmtap_frame_release(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info);
 
+    /// Point the conversion paths at a caller-owned buffer instead of a
+    /// library-owned one, so a consumer that must end up with the pixels in its own
+    /// memory does not copy the frame.
+    ///
+    /// `dst` must stay valid for as long as it is set AND for as long as any frame
+    /// pointing into it is held; libdrmtap never frees or reallocates it. Pass a
+    /// null `dst` (with any `len`) to go back to the library buffer. A frame needing
+    /// more than `len` bytes is refused with `-ENOSPC` and `dst` is left untouched,
+    /// so a short frame can never be mistaken for a complete one. Size `dst` from a
+    /// real frame's `stride * height`, not `width * height * 4`: the CPU deswizzle
+    /// keeps the source stride, which on a padded scanout is wider than the visible
+    /// width.
+    pub fn drmtap_set_output_buffer(
+        ctx: *mut drmtap_ctx,
+        dst: *mut c_void,
+        len: usize,
+    ) -> c_int;
+
     // Cursor
     pub fn drmtap_get_cursor(ctx: *mut drmtap_ctx, cursor: *mut drmtap_cursor_info) -> c_int;
     pub fn drmtap_cursor_release(ctx: *mut drmtap_ctx, cursor: *mut drmtap_cursor_info);
