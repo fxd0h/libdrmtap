@@ -50,7 +50,7 @@ int main() {
 
 ```toml
 [dependencies]
-libdrmtap = "0.3"
+libdrmtap = "0.5"
 ```
 
 > This pulls in `libdrmtap-sys`, which embeds and statically compiles the
@@ -223,12 +223,15 @@ sudo ./build/vnc_server
 
 libdrmtap is being upstreamed into [RustDesk](https://github.com/rustdesk/rustdesk)
 via [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420).
-The integration adds a `drm` backend to `scrap` that depends on the
-[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) crate, which
-embeds and statically compiles the C sources (and the privilege helper) — so
-there is no system `libdrmtap` install and no dynamic `libdrmtap.so` linkage.
+The integration adds a `drm` backend to `scrap` that **dlopens** `libdrmtap.so.0`
+at runtime: it does not link libdrmtap at build time and does not depend on the
+[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) crate, whose `build.rs`
+would statically compile the whole C tree and a privileged helper. Loading the
+shared object by soname is what lets a missing or too-old `.so` degrade to the
+existing PipeWire path instead of breaking the build.
 
-A self-contained example of the same crate-based backend lives in
+A self-contained example of the crate-based backend, which does link
+`libdrmtap-sys` statically, lives in
 [`contrib/integrations/rustdesk/`](contrib/integrations/rustdesk/README.md).
 **Tested and verified** on Ubuntu 24.04 with `cargo build` (zero errors).
 

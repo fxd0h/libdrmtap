@@ -228,7 +228,9 @@ From reading all these issues, the library MUST:
 - [x] Detect `handles[0] == 0` and activate helper automatically — done (`drm_grab.c` falls back to the privileged helper on `handles[0] == 0` / `EACCES`)
 - [ ] Handle non-zero offsets in mmap (ARM SoCs)
 - [ ] Have fallback when VAAPI reports "not implemented"
-- [ ] Try multiple `/dev/dri/cardN` if the first has no active planes
+- [x] Try multiple `/dev/dri/cardN` if the first has no active planes — done (`drmtap.c` scans
+      `card0..card15` and keeps the device driving the MOST active CRTCs, falling back to any device with
+      KMS resources; `drmtap_list_devices()` reaches the others)
 - [ ] Read `panel orientation` property from connector
 - [ ] Define minimum kernel (5.6+) and add `#ifndef` guards
 - [x] Use MIT/BSD license (not GPL) — done (libdrmtap is MIT)

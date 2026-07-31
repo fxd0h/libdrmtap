@@ -141,7 +141,8 @@ igt_runner --device /dev/dri/card1 tests/kms_*
 
 #### Level 3: Real hardware testing
 - Intel `i915`/`xe` (Meteor Lake) → EGL detile path — ✅ verified (dual 4K, CCS)
-- AMD `amdgpu` → EGL detile / CPU fallback — implemented, **not yet hardware-verified**
+- AMD `amdgpu` → EGL detile path — ✅ verified on hardware (RX Vega 64, gfx9); the AMD CPU-deswizzle
+  fallback is what remains unexercised on hardware
 - VM with virtio-gpu → direct linear map + V3 zero-copy — ✅ verified
 - Nvidia incl. Tegra/Jetson → EGL detile path — ✅ verified (Orin Nano, aarch64)
 
