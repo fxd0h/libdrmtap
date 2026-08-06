@@ -1116,9 +1116,11 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             }
         }
 
-        /* Standard DMA-BUF mmap path (non-virtio or virtio fallback) */
+        /* Standard DMA-BUF mmap path (non-virtio or virtio fallback).
+         * No SYNC_START here: the mapping itself is not CPU access, and the
+         * only START that may be issued is the recorded one below, which
+         * release matches with a SYNC_END. */
         if (mapped == MAP_FAILED) {
-            dmabuf_sync_start(prime_fd);
             mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
                           prime_fd, fb2->offsets[0]);
         }
@@ -1153,7 +1155,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         } else {
             /* Invalidate CPU caches with SYNC_START and remember it succeeded so
              * release issues the matching SYNC_END (and only then). Crucial for
-             * virtio_gpu where the transfer arrives in system RAM asynchronously. */
+             * virtio_gpu where the transfer arrives in system RAM asynchronously.
+             * This is the ONLY START on this path, so START and END stay 1:1 per
+             * frame, including when the mmap above failed and EGL took over. */
             priv->sync_started = (dmabuf_sync_start(prime_fd) == 0);
 
             priv->mapped = mapped;
