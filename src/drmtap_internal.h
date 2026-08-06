@@ -368,4 +368,9 @@ uint32_t drmtap_scanout_width_of(uint32_t fb_width,
                                  int layout_is_linear,
                                  drmtap_scanout_why *why);
 
+/* Kernel spelling of a DRM connector type ("eDP", "HDMI-A", "LVDS", ...), the
+ * prefix of drmtap_display.name. "Unknown" for a type this build does not know.
+ * Pure, so the whole table is testable without the matching hardware. */
+const char *drmtap_connector_type_name(uint32_t connector_type);
+
 #endif /* DRMTAP_INTERNAL_H */

@@ -24,6 +24,53 @@
 
 #include "drmtap_internal.h"
 
+/* The kernel's own connector-type strings, from drm_connector_enum_list in
+ * drivers/gpu/drm/drm_connector.c. They are what /sys/class/drm/card*-<name>
+ * is built from, so a caller can correlate a display with sysfs, and they are
+ * the prefix that makes the name unique: connector_type_id counts PER TYPE, so
+ * two types sharing one prefix would also share their id space and produce two
+ * displays with the same name (an LVDS panel and a DSI panel both "Unknown-1").
+ *
+ * libdrm exposes the same table as drmModeGetConnectorTypeName(), but only
+ * since 2.4.112 and our floor is 2.4.95, hence the local copy. SPI and USB are
+ * the newest macros and may be absent from older <drm_mode.h>. */
+static const char *const connector_type_names[] = {
+    [DRM_MODE_CONNECTOR_Unknown]     = "Unknown",
+    [DRM_MODE_CONNECTOR_VGA]         = "VGA",
+    [DRM_MODE_CONNECTOR_DVII]        = "DVI-I",
+    [DRM_MODE_CONNECTOR_DVID]        = "DVI-D",
+    [DRM_MODE_CONNECTOR_DVIA]        = "DVI-A",
+    [DRM_MODE_CONNECTOR_Composite]   = "Composite",
+    [DRM_MODE_CONNECTOR_SVIDEO]      = "SVIDEO",
+    [DRM_MODE_CONNECTOR_LVDS]        = "LVDS",
+    [DRM_MODE_CONNECTOR_Component]   = "Component",
+    [DRM_MODE_CONNECTOR_9PinDIN]     = "DIN",
+    [DRM_MODE_CONNECTOR_DisplayPort] = "DP",
+    [DRM_MODE_CONNECTOR_HDMIA]       = "HDMI-A",
+    [DRM_MODE_CONNECTOR_HDMIB]       = "HDMI-B",
+    [DRM_MODE_CONNECTOR_TV]          = "TV",
+    [DRM_MODE_CONNECTOR_eDP]         = "eDP",
+    [DRM_MODE_CONNECTOR_VIRTUAL]     = "Virtual",
+    [DRM_MODE_CONNECTOR_DSI]         = "DSI",
+    [DRM_MODE_CONNECTOR_DPI]         = "DPI",
+    [DRM_MODE_CONNECTOR_WRITEBACK]   = "Writeback",
+#ifdef DRM_MODE_CONNECTOR_SPI
+    [DRM_MODE_CONNECTOR_SPI]         = "SPI",
+#endif
+#ifdef DRM_MODE_CONNECTOR_USB
+    [DRM_MODE_CONNECTOR_USB]         = "USB",
+#endif
+};
+
+const char *drmtap_connector_type_name(uint32_t connector_type) {
+    if (connector_type < sizeof(connector_type_names) / sizeof(*connector_type_names)
+        && connector_type_names[connector_type]) {
+        return connector_type_names[connector_type];
+    }
+    /* A type a newer kernel added, or one this build's headers predate. */
+    return "Unknown";
+}
+
 /* Resolve the CRTC bound to a connector via the atomic CRTC_ID property.
  *
  * The legacy path (drmModeGetEncoder(conn->encoder_id)->crtc_id) reports 0 for a
@@ -158,32 +205,11 @@ int drmtap_list_displays(drmtap_ctx *ctx, drmtap_display *out, int max_count) {
             d->crtc_id = crtc_id;
             d->active = (crtc_id != 0) ? 1 : 0;
 
-            /* Build connector name: type + type_id (e.g., "HDMI-A-1") */
-            const char *type_name;
-            switch (conn->connector_type) {
-                case DRM_MODE_CONNECTOR_VGA:
-                    type_name = "VGA"; break;
-                case DRM_MODE_CONNECTOR_DVII:
-                    type_name = "DVI-I"; break;
-                case DRM_MODE_CONNECTOR_DVID:
-                    type_name = "DVI-D"; break;
-                case DRM_MODE_CONNECTOR_DVIA:
-                    type_name = "DVI-A"; break;
-                case DRM_MODE_CONNECTOR_HDMIA:
-                    type_name = "HDMI-A"; break;
-                case DRM_MODE_CONNECTOR_HDMIB:
-                    type_name = "HDMI-B"; break;
-                case DRM_MODE_CONNECTOR_DisplayPort:
-                    type_name = "DP"; break;
-                case DRM_MODE_CONNECTOR_eDP:
-                    type_name = "eDP"; break;
-                case DRM_MODE_CONNECTOR_VIRTUAL:
-                    type_name = "Virtual"; break;
-                default:
-                    type_name = "Unknown"; break;
-            }
+            /* Build connector name: type + type_id (e.g., "HDMI-A-1"), the
+             * same shape and spelling /sys/class/drm uses. */
             snprintf(d->name, sizeof(d->name), "%s-%u",
-                     type_name, conn->connector_type_id);
+                     drmtap_connector_type_name(conn->connector_type),
+                     conn->connector_type_id);
 
             /* Get current mode and offsets from the CRTC */
             if (crtc_id) {

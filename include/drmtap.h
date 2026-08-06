@@ -99,7 +99,9 @@ void drmtap_close(drmtap_ctx *ctx);
 typedef struct {
     uint32_t crtc_id;       /**< Use in drmtap_config.crtc_id */
     uint32_t connector_id;  /**< DRM connector id */
-    char name[32];          /**< e.g., "HDMI-A-1", "DP-2", "eDP-1" */
+    char name[32];          /**< `<type>-<index>` in the kernel's own spelling,
+                                 as under /sys/class/drm: "HDMI-A-1", "DP-2",
+                                 "eDP-1", "LVDS-1", "DSI-1", "USB-1" */
     uint32_t x;             /**< X offset in virtual FB (from CRTC) */
     uint32_t y;             /**< Y offset in virtual FB (from CRTC) */
     uint32_t width;         /**< Current mode width in pixels */
