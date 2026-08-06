@@ -6,9 +6,10 @@ crate.
 
 > The upstream integration PR
 > [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420)
-> is **under maintainer review** (in progress — not yet merged). It adds a `drm`
-> capture backend to `scrap` on top of `libdrmtap-sys` 0.5.x. The files here are a
-> self-contained reference for the same crate-based backend.
+> was **merged on 2026-08-06**, but what landed there `dlopen`s `libdrmtap.so.0`
+> by soname rather than linking `libdrmtap-sys`. The files here stay the
+> self-contained reference for the **crate-based** backend, which is the simpler
+> route for a project that does not need the runtime-optional degradation.
 
 ## Status
 

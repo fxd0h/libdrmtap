@@ -16,7 +16,7 @@
 
 ### Integration path for each:
 
-**RustDesk**: `cargo add libdrmtap-sys` — both crates published on crates.io at one shared version (`libdrmtap-sys` + `libdrmtap`, 0.5.x). RustDesk adds it as an optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`. **Now in review**: upstream PR [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) adds a `drm` capture backend to `scrap` on top of `libdrmtap-sys` and is under maintainer review (in progress — not merged). A self-contained reference backend also lives in `contrib/integrations/rustdesk/`.
+**RustDesk**: both crates are published on crates.io at one shared version (`libdrmtap-sys` + `libdrmtap`, 0.5.x), and RustDesk adds DRM as an optional backend alongside PipeWire. Priority: `DRM/KMS → PipeWire → X11`. **Shipped**: upstream PR [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) merged on 2026-08-06. It `dlopen`s `libdrmtap.so.0` by soname instead of depending on `libdrmtap-sys`, so a missing or too-old library degrades to PipeWire rather than breaking the build. A self-contained reference for the crate-based route lives in `contrib/integrations/rustdesk/`.
 
 **Sunshine**: Replace internal KMS code with `#include <drmtap.h>`. They already use DMA-BUF → VAAPI pipeline, so `drmtap_grab()` (zero-copy) slots in directly.
 
@@ -97,5 +97,5 @@ Projects with capture problems that libdrmtap solves:
 | 1 | Publish `libdrmtap-sys` + `libdrmtap` on crates.io | ✅ Done |
 | 2 | Test on real hardware (Intel, Nvidia, virtio-gpu, AMD) | ✅ Done — Intel i915 (dual 4K Meteor Lake), Nvidia Jetson Orin Nano, virtio-gpu, and AMD amdgpu (RX Vega 64, gfx9) verified |
 | 3 | Post to r/linux, r/rustdesk, r/selfhosted, Hacker News | 🔜 After broader hardware validation |
-| 4 | Open issues / PRs on RustDesk and Sunshine repos proposing integration | 🟡 RustDesk PR [#15420](https://github.com/rustdesk/rustdesk/pull/15420) under maintainer review; Sunshine pending |
+| 4 | Open issues / PRs on RustDesk and Sunshine repos proposing integration | 🟢 RustDesk PR [#15420](https://github.com/rustdesk/rustdesk/pull/15420) merged 2026-08-06; Sunshine pending |
 | 5 | Create OBS plugin as proof of concept | 🔜 Future |

@@ -9,7 +9,7 @@ core library and may need adaptation for the target project's current API.
 
 | Project | Directory | Description | Status |
 |---|---|---|---|
-| [RustDesk](https://github.com/rustdesk/rustdesk) | `rustdesk/` | DRM/KMS capture backend for RustDesk's `scrap` crate (via `libdrmtap-sys`), avoiding the Wayland portal consent dialog | In progress — upstream PR [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) under maintainer review |
+| [RustDesk](https://github.com/rustdesk/rustdesk) | `rustdesk/` | DRM/KMS capture backend for RustDesk's `scrap` crate (via `libdrmtap-sys`), avoiding the Wayland portal consent dialog | Reference backend. Upstream [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) merged on 2026-08-06, but it `dlopen`s the library instead of linking this crate |
 
 ## Adding a New Integration
 

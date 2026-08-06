@@ -46,6 +46,7 @@ A single developer researching all of this manually would take weeks. With AI ag
 6. **Architecture** — Designed the helper binary pattern based on gpu-screen-recorder's approach
 
 ### Implementation Phase (shipped — the C library)
+
 Guided by the research findings, the agents went on to build the library itself. Every architectural decision is traceable to a specific finding in the research docs. What shipped:
 
 - 🧩 **Two-process architecture** — an unprivileged library plus a small privileged `drmtap-helper` that carries `CAP_SYS_ADMIN` via file capabilities and talks over a socketpair, so the main process never has to run privileged.
@@ -58,7 +59,7 @@ Guided by the research findings, the agents went on to build the library itself.
 
 - 🌈 **HDR10 (#16, done)** — HDR scanouts are tone-mapped to SDR: PQ (ST 2084) decode, BT.2020 → BT.709 gamut, a highlight-preserving curve and sRGB, for `AR30`/`XR30` and 16-bit `XR48`/`AR48`/`XB48`/`AB48`, in both the CPU and EGL (tiled) paths, driven by the connector `HDR_OUTPUT_METADATA`. HLG falls back to a plain reduction, and `P010` (overlay-video YUV) is not handled.
 - 🪟 **virgl integration (#15, done)** — host-rendered virtio-gpu 3D scanouts (black to a guest CPU mmap) are captured via GPU-side EGL readback on the guest GPU, verified end-to-end in a virgl VM.
-- 🔗 **RustDesk integration (open)** — a DRM capture backend for RustDesk's `scrap` (depending on `libdrmtap-sys`) to avoid the Wayland portal consent dialog. Upstream PR [`rustdesk/rustdesk#15420`](https://github.com/rustdesk/rustdesk/pull/15420) is under maintainer review — the security hardening was praised — but it is **not** merged yet.
+- 🔗 **RustDesk integration (merged)** — a DRM capture backend for RustDesk's `scrap` that avoids the Wayland portal consent dialog. It `dlopen`s `libdrmtap.so.0` by soname at runtime and does **not** depend on the `libdrmtap-sys` crate, so a missing or too-old library degrades to the existing PipeWire path instead of breaking the build (see the README section for the reasoning). Upstream PR [`rustdesk/rustdesk#15420`](https://github.com/rustdesk/rustdesk/pull/15420) was merged on 2026-08-06.
 
 ## What AI Did NOT Do
 
