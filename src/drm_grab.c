@@ -2225,6 +2225,25 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                              (long long)fd_size, desc->offsets[0], need);
             return -EINVAL;
         }
+        /* Planes 1..n are the CCS / clear-colour auxiliaries of a compressed
+         * scanout (Gen12+), and they used to reach eglCreateImage with no bound
+         * at all. Their height is a format-specific fraction of the image height
+         * -- a Gen12 CCS plane is 1/16th -- not desc->height, so their full
+         * extent is not computable here and a pitches[p]*height bound would
+         * REJECT legitimate compressed scanouts. Bound what is knowable instead:
+         * the offset plus one row must lie inside the buffer. Weaker than the
+         * plane-0 check by necessity, but it can never reject a valid descriptor
+         * and it does reject the wild values that were forwarded unchecked. */
+        for (uint32_t p = 1; p < num_planes; p++) {
+            if ((uint64_t)desc->offsets[p] + (uint64_t)desc->pitches[p]
+                    > (uint64_t)fd_size) {
+                drmtap_set_error(ctx, "convert: plane %u exceeds dma-buf size "
+                                 "(fd_size=%lld, offset %u + pitch %u)",
+                                 p, (long long)fd_size, desc->offsets[p],
+                                 desc->pitches[p]);
+                return -EINVAL;
+            }
+        }
     }
 
 #ifdef HAVE_EGL
