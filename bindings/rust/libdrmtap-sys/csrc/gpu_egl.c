@@ -757,6 +757,32 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
                                      uint32_t width, uint32_t height,
                                      uint32_t stride, uint32_t fourcc,
                                      uint64_t modifier) {
+    /* EGLint is int32_t, so any of these above INT32_MAX would arrive at the
+     * driver NEGATIVE. Reject instead of narrowing: offsets and pitches can
+     * come from a descriptor that crossed an IPC boundary (drmtap_convert_dmabuf),
+     * and a silently sign-flipped value is precisely the input this import must
+     * refuse rather than forward. The modifier halves below are exempt on
+     * purpose — the EXT specifies the low and high 32 bits as separate
+     * attributes, so a half above INT32_MAX is the documented encoding, not a
+     * narrowing bug. width/height/fourcc are bounded before they get here. */
+    int nplanes = ctx->fb2_num_planes > 0 ? ctx->fb2_num_planes : 1;
+    if (nplanes > 4) {
+        nplanes = 4;
+    }
+    if (stride > (uint32_t)INT32_MAX) {
+        drmtap_set_error(ctx, "egl: stride %u does not fit in EGLint", stride);
+        return EGL_NO_IMAGE_KHR;
+    }
+    for (int p = 0; p < nplanes; p++) {
+        if (ctx->fb2_offsets[p] > (uint32_t)INT32_MAX ||
+            ctx->fb2_pitches[p] > (uint32_t)INT32_MAX) {
+            drmtap_set_error(ctx,
+                "egl: plane %d offset %u / pitch %u does not fit in EGLint",
+                p, ctx->fb2_offsets[p], ctx->fb2_pitches[p]);
+            return EGL_NO_IMAGE_KHR;
+        }
+    }
+
     /* Build EGLImage attributes with DMA-BUF import */
     EGLint image_attribs[64];
     int ai = 0;

@@ -1116,9 +1116,11 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             }
         }
 
-        /* Standard DMA-BUF mmap path (non-virtio or virtio fallback) */
+        /* Standard DMA-BUF mmap path (non-virtio or virtio fallback).
+         * No SYNC_START here: the mapping itself is not CPU access, and the
+         * only START that may be issued is the recorded one below, which
+         * release matches with a SYNC_END. */
         if (mapped == MAP_FAILED) {
-            dmabuf_sync_start(prime_fd);
             mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
                           prime_fd, fb2->offsets[0]);
         }
@@ -1153,7 +1155,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         } else {
             /* Invalidate CPU caches with SYNC_START and remember it succeeded so
              * release issues the matching SYNC_END (and only then). Crucial for
-             * virtio_gpu where the transfer arrives in system RAM asynchronously. */
+             * virtio_gpu where the transfer arrives in system RAM asynchronously.
+             * This is the ONLY START on this path, so START and END stay 1:1 per
+             * frame, including when the mmap above failed and EGL took over. */
             priv->sync_started = (dmabuf_sync_start(prime_fd) == 0);
 
             priv->mapped = mapped;
@@ -2220,6 +2224,25 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                              "(fd_size=%lld, need offset %u + %zu)",
                              (long long)fd_size, desc->offsets[0], need);
             return -EINVAL;
+        }
+        /* Planes 1..n are the CCS / clear-colour auxiliaries of a compressed
+         * scanout (Gen12+), and they used to reach eglCreateImage with no bound
+         * at all. Their height is a format-specific fraction of the image height
+         * -- a Gen12 CCS plane is 1/16th -- not desc->height, so their full
+         * extent is not computable here and a pitches[p]*height bound would
+         * REJECT legitimate compressed scanouts. Bound what is knowable instead:
+         * the offset plus one row must lie inside the buffer. Weaker than the
+         * plane-0 check by necessity, but it can never reject a valid descriptor
+         * and it does reject the wild values that were forwarded unchecked. */
+        for (uint32_t p = 1; p < num_planes; p++) {
+            if ((uint64_t)desc->offsets[p] + (uint64_t)desc->pitches[p]
+                    > (uint64_t)fd_size) {
+                drmtap_set_error(ctx, "convert: plane %u exceeds dma-buf size "
+                                 "(fd_size=%lld, offset %u + pitch %u)",
+                                 p, (long long)fd_size, desc->offsets[p],
+                                 desc->pitches[p]);
+                return -EINVAL;
+            }
         }
     }
 

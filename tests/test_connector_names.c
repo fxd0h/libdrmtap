@@ -62,7 +62,9 @@ static void test_every_type_matches_the_kernel_spelling(void) {
     EXPECT_NAME(DRM_MODE_CONNECTOR_VIRTUAL,     "Virtual");
     EXPECT_NAME(DRM_MODE_CONNECTOR_DSI,         "DSI");
     EXPECT_NAME(DRM_MODE_CONNECTOR_DPI,         "DPI");
+#ifdef DRM_MODE_CONNECTOR_WRITEBACK
     EXPECT_NAME(DRM_MODE_CONNECTOR_WRITEBACK,   "Writeback");
+#endif
 #ifdef DRM_MODE_CONNECTOR_SPI
     EXPECT_NAME(DRM_MODE_CONNECTOR_SPI,         "SPI");
 #endif
@@ -88,7 +90,10 @@ static void test_the_regressed_types_are_not_unknown(void) {
  * enumerated as "Unknown-1" and a consumer keying on the name could not tell
  * them apart. Only the genuinely-unknown type may answer "Unknown". */
 static void test_distinct_types_never_share_a_prefix(void) {
-    uint32_t highest = DRM_MODE_CONNECTOR_WRITEBACK;
+    uint32_t highest = DRM_MODE_CONNECTOR_DPI;
+#ifdef DRM_MODE_CONNECTOR_WRITEBACK
+    highest = DRM_MODE_CONNECTOR_WRITEBACK;
+#endif
 #ifdef DRM_MODE_CONNECTOR_SPI
     highest = DRM_MODE_CONNECTOR_SPI;
 #endif

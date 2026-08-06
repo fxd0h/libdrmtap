@@ -32,8 +32,9 @@
  * displays with the same name (an LVDS panel and a DSI panel both "Unknown-1").
  *
  * libdrm exposes the same table as drmModeGetConnectorTypeName(), but only
- * since 2.4.112 and our floor is 2.4.95, hence the local copy. SPI and USB are
- * the newest macros and may be absent from older <drm_mode.h>. */
+ * since 2.4.112 and our floor is 2.4.95, hence the local copy. The last three
+ * macros arrived after that floor, so they are guarded: at 2.4.95 the array
+ * simply ends earlier and those types take the "Unknown" fallback. */
 static const char *const connector_type_names[] = {
     [DRM_MODE_CONNECTOR_Unknown]     = "Unknown",
     [DRM_MODE_CONNECTOR_VGA]         = "VGA",
@@ -53,7 +54,9 @@ static const char *const connector_type_names[] = {
     [DRM_MODE_CONNECTOR_VIRTUAL]     = "Virtual",
     [DRM_MODE_CONNECTOR_DSI]         = "DSI",
     [DRM_MODE_CONNECTOR_DPI]         = "DPI",
+#ifdef DRM_MODE_CONNECTOR_WRITEBACK
     [DRM_MODE_CONNECTOR_WRITEBACK]   = "Writeback",
+#endif
 #ifdef DRM_MODE_CONNECTOR_SPI
     [DRM_MODE_CONNECTOR_SPI]         = "SPI",
 #endif
