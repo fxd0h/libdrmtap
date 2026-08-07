@@ -178,6 +178,12 @@ Two things made it survive: the deswizzler was reached only on hardware nobody h
 runs the CPU path on, and a unit test asserted the behaviour of `0x10`, so the test
 certified the wrong constant rather than catching it.
 
+Upstream definitions, for anyone verifying the encoding rather than trusting this
+page: [`drm_fourcc.h`](https://gitlab.freedesktop.org/mesa/drm/-/blob/main/include/drm/drm_fourcc.h)
+carries `DRM_FORMAT_MOD_VENDOR_NVIDIA` and the `fourcc_mod_code(vendor, val)` macro
+that packs the vendor into bits 56-63; the kernel copy is
+[`include/uapi/drm/drm_fourcc.h`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/drm/drm_fourcc.h).
+
 **Rule:** a vendor byte is `modifier >> 56` compared against a `DRM_FORMAT_MOD_VENDOR_*`
 macro, never a literal. If a literal appears, check it against `drm_fourcc.h` before
 trusting any test that exercises it. And a decoder that cannot decode must return

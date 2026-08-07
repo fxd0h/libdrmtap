@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <stdint.h>
 
+#include <drm_fourcc.h>
 #include "drmtap.h"
 
 #define TEST_ASSERT(cond) do { \
@@ -186,11 +187,12 @@ static void test_deswizzle_nvidia_x_tiled_roundtrip(void) {
      * been checked against a Tegra scanout. Assert THAT, so the day someone wires
      * it up they have to come here and say so. The tiling loop above is kept as
      * the reference for that work. */
-    uint64_t mod_nvidia = 0x0300000000000010ULL;  /* 16BX2_BLOCK, a real one */
+    uint64_t mod_nvidia =
+        fourcc_mod_code(NVIDIA, 0x10);  /* 16BX2_BLOCK, a real one */
     int ret = drmtap_deswizzle(tiled, result, w, h, stride, stride, mod_nvidia, (size_t)stride * h);
     TEST_ASSERT(ret == -ENOTSUP);
     TEST_ASSERT(drmtap_deswizzle(tiled, result, w, h, stride, stride,
-                                 0x0300000000000001ULL /* TEGRA_TILED */,
+                                 fourcc_mod_code(NVIDIA, 1) /* TEGRA_TILED */,
                                  (size_t)stride * h) == -ENOTSUP);
 
     free(linear);

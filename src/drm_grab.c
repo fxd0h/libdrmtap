@@ -76,16 +76,10 @@ static void drmtap_gem_close(drmtap_ctx *ctx, uint32_t handle) {
     drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
 }
 
-/* `drmModeGetFB2` mints a GEM handle for EVERY plane it reports, and a fresh one on
- * every call even for a BO that already has one. Only `handles[0]` is ever used here:
- * the dma-buf export and the EGL import both go through the single fd derived from
- * it. So every other handle is dead the moment it arrives, and on a scanout whose
- * planes live in separate BOs -- CCS is where `num_planes >= 2` comes from -- one was
- * leaked per grab, forever.
- *
- * Deduplicated before closing, and never touching `handles[0]`: planes that share a
- * BO come back as the SAME handle, and closing it a second time would free one the
- * caller still owns. */
+// GetFB2 mints a handle per plane, fresh on every call; only handles[0] is used here,
+// so the rest leak one per grab when the planes live in separate BOs (CCS). Dedupe
+// before closing: planes sharing a BO return the SAME handle, and a second close
+// would free one the caller still owns.
 static void close_auxiliary_gem_handles(drmtap_ctx *ctx, const drmModeFB2 *fb2) {
     for (int p = 1; p < 4; p++) {
         uint32_t h = fb2->handles[p];

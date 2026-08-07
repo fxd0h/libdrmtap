@@ -280,7 +280,7 @@ int drmtap_deswizzle(const void *src, void *dst,
     uint8_t vendor = (uint8_t)(modifier >> 56);
     uint8_t mod_type = (uint8_t)(modifier & 0xFF);
 
-    if (vendor == 0x01) {
+    if (vendor == DRM_FORMAT_MOD_VENDOR_INTEL) {
         if (mod_type == 0x01) {
             /* I915_FORMAT_MOD_X_TILED */
             return deswizzle_intel_x_tiled(src, dst, width, height,
@@ -334,7 +334,7 @@ int drmtap_deswizzle(const void *src, void *dst,
      * Nvidia scanout with EGL disabled and compares it against the EGL output.
      * Until then the EGL path is what serves Nvidia, which is what the Jetson
      * Orin runs today. */
-    if (vendor == 0x03) {
+    if (vendor == DRM_FORMAT_MOD_VENDOR_NVIDIA) {
         return -ENOTSUP;
     }
 

@@ -29,14 +29,16 @@
 #include <errno.h>
 #include <stdint.h>
 
+#include <drm_fourcc.h>
+
 #include "drmtap_internal.h"
 #include "drmtap.h"
 
-/* Nvidia modifier vendor byte */
-/* DRM_FORMAT_MOD_VENDOR_NVIDIA (drm_fourcc.h:470). This was 0x10, which is the low
- * byte of the block-linear encoding rather than a vendor, so this backend never
- * matched a real Nvidia modifier. See the note in pixel_convert.c. */
-#define NV_VENDOR 0x03
+/* The vendor byte comes from libdrm, never a literal: this was 0x10, which is the low
+ * byte of the block-linear encoding rather than a vendor, so the backend never matched
+ * a real Nvidia modifier. See the note in pixel_convert.c.
+ * https://gitlab.freedesktop.org/mesa/drm/-/blob/main/include/drm/drm_fourcc.h */
+#define NV_VENDOR DRM_FORMAT_MOD_VENDOR_NVIDIA
 
 /* ========================================================================= */
 /* Backend API                                                               */
