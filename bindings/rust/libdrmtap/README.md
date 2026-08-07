@@ -18,15 +18,17 @@ reports HDR (`P010` overlay-video and HLG excepted).
 > by GK-Gaming, and Intel Raptor Lake with a hybrid NVIDIA GPU (Ubuntu 26.04,
 > GNOME Wayland) by huzhifeng. One host each, not a support matrix.
 >
-> All of it depends on the EGL backend being present in the C library, so build
-> it with `-Degl=enabled`. Hit a problem on other hardware? Please
-> [report results](https://github.com/fxd0h/libdrmtap/issues).
+> All of it depends on the EGL detile backend, which `libdrmtap-sys` always
+> compiles in. It needs the EGL and GLES2 headers at build time (`libegl-dev`
+> and `libgles2-mesa-dev` on Debian/Ubuntu); `cargo build` fails without them
+> rather than quietly producing a CPU-only library. Hit a problem on other
+> hardware? Please [report results](https://github.com/fxd0h/libdrmtap/issues).
 
 ## Installation
 
 ```toml
 [dependencies]
-libdrmtap = "0.3"
+libdrmtap = "0.5"
 ```
 
 This pulls in `libdrmtap-sys`, which embeds and statically compiles the C

@@ -110,11 +110,15 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 >   26.04, GNOME Wayland, `eDP-1`, `Y_TILED_GEN12_RC_CCS_CC`) — huzhifeng,
 >   2026-08-07 ([#45](https://github.com/fxd0h/libdrmtap/issues/45)).
 >
-> Whichever GPU you have, this depends on the EGL backend being present: a build
-> without it cannot detile a modern scanout at all. Configure with
-> `-Degl=enabled`, which fails loudly rather than silently producing the CPU-only
-> stub — that is what [#45](https://github.com/fxd0h/libdrmtap/issues/45) turned
-> out to be.
+> Whichever GPU you have, most of this depends on the EGL detile backend. The
+> CPU path on its own still handles linear scanouts and the plain tilings (Intel
+> X/Y/Yf-tiled, Nvidia block-linear), but a **compressed** scanout, or any tiled
+> layout it has no deswizzler for, **fails closed** — it returns an error rather
+> than passing the raw bytes off as linear pixels. Current Intel and AMD desktops
+> scan out exactly those. The `egl` Meson feature defaults to `auto`, which
+> silently builds the CPU-only stub when the headers are missing, so configure
+> with `-Degl=enabled` to fail at configure time instead — that is what
+> [#45](https://github.com/fxd0h/libdrmtap/issues/45) turned out to be.
 >
 > **Multi-GPU render-node selection is verified on the Jetson Orin's two DRM
 > devices** (`tegra`/renderD128 with no connectors + `nvidia-drm`/renderD129

@@ -22,8 +22,12 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
 > by GK-Gaming, and Intel Raptor Lake with a hybrid NVIDIA GPU (Ubuntu 26.04,
 > GNOME Wayland) by huzhifeng. One host each, not a support matrix.
 >
-> All of it depends on the EGL backend being present — a build without it cannot
-> detile a modern scanout. Build the C library with `-Degl=enabled`.
+> All of it depends on the EGL detile backend, which this crate always compiles
+> in (`build.rs` defines `HAVE_EGL`). It therefore needs the EGL and GLES2
+> headers at build time — `libegl-dev` and `libgles2-mesa-dev` on Debian/Ubuntu —
+> and `cargo build` fails outright without them rather than producing a
+> CPU-only library. `-Degl=enabled` is the equivalent for a Meson build of the C
+> library and does not apply here.
 >
 > If you test other configurations, please report results via
 > [GitHub Issues](https://github.com/fxd0h/libdrmtap/issues).
