@@ -2109,9 +2109,10 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
              * START taken above. Close the window on the fd while it is still
              * open, rather than leaving the exporter with an access that only
              * the fd going away ends. */
+            /* No reset of sync_started after the END: this path returns without
+             * caching a slot, so nothing reads it again. */
             if (sync_started) {
                 dmabuf_sync_end(prime_fd);
-                sync_started = 0;
             }
             close(prime_fd);
             frame->dma_buf_fd = -1;  /* prime_fd is closed; don't hand back a stale fd */
@@ -2135,7 +2136,6 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             "build with -Degl=enabled.", fb_id);
         if (sync_started) {
             dmabuf_sync_end(prime_fd);
-            sync_started = 0;
         }
         close(prime_fd);
         drmtap_gem_close(ctx, fb2->handles[0]);
