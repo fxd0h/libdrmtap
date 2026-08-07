@@ -575,7 +575,7 @@ static EGLDisplay egl_display_for_ctx(const drmtap_ctx *ctx) {
 
 static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     if (load_egl_procs() < 0) {
-        drmtap_debug_log(ctx, "egl: required EGL procs not available");
+        drmtap_set_error(ctx, "egl: required EGL procs not available");
         return -ENOTSUP;
     }
 

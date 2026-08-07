@@ -125,6 +125,11 @@ function returns immediately on a NULL context, so the whole set was dead code:
 compilation, `eglCreateImage failed`, the retry outcome, the GL error across convert.
 A capture that printed no EGL line at all now prints nine.
 
+Four fail-closed returns said their reason only to the debug log, so a caller with debug
+logging off got `-ENOTSUP` and an empty `drmtap_error()`: the Intel and Nvidia
+undecodable-modifier paths, the generic backend, and the missing-EGL-procs check. They
+set the context error now, like the equivalent returns in `drm_grab.c` already did.
+
 A line at open time states whether the EGL backend is compiled in, next to the driver
 line so it lands in every bug report, and says so loudly when it is not. The
 fail-closed errors name which cause applies and, on a build without the backend,

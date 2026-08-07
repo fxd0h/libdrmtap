@@ -111,7 +111,7 @@ int drmtap_gpu_intel_process(drmtap_ctx *ctx, void *data,
      * whole Tile4 family). "Passing through" with 0 used to leave the caller
      * holding the still-tiled mapping believing it was converted. Fail closed,
      * the same answer drmtap_deswizzle gives. */
-    drmtap_debug_log(ctx, "intel: modifier 0x%lx needs a GPU detile -- failing closed",
+    drmtap_set_error(ctx, "intel: modifier 0x%lx needs a GPU detile -- failing closed",
                      (unsigned long)modifier);
     return -ENOTSUP;
 }

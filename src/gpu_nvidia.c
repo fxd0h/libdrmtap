@@ -80,7 +80,7 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
          * `drmtap_deswizzle` answers -ENOTSUP for this vendor, so going through it
          * would allocate a full frame only to throw it away -- and report -ENOMEM
          * instead of the truth if that allocation failed. Say it directly. */
-        drmtap_debug_log(ctx,
+        drmtap_set_error(ctx,
                          "nvidia: block-linear modifier 0x%lx has no CPU decoder; "
                          "use the EGL path or a linear scanout",
                          (unsigned long)modifier);
