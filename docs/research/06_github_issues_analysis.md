@@ -166,6 +166,24 @@ Variants: Intel X-TILED, Intel CCS, Nvidia BLOCK_LINEAR, AMD DCC, Broadcom T-TIL
 No universal solution: each GPU needs its own code path
 ```
 
+### 3b. A vendor byte read from the wrong place (discovered 2026-08-06)
+
+`DRM_FORMAT_MOD_VENDOR_NVIDIA` is **`0x03`** (`drm_fourcc.h:470`). `gpu_nvidia.c` tested
+`0x10`, which is not a vendor at all: it is the low byte of the block-linear encoding.
+So the Nvidia branch never matched a real Nvidia modifier, and every Nvidia-vendor
+scanout fell through to the linear `memcpy` and was reported as a successfully
+converted frame -- the same fail-open shape as #4 below, one vendor over.
+
+Two things made it survive: the deswizzler was reached only on hardware nobody here
+runs the CPU path on, and a unit test asserted the behaviour of `0x10`, so the test
+certified the wrong constant rather than catching it.
+
+**Rule:** a vendor byte is `modifier >> 56` compared against a `DRM_FORMAT_MOD_VENDOR_*`
+macro, never a literal. If a literal appears, check it against `drm_fourcc.h` before
+trusting any test that exercises it. And a decoder that cannot decode must return
+`-ENOTSUP` from the branch itself, not travel through an allocation first: that path
+returned `-ENOMEM` under memory pressure and hid the real reason.
+
 ### 4. CCS-compressed framebuffers crash CPU deswizzle (discovered 2026-03-18)
 ```
 Affected projects: libdrmtap (our own!)
@@ -247,4 +265,5 @@ From reading all these issues, the library MUST:
 - [x] **Never CPU-deswizzle CCS modifiers** — `dumb_mmap` returns compressed data, only EGL can deswizzle. Return `-ENOTSUP` and require DMA-BUF fd + EGL (commit 7c7ce27)
 - [x] **V3 protocol: pass DMA-BUF fd via SCM_RIGHTS** for non-linear modifiers so parent can use EGL GPU deswizzle — shipped and now the default zero-copy capture path; Intel CCS detiles correctly in unprivileged/helper mode, with the V2 pixel copy as the fallback
 - [x] **Treat the convert descriptor as untrusted IPC input** — `drmtap_convert_dmabuf()` receives geometry and an fd from the other side of a process boundary. A descriptor claiming a frame larger than the fd actually backs made the CPU fallback mmap and read past the buffer, faulting the unprivileged converter with SIGBUS (a DoS). The fix requires a genuine DMA-BUF (a non-dma-buf fd is rejected; an immutable dma-buf cannot be truncated mid-read) and bounds the read against the buffer size from `lseek` (reliable across kernels, unlike `fstat` which reports 0 for a dma-buf before Linux 5.3), failing closed when the size is unknown. Discovered 2026-07-20 by the `fuzz/fuzz_convert.c` libFuzzer harness (a descriptor whose declared frame exceeds the fd size) and fixed in 0.4.12; the harness is committed and guards against a regression
-
+- [x] **Read the vendor byte against `drm_fourcc.h`, never a literal** — `gpu_nvidia.c` tested `0x10` where `DRM_FORMAT_MOD_VENDOR_NVIDIA` is `0x03`, so the branch was dead and Nvidia modifiers fell through to a linear copy reported as success. A unit test asserted the wrong constant. Fixed in 0.5.3
+- [x] **Close EVERY GEM handle `drmModeGetFB2` mints, not just `handles[0]`** — it creates a fresh handle per plane on every call, and only plane 0 is ever used here. On a scanout whose planes live in separate BOs (CCS is where `num_planes >= 2` comes from) the others leaked one handle per grab. Deduplicate first: planes sharing a BO come back as the SAME handle and a second close would free one still owned. Fixed in 0.5.3

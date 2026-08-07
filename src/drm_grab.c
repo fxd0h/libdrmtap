@@ -76,6 +76,35 @@ static void drmtap_gem_close(drmtap_ctx *ctx, uint32_t handle) {
     drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
 }
 
+/* `drmModeGetFB2` mints a GEM handle for EVERY plane it reports, and a fresh one on
+ * every call even for a BO that already has one. Only `handles[0]` is ever used here:
+ * the dma-buf export and the EGL import both go through the single fd derived from
+ * it. So every other handle is dead the moment it arrives, and on a scanout whose
+ * planes live in separate BOs -- CCS is where `num_planes >= 2` comes from -- one was
+ * leaked per grab, forever.
+ *
+ * Deduplicated before closing, and never touching `handles[0]`: planes that share a
+ * BO come back as the SAME handle, and closing it a second time would free one the
+ * caller still owns. */
+static void close_auxiliary_gem_handles(drmtap_ctx *ctx, const drmModeFB2 *fb2) {
+    for (int p = 1; p < 4; p++) {
+        uint32_t h = fb2->handles[p];
+        if (h == 0 || h == fb2->handles[0]) {
+            continue;
+        }
+        int dup = 0;
+        for (int q = 1; q < p; q++) {
+            if (fb2->handles[q] == h) {
+                dup = 1;
+                break;
+            }
+        }
+        if (!dup) {
+            drmtap_gem_close(ctx, h);
+        }
+    }
+}
+
 /* Test hook: DRMTAP_FORCE_MMAP_FAIL=1 makes the fast-path cache-miss drop a
  * successful CPU mapping so the EGL-detile fd fallback runs on any EGL-capable GPU,
  * not only a discrete/tiled one that genuinely refuses the mmap. Off by default. */
@@ -840,6 +869,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
      * three returns on THIS path did not, and leaked one handle per grab. Set to 0
      * the moment ownership moves, so nothing is closed twice. */
     uint32_t pending_gem = fb2->handles[0];
+    close_auxiliary_gem_handles(ctx, fb2);
 
     /* Bound the DIMENSIONS too, not just stride*height: width is unconstrained by
      * validate_fb_size, and every converted output is sized width*height*4. */
@@ -1990,6 +2020,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                          fb_id, strerror(errno));
         return ret;
     }
+
+    close_auxiliary_gem_handles(ctx, fb2);
 
     if (fb2->handles[0] == 0) {
         /* drmModeGetFB2 zeroes the GEM handles for a caller without CAP_SYS_ADMIN.

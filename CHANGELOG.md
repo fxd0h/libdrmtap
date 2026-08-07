@@ -77,6 +77,19 @@ since a CCS plane's height is a fraction of the image height and the obvious str
 bound would reject legitimate compressed scanouts. An offset or pitch above
 `INT32_MAX` is rejected rather than narrowed into a negative `EGLint`.
 
+### Two more from the CodeRabbit pass on the release PR
+
+`drmModeGetFB2` mints a GEM handle for **every** plane it reports, and a fresh one on
+every call; only `handles[0]` is ever used here, so on a scanout whose planes live in
+separate BOs the rest leaked one handle per grab, on both the slow and the fast path.
+They are now closed as soon as they arrive, deduplicated first because planes sharing
+a BO come back as the same handle and a second close would free one still owned.
+
+And the Nvidia branch no longer allocates a full frame on its way to `-ENOTSUP`. With
+the vendor byte corrected, real Nvidia modifiers reach a decoder that cannot decode
+them; going through it meant a `stride * height` allocation thrown away, and
+`-ENOMEM` instead of the truth if that allocation failed.
+
 ### Diagnostics
 
 All twenty EGL diagnostics in `gpu_egl.c` passed `NULL` as the context, and that
