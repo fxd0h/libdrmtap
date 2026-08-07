@@ -193,8 +193,10 @@ struct drmtap_ctx {
 // Set error message on context (or global static if ctx is NULL)
 void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
 
-// Debug log to stderr (only when ctx->debug is set)
-void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
+/* Debug log to stderr, only when ctx->debug is set. Takes a CONST ctx so a
+ * read-only helper can still report -- gpu_egl.c used to pass NULL from twenty
+ * sites for want of that, which silenced every EGL failure diagnostic it had. */
+void drmtap_debug_log(const drmtap_ctx *ctx, const char *fmt, ...);
 
 /* The command frame (helper_cmd_grab_t), its CMD_* types and the magic/version
  * validation are defined in wire.h, shared with the helper so the two ends of

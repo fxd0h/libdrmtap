@@ -75,7 +75,7 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...) {
     va_end(ap);
 }
 
-void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...) {
+void drmtap_debug_log(const drmtap_ctx *ctx, const char *fmt, ...) {
     if (!ctx || !ctx->debug) {
         return;
     }
