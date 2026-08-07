@@ -332,6 +332,39 @@ static int dmabuf_sync_end(int fd) {
     return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
+/* Close whatever CPU-access window the fast path left open.
+ *
+ * The slow path pairs its START with an END in drmtap_frame_release, but a fast
+ * frame points into a mapping the context keeps CACHED across frames and carries
+ * no _priv, so it is never released and there is no such moment. The window
+ * therefore closes at the next grab, which is also when the caller has provably
+ * finished reading the previous frame. Called before every new START and from
+ * drmtap_fast_cleanup, so a slot owes at most one END at any time.
+ *
+ * At most one slot can be open, but sweeping all of them is what makes that an
+ * invariant rather than an assumption. */
+static void fast_sync_close(drmtap_ctx *ctx) {
+    for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+        if (ctx->fast_slots[i].sync_started && ctx->fast_slots[i].prime_fd >= 0) {
+            dmabuf_sync_end(ctx->fast_slots[i].prime_fd);
+        }
+        ctx->fast_slots[i].sync_started = 0;
+    }
+}
+
+/* Invalidate the CPU caches for a cached slot before reading it, recording the
+ * START so exactly one END follows. The virtio sub-path does NOT come through
+ * here: it makes the buffer coherent with TRANSFER_FROM_HOST instead of a
+ * dma-buf sync, so pairing an END with it would be an END that never had a
+ * START. */
+static void fast_sync_begin(drmtap_ctx *ctx, int slot) {
+    fast_sync_close(ctx);
+    if (ctx->fast_slots[slot].prime_fd >= 0) {
+        ctx->fast_slots[slot].sync_started =
+            (dmabuf_sync_start(ctx->fast_slots[slot].prime_fd) == 0);
+    }
+}
+
 /* Ensure *buf holds at least `size` bytes, growing once and never shrinking so
  * steady-state capture reuses one allocation instead of malloc/free per frame.
  * Caps the allocation at DRMTAP_MAX_FB_BYTES as a guard against a bogus/hostile
@@ -1688,6 +1721,9 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
 
 // Clean up all cached buffer slots
 void drmtap_fast_cleanup(drmtap_ctx *ctx) {
+    /* Before the fds go away: a slot may still owe a SYNC_END, and it must be
+     * issued while its prime_fd is open. */
+    fast_sync_close(ctx);
     for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
         if (ctx->fast_slots[i].mmap_ptr &&
             ctx->fast_slots[i].mmap_ptr != MAP_FAILED) {
@@ -1820,8 +1856,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                             ctx->fast_slots[i].fb_width,
                             ctx->fast_slots[i].height);
                     if (ret < 0) return ret;
+                    fast_sync_close(ctx);
                 } else {
-                    dmabuf_sync_start(ctx->fast_slots[i].prime_fd);
+                    fast_sync_begin(ctx, i);
                 }
                 frame->data = ctx->fast_slots[i].mmap_ptr;
                 frame->dma_buf_fd = ctx->fast_slots[i].prime_fd;
@@ -1868,8 +1905,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 drmtap_debug_log(ctx, "fast2: cached transfer failed: %d", ret);
                 return ret;
             }
+            fast_sync_close(ctx);
         } else {
-            dmabuf_sync_start(ctx->fast_slots[slot].prime_fd);
+            fast_sync_begin(ctx, slot);
         }
 
         ctx->fast_last_fb_id = fb_id;
@@ -1985,6 +2023,12 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     /* mmap */
     size_t size = (size_t)fb2->pitches[0] * fb2->height;
     void *mapped = MAP_FAILED;
+    /* This grab supersedes the previous frame, so whatever window a cached slot
+     * left open is finished with. Close it before opening a new one. */
+    fast_sync_close(ctx);
+    /* Whether the START below succeeded. It is taken before the slot exists, so
+     * it is carried here and recorded when the slot is stored. */
+    int sync_started = 0;
 
     if (is_virtio_gpu(ctx)) {
         ret = virtio_transfer_from_host(ctx, fb2->handles[0],
@@ -1998,7 +2042,11 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
      * property of the driver and the buffer placement, not of one frame, so
      * retrying it per frame only costs a failing syscall. */
     if (mapped == MAP_FAILED && !ctx->fast_no_cpu_map) {
-        dmabuf_sync_start(prime_fd);
+        /* Unlike do_grab, this START is load-bearing: it is the ONLY cache
+         * invalidation before the first read of the slot being populated, since
+         * no second START follows a successful mmap here. It must stay, and it
+         * must be recorded so an END follows exactly once. */
+        sync_started = (dmabuf_sync_start(prime_fd) == 0);
         mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
                       prime_fd, fb2->offsets[0]);
         /* Test hook (drmtap_force_mmap_fail): drop a successful mapping so the
@@ -2057,6 +2105,14 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
              * (the caller's output buffer if one was set, otherwise the ctx-owned
              * one), so the fd and handle are no longer needed and nothing is cached
              * for fb_id. */
+            /* No slot is cached for this fb, so nothing will ever pair the
+             * START taken above. Close the window on the fd while it is still
+             * open, rather than leaving the exporter with an access that only
+             * the fd going away ends. */
+            if (sync_started) {
+                dmabuf_sync_end(prime_fd);
+                sync_started = 0;
+            }
             close(prime_fd);
             frame->dma_buf_fd = -1;  /* prime_fd is closed; don't hand back a stale fd */
             drmtap_gem_close(ctx, fb2->handles[0]);
@@ -2077,6 +2133,10 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             "available (built without egl/glesv2, or no usable render node). "
             "This GPU needs the EGL detile path; use drmtap_grab_mapped() or "
             "build with -Degl=enabled.", fb_id);
+        if (sync_started) {
+            dmabuf_sync_end(prime_fd);
+            sync_started = 0;
+        }
         close(prime_fd);
         drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
@@ -2087,6 +2147,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     ctx->fast_slots[slot].fb_id = fb_id;
     ctx->fast_slots[slot].gem_handle = fb2->handles[0];
     ctx->fast_slots[slot].prime_fd = prime_fd;
+    /* Hand the open window to the slot, so the next grab (or fast_cleanup)
+     * issues its END. */
+    ctx->fast_slots[slot].sync_started = sync_started;
     ctx->fast_slots[slot].mmap_ptr = mapped;
     ctx->fast_slots[slot].mmap_size = size;
     /* Cache the SCANNED-OUT width, so every later cache hit replays the narrowed

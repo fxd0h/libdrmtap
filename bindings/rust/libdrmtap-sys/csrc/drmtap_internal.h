@@ -93,6 +93,12 @@ struct drmtap_ctx {
         int      fb2_num_planes;
         uint32_t fb2_pitches[4];
         uint32_t fb2_offsets[4];
+        /* 1 = a DMA_BUF_SYNC_START is open on prime_fd and still owes its END.
+         * The fast path keeps its mapping across frames, so the CPU-access
+         * window closes at the next grab, not at frame release -- a fast frame
+         * carries no _priv and is never released. Without this flag each slot
+         * accumulated one unmatched START per frame for its whole lifetime. */
+        int      sync_started;
     } fast_slots[4];
     uint32_t fast_plane_id;         /* cached primary plane id */
     uint32_t fast_last_fb_id;       /* fb_id from last capture (change detect) */
