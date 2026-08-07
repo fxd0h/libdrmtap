@@ -38,5 +38,5 @@ cargo build --release
 These patches track upstream PR
 [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420),
 which adds a DRM/KMS capture backend to `scrap` so RustDesk can capture
-Wayland sessions without the portal consent dialog. The PR is **under
-maintainer review** (in progress, not yet merged).
+Wayland sessions without the portal consent dialog. The PR was **merged on
+2026-08-06**.

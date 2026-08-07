@@ -75,7 +75,7 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...) {
     va_end(ap);
 }
 
-void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...) {
+void drmtap_debug_log(const drmtap_ctx *ctx, const char *fmt, ...) {
     if (!ctx || !ctx->debug) {
         return;
     }
@@ -225,6 +225,24 @@ static void detect_driver(drmtap_ctx *ctx) {
     } else {
         drmtap_debug_log(ctx, "warning: could not get DRM version");
     }
+
+    /* Say this once per context, next to the driver, so it lands in every bug
+     * report. Without it a stub build is invisible until the first tiled scanout
+     * fails, and the failure then reads like a hardware problem: issue #45 spent a
+     * day on exactly that. Whether the backend exists is a build fact, so it can
+     * be stated here; whether it will WORK depends on the render node and is only
+     * known at first use. */
+#ifdef HAVE_EGL
+    drmtap_debug_log(ctx, "EGL detile backend: compiled in");
+#else
+    drmtap_debug_log(ctx,
+        "EGL detile backend: NOT COMPILED IN. The CPU path still decodes the "
+        "plain tilings (Intel X/Y/Yf-tiled, Nvidia block-linear) and linear "
+        "scanouts, but a COMPRESSED scanout, or any tiled layout it does not "
+        "decode, will fail closed -- and that is what current Intel and AMD "
+        "desktops scan out. Install libegl-dev and libgles2-mesa-dev, then "
+        "reconfigure with -Degl=enabled");
+#endif
 }
 
 /* ========================================================================= */

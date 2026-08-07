@@ -50,7 +50,7 @@ int main() {
 
 ```toml
 [dependencies]
-libdrmtap = "0.3"
+libdrmtap = "0.5"
 ```
 
 > This pulls in `libdrmtap-sys`, which embeds and statically compiles the
@@ -90,14 +90,36 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Rust bindings ([crates.io](https://crates.io/crates/libdrmtap)) | ✅ Published |
 | MIT License | ✅ |
 
-> ⚠️ **Testing status**: Capture pipeline verified with the V3 zero-copy path on
-> `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`, dual 3840x2160,
-> EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64, Wayland).
-> The AMD (`amdgpu`) backend is verified on real hardware on two generations, by
-> two different people: **RX Vega 64 (gfx9), confirmed by an outside tester** (via
-> the EGL detile path — see [#26](https://github.com/fxd0h/libdrmtap/issues/26)),
-> and **RX560 (Polaris/gfx8), verified here** (2880x1800 `eDP-1`, tiled `XR30`
-> scanout, EGL detile).
+> ⚠️ **Testing status**: every entry below is a machine someone captured from,
+> and it says whose. A tester confirmation is one host on one day, not a support
+> matrix.
+>
+> **Verified here:**
+> - **Intel Meteor Lake-P** (`i915`, Core Ultra 7 155H) — multiple displays up to
+>   3840x2160, `4_TILED_MTL_RC_CCS_CC` scanout detiled through EGL.
+> - **AMD RX560** (Polaris/gfx8) — 2880x1800 `eDP-1`, tiled `XR30`, EGL detile.
+> - **NVIDIA Jetson Orin Nano** (`nvidia-drm`, aarch64, Wayland).
+> - **`virtio_gpu`** (QEMU/Parallels VMs), V3 zero-copy path.
+>
+> **Confirmed by outside testers, on their hardware and not ours:**
+> - **AMD RX Vega 64** (gfx9), X11, modifier `0x200000004801a01`, unprivileged via
+>   the helper — GK-Gaming, 2026-07-29
+>   ([#26](https://github.com/fxd0h/libdrmtap/issues/26),
+>   [#36](https://github.com/fxd0h/libdrmtap/issues/36)).
+> - **Intel Raptor Lake with a hybrid NVIDIA GPU** (ThinkBook 16p G5 IRX, Ubuntu
+>   26.04, GNOME Wayland, `eDP-1`, `Y_TILED_GEN12_RC_CCS_CC`) — huzhifeng,
+>   2026-08-07 ([#45](https://github.com/fxd0h/libdrmtap/issues/45)).
+>
+> Whichever GPU you have, most of this depends on the EGL detile backend. The
+> CPU path on its own still handles linear scanouts and the plain tilings (Intel
+> X/Y/Yf-tiled, Nvidia block-linear), but a **compressed** scanout, or any tiled
+> layout it has no deswizzler for, **fails closed** — it returns an error rather
+> than passing the raw bytes off as linear pixels. Current Intel and AMD desktops
+> scan out exactly those. The `egl` Meson feature defaults to `auto`, which
+> silently builds the CPU-only stub when the headers are missing, so configure
+> with `-Degl=enabled` to fail at configure time instead — that is what
+> [#45](https://github.com/fxd0h/libdrmtap/issues/45) turned out to be.
+>
 > **Multi-GPU render-node selection is verified on the Jetson Orin's two DRM
 > devices** (`tegra`/renderD128 with no connectors + `nvidia-drm`/renderD129
 > driving the display): the converter now binds renderD129, the node that
@@ -159,10 +181,12 @@ sudo apt install meson gcc libdrm-dev pkg-config
 # Optional (for EGL GPU-universal detiling):
 sudo apt install libegl-dev libgles2-mesa-dev
 
-# Build
+# Build. -Degl=enabled is not optional in practice: the EGL backend is what
+# detiles a modern scanout, and without it meson quietly builds a stub that
+# fails on the first real frame. Passing it turns that into a configure error.
 git clone https://github.com/fxd0h/libdrmtap.git
 cd libdrmtap
-meson setup build
+meson setup build -Degl=enabled
 meson compile -C build
 ```
 
@@ -210,7 +234,7 @@ with mouse and keyboard input:
 
 ```bash
 # Build with libvncserver (optional dependency)
-meson setup build && meson compile -C build
+meson setup build -Degl=enabled && meson compile -C build
 
 # Run (needs root for uinput access)
 sudo ./build/vnc_server
@@ -223,12 +247,15 @@ sudo ./build/vnc_server
 
 libdrmtap is being upstreamed into [RustDesk](https://github.com/rustdesk/rustdesk)
 via [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420).
-The integration adds a `drm` backend to `scrap` that depends on the
-[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) crate, which
-embeds and statically compiles the C sources (and the privilege helper) — so
-there is no system `libdrmtap` install and no dynamic `libdrmtap.so` linkage.
+The integration adds a `drm` backend to `scrap` that **dlopens** `libdrmtap.so.0`
+at runtime: it does not link libdrmtap at build time and does not depend on the
+[`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) crate, whose `build.rs`
+would statically compile the whole C tree and a privileged helper. Loading the
+shared object by soname is what lets a missing or too-old `.so` degrade to the
+existing PipeWire path instead of breaking the build.
 
-A self-contained example of the same crate-based backend lives in
+A self-contained example of the crate-based backend, which does link
+`libdrmtap-sys` statically, lives in
 [`contrib/integrations/rustdesk/`](contrib/integrations/rustdesk/README.md).
 **Tested and verified** on Ubuntu 24.04 with `cargo build` (zero errors).
 

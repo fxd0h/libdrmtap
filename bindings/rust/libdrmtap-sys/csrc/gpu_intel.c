@@ -36,11 +36,15 @@
 #include "drmtap_internal.h"
 #include "drmtap.h"  /* for drmtap_deswizzle */
 
-/* Intel modifier constants */
+/* Intel modifier constants, values and names taken from <drm_fourcc.h>. The
+ * three CCS names here used to be off by one against that header (0x05 was
+ * called Y_TILED_CCS, which is really 0x04 and was missing), so read them from
+ * the header, never from this list. */
 #define I915_MOD_X_TILED                  0x0100000000000001ULL
 #define I915_MOD_Y_TILED                  0x0100000000000002ULL
 #define I915_MOD_Yf_TILED                 0x0100000000000003ULL
-#define I915_MOD_Y_TILED_CCS              0x0100000000000005ULL
+#define I915_MOD_Y_TILED_CCS              0x0100000000000004ULL
+#define I915_MOD_Yf_TILED_CCS             0x0100000000000005ULL
 #define I915_MOD_Y_TILED_GEN12_RC_CCS     0x0100000000000006ULL
 #define I915_MOD_Y_TILED_GEN12_MC_CCS     0x0100000000000007ULL
 #define I915_MOD_Y_TILED_GEN12_RC_CCS_CC  0x0100000000000008ULL
@@ -68,14 +72,14 @@ int drmtap_gpu_intel_process(drmtap_ctx *ctx, void *data,
         return 0;
     }
 
-    /* X-TILED, Y-TILED, or Gen12 CCS variants — use CPU deswizzle.
-     * Gen12+ CCS framebuffers are decompressed transparently by the
-     * hardware when read via mmap. CPU only sees Y-tiled base layout. */
+    /* The plain tilings, which drmtap_deswizzle can decode. The CCS variants are
+     * deliberately NOT here: this used to claim that "Gen12+ CCS framebuffers are
+     * decompressed transparently by the hardware when read via mmap", and that is
+     * false -- a CPU read of a CCS scanout yields data no deswizzle decodes, which
+     * is why drmtap_deswizzle answers -ENOTSUP for them. Listing them here changed
+     * nothing except to suggest they were handled. */
     if (modifier == I915_MOD_X_TILED || modifier == I915_MOD_Y_TILED ||
-        modifier == I915_MOD_Yf_TILED || modifier == I915_MOD_Y_TILED_CCS ||
-        modifier == I915_MOD_Y_TILED_GEN12_RC_CCS ||
-        modifier == I915_MOD_Y_TILED_GEN12_MC_CCS ||
-        modifier == I915_MOD_Y_TILED_GEN12_RC_CCS_CC) {
+        modifier == I915_MOD_Yf_TILED) {
         drmtap_debug_log(ctx, "intel: tiled modifier 0x%lx, CPU deswizzle",
                          (unsigned long)modifier);
 
@@ -103,7 +107,11 @@ int drmtap_gpu_intel_process(drmtap_ctx *ctx, void *data,
         return ret;
     }
 
-    drmtap_debug_log(ctx, "intel: unknown modifier 0x%lx, passing through",
+    /* A non-linear Intel modifier we do not decode (every CCS variant, and the
+     * whole Tile4 family). "Passing through" with 0 used to leave the caller
+     * holding the still-tiled mapping believing it was converted. Fail closed,
+     * the same answer drmtap_deswizzle gives. */
+    drmtap_debug_log(ctx, "intel: modifier 0x%lx needs a GPU detile -- failing closed",
                      (unsigned long)modifier);
-    return 0;
+    return -ENOTSUP;
 }

@@ -332,6 +332,40 @@ static int dmabuf_sync_end(int fd) {
     return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
+// Close whatever CPU-access window the fast path left open.
+//
+// The slow path pairs its START with an END in drmtap_frame_release, but a fast
+// frame points into a mapping the context keeps CACHED across frames and carries
+// no _priv, so it is never released and there is no such moment. The window
+// therefore closes at the next grab, which is also when the caller has provably
+// finished reading the previous frame. Called before every new START, before a
+// slot can be evicted, and from drmtap_fast_cleanup, so a slot owes at most one
+// END at any time.
+//
+// At most one slot can be open, but sweeping all of them is what makes that an
+// invariant rather than an assumption.
+static void fast_sync_close(drmtap_ctx *ctx) {
+    for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
+        if (ctx->fast_slots[i].sync_started && ctx->fast_slots[i].prime_fd >= 0) {
+            dmabuf_sync_end(ctx->fast_slots[i].prime_fd);
+        }
+        ctx->fast_slots[i].sync_started = 0;
+    }
+}
+
+// Invalidate the CPU caches for a cached slot before reading it, recording the
+// START so exactly one END follows. The virtio sub-path does NOT come through
+// here: it makes the buffer coherent with TRANSFER_FROM_HOST instead of a
+// dma-buf sync, so pairing an END with it would be an END that never had a
+// START.
+static void fast_sync_begin(drmtap_ctx *ctx, int slot) {
+    fast_sync_close(ctx);
+    if (ctx->fast_slots[slot].prime_fd >= 0) {
+        ctx->fast_slots[slot].sync_started =
+            (dmabuf_sync_start(ctx->fast_slots[slot].prime_fd) == 0);
+    }
+}
+
 /* Ensure *buf holds at least `size` bytes, growing once and never shrinking so
  * steady-state capture reuses one allocation instead of malloc/free per frame.
  * Caps the allocation at DRMTAP_MAX_FB_BYTES as a guard against a bogus/hostile
@@ -1116,9 +1150,11 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             }
         }
 
-        /* Standard DMA-BUF mmap path (non-virtio or virtio fallback) */
+        /* Standard DMA-BUF mmap path (non-virtio or virtio fallback).
+         * No SYNC_START here: the mapping itself is not CPU access, and the
+         * only START that may be issued is the recorded one below, which
+         * release matches with a SYNC_END. */
         if (mapped == MAP_FAILED) {
-            dmabuf_sync_start(prime_fd);
             mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
                           prime_fd, fb2->offsets[0]);
         }
@@ -1153,7 +1189,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         } else {
             /* Invalidate CPU caches with SYNC_START and remember it succeeded so
              * release issues the matching SYNC_END (and only then). Crucial for
-             * virtio_gpu where the transfer arrives in system RAM asynchronously. */
+             * virtio_gpu where the transfer arrives in system RAM asynchronously.
+             * This is the ONLY START on this path, so START and END stay 1:1 per
+             * frame, including when the mmap above failed and EGL took over. */
             priv->sync_started = (dmabuf_sync_start(prime_fd) == 0);
 
             priv->mapped = mapped;
@@ -1471,12 +1509,32 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
              * instead of failing over). Fail closed so the caller ends the stream
              * and falls back (e.g. to PipeWire) instead. */
             drmtap_debug_log(ctx,
-                "auto-process: CCS modifier 0x%lx needs GPU deswizzle "
-                "(EGL/DMA-BUF), CPU deswizzle not possible -- failing closed",
+                "auto-process: modifier 0x%lx has no CPU deswizzle here and the "
+                "GPU detile did not run -- failing closed",
                 (unsigned long)modifier);
+#ifdef HAVE_EGL
+            /* EGL IS compiled in, so the detile was skipped or it failed at
+             * runtime: no dma-buf fd on this path (helper V2 pixel mode), or no
+             * usable render node. Point at that, not at the build. */
             drmtap_set_error(ctx,
-                "compressed scanout (modifier 0x%lx) needs a GPU deswizzle, "
-                "which is unavailable on this path", (unsigned long)modifier);
+                "scanout modifier 0x%lx needs a GPU detile, and the EGL detile "
+                "this build carries was unavailable or failed: no dma-buf fd on "
+                "this path, no usable render node, or the import itself failed. "
+                "Run with debug logging on -- the EGL: lines say which",
+                (unsigned long)modifier);
+#else
+            /* The single most common cause of this error, and previously
+             * indistinguishable from the runtime one. `meson setup build` alone
+             * leaves the egl feature on 'auto', which silently builds the stub
+             * when the headers are missing, and nothing says so until a real
+             * tiled scanout arrives -- which on modern Intel is every frame. */
+            drmtap_set_error(ctx,
+                "scanout modifier 0x%lx needs a GPU detile, and THIS BUILD HAS "
+                "NO EGL BACKEND. Install the EGL development packages "
+                "(Debian/Ubuntu: libegl-dev libgles2-mesa-dev) and reconfigure "
+                "with -Degl=enabled, which fails the build instead of silently "
+                "producing this stub", (unsigned long)modifier);
+#endif
             return -ENOTSUP;
         }
         if (ret == 0) {
@@ -1532,9 +1590,19 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     drmtap_debug_log(ctx, "auto-process: unknown driver '%s' mod=0x%lx cannot "
                      "deswizzle and EGL unavailable -- failing closed",
                      driver, (unsigned long)modifier);
+#ifdef HAVE_EGL
     drmtap_set_error(ctx,
-        "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle and "
-        "EGL detile is unavailable", driver, (unsigned long)modifier);
+        "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle here, "
+        "and the EGL detile this build carries was unavailable or failed. Run "
+        "with debug logging on -- the EGL: lines say which",
+        driver, (unsigned long)modifier);
+#else
+    drmtap_set_error(ctx,
+        "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle, and "
+        "THIS BUILD HAS NO EGL BACKEND. Install the EGL development packages "
+        "(Debian/Ubuntu: libegl-dev libgles2-mesa-dev) and reconfigure with "
+        "-Degl=enabled", driver, (unsigned long)modifier);
+#endif
     return -ENOTSUP;
 }
 
@@ -1655,6 +1723,9 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
 
 // Clean up all cached buffer slots
 void drmtap_fast_cleanup(drmtap_ctx *ctx) {
+    /* Before the fds go away: a slot may still owe a SYNC_END, and it must be
+     * issued while its prime_fd is open. */
+    fast_sync_close(ctx);
     for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
         if (ctx->fast_slots[i].mmap_ptr &&
             ctx->fast_slots[i].mmap_ptr != MAP_FAILED) {
@@ -1693,6 +1764,13 @@ static int find_or_alloc_slot(drmtap_ctx *ctx, uint32_t fb_id) {
         }
     }
     // Cache full — evict slot 0 (oldest)
+    // Close its sync window first: after the munmap and close below the fd is
+    // gone and the END can no longer be issued. The one caller already closes
+    // every window before getting here, so this is a backstop for the next one.
+    if (ctx->fast_slots[0].sync_started && ctx->fast_slots[0].prime_fd >= 0) {
+        dmabuf_sync_end(ctx->fast_slots[0].prime_fd);
+        ctx->fast_slots[0].sync_started = 0;
+    }
     if (ctx->fast_slots[0].mmap_ptr &&
         ctx->fast_slots[0].mmap_ptr != MAP_FAILED) {
         munmap(ctx->fast_slots[0].mmap_ptr, ctx->fast_slots[0].mmap_size);
@@ -1787,8 +1865,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                             ctx->fast_slots[i].fb_width,
                             ctx->fast_slots[i].height);
                     if (ret < 0) return ret;
+                    fast_sync_close(ctx);
                 } else {
-                    dmabuf_sync_start(ctx->fast_slots[i].prime_fd);
+                    fast_sync_begin(ctx, i);
                 }
                 frame->data = ctx->fast_slots[i].mmap_ptr;
                 frame->dma_buf_fd = ctx->fast_slots[i].prime_fd;
@@ -1818,6 +1897,12 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     }
 
     /* Step 4: fb_id changed — check if we have this buffer cached */
+    /* Before find_or_alloc_slot, which EVICTS slot 0 when the cache is full:
+     * eviction closes prime_fd and memsets the slot, so an open sync window
+     * would lose both its fd and its flag and the END would never be issued.
+     * This grab supersedes the previous frame anyway, so the window is finished
+     * with by now. */
+    fast_sync_close(ctx);
     int slot = find_or_alloc_slot(ctx, fb_id);
 
     if (ctx->fast_slots[slot].fb_id == fb_id && ctx->fast_slots[slot].mmap_ptr) {
@@ -1835,8 +1920,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 drmtap_debug_log(ctx, "fast2: cached transfer failed: %d", ret);
                 return ret;
             }
+            fast_sync_close(ctx);
         } else {
-            dmabuf_sync_start(ctx->fast_slots[slot].prime_fd);
+            fast_sync_begin(ctx, slot);
         }
 
         ctx->fast_last_fb_id = fb_id;
@@ -1952,6 +2038,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     /* mmap */
     size_t size = (size_t)fb2->pitches[0] * fb2->height;
     void *mapped = MAP_FAILED;
+    // Whether the START below succeeded. It is taken before the slot is stored,
+    // so it is carried here and recorded when it is.
+    int sync_started = 0;
 
     if (is_virtio_gpu(ctx)) {
         ret = virtio_transfer_from_host(ctx, fb2->handles[0],
@@ -1965,7 +2054,11 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
      * property of the driver and the buffer placement, not of one frame, so
      * retrying it per frame only costs a failing syscall. */
     if (mapped == MAP_FAILED && !ctx->fast_no_cpu_map) {
-        dmabuf_sync_start(prime_fd);
+        /* Unlike do_grab, this START is load-bearing: it is the ONLY cache
+         * invalidation before the first read of the slot being populated, since
+         * no second START follows a successful mmap here. It must stay, and it
+         * must be recorded so an END follows exactly once. */
+        sync_started = (dmabuf_sync_start(prime_fd) == 0);
         mapped = mmap(NULL, size, PROT_READ, MAP_SHARED,
                       prime_fd, fb2->offsets[0]);
         /* Test hook (drmtap_force_mmap_fail): drop a successful mapping so the
@@ -2024,6 +2117,15 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
              * (the caller's output buffer if one was set, otherwise the ctx-owned
              * one), so the fd and handle are no longer needed and nothing is cached
              * for fb_id. */
+            /* No slot is cached for this fb, so nothing will ever pair the
+             * START taken above. Close the window on the fd while it is still
+             * open, rather than leaving the exporter with an access that only
+             * the fd going away ends. */
+            /* No reset of sync_started after the END: this path returns without
+             * caching a slot, so nothing reads it again. */
+            if (sync_started) {
+                dmabuf_sync_end(prime_fd);
+            }
             close(prime_fd);
             frame->dma_buf_fd = -1;  /* prime_fd is closed; don't hand back a stale fd */
             drmtap_gem_close(ctx, fb2->handles[0]);
@@ -2044,6 +2146,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             "available (built without egl/glesv2, or no usable render node). "
             "This GPU needs the EGL detile path; use drmtap_grab_mapped() or "
             "build with -Degl=enabled.", fb_id);
+        if (sync_started) {
+            dmabuf_sync_end(prime_fd);
+        }
         close(prime_fd);
         drmtap_gem_close(ctx, fb2->handles[0]);
         drmModeFreeFB2(fb2);
@@ -2054,6 +2159,9 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     ctx->fast_slots[slot].fb_id = fb_id;
     ctx->fast_slots[slot].gem_handle = fb2->handles[0];
     ctx->fast_slots[slot].prime_fd = prime_fd;
+    /* Hand the open window to the slot, so the next grab (or fast_cleanup)
+     * issues its END. */
+    ctx->fast_slots[slot].sync_started = sync_started;
     ctx->fast_slots[slot].mmap_ptr = mapped;
     ctx->fast_slots[slot].mmap_size = size;
     /* Cache the SCANNED-OUT width, so every later cache hit replays the narrowed
@@ -2220,6 +2328,25 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                              "(fd_size=%lld, need offset %u + %zu)",
                              (long long)fd_size, desc->offsets[0], need);
             return -EINVAL;
+        }
+        /* Planes 1..n are the CCS / clear-colour auxiliaries of a compressed
+         * scanout (Gen12+), and they used to reach eglCreateImage with no bound
+         * at all. Their height is a format-specific fraction of the image height
+         * -- a Gen12 CCS plane is 1/16th -- not desc->height, so their full
+         * extent is not computable here and a pitches[p]*height bound would
+         * REJECT legitimate compressed scanouts. Bound what is knowable instead:
+         * the offset plus one row must lie inside the buffer. Weaker than the
+         * plane-0 check by necessity, but it can never reject a valid descriptor
+         * and it does reject the wild values that were forwarded unchecked. */
+        for (uint32_t p = 1; p < num_planes; p++) {
+            if ((uint64_t)desc->offsets[p] + (uint64_t)desc->pitches[p]
+                    > (uint64_t)fd_size) {
+                drmtap_set_error(ctx, "convert: plane %u exceeds dma-buf size "
+                                 "(fd_size=%lld, offset %u + pitch %u)",
+                                 p, (long long)fd_size, desc->offsets[p],
+                                 desc->pitches[p]);
+                return -EINVAL;
+            }
         }
     }
 

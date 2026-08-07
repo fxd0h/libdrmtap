@@ -28,6 +28,8 @@
 #include <math.h>
 #include <pthread.h>
 
+#include <drm_fourcc.h>   /* DRM_FORMAT_MOD_INVALID */
+
 #include "drmtap.h"
 
 /* ========================================================================= */
@@ -328,24 +330,29 @@ int drmtap_deswizzle(const void *src, void *dst,
              * Pure Y-tiled without compression — CPU deswizzle works. */
             return deswizzle_intel_y_tiled(src, dst, width, height,
                                            src_stride, dst_stride, src_size);
-        } else if (mod_type == 0x05 || mod_type == 0x06 ||
-                   mod_type == 0x07 || mod_type == 0x08) {
-            /* I915_FORMAT_MOD_Y_TILED_CCS (0x05)
-             * I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS (0x06)
-             * I915_FORMAT_MOD_Y_TILED_GEN12_MC_CCS (0x07)
-             * I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC (0x08)
-             *
-             * CCS (Color Compression Surface) variants. The pixel data
-             * is GPU-compressed and CANNOT be CPU-deswizzled.
-             * A dumb_mmap of CCS-compressed buffers returns garbage —
-             * only EGL import (via DMA-BUF fd) can decompress correctly.
-             *
-             * In the helper path (dma_buf_fd == -1), pixels arrive via
-             * socket from a dumb_mmap, so they are still CCS-compressed.
-             * We return -ENOTSUP to signal that GPU deswizzle (EGL) or
-             * DMA-BUF fd passing (SCM_RIGHTS) is required. */
-            return -ENOTSUP;
         }
+        /* Every other Intel modifier: fail closed. Values from
+         * /usr/include/libdrm/drm_fourcc.h, not from memory:
+         *
+         *   0x04 Y_TILED_CCS          0x05 Yf_TILED_CCS
+         *   0x06 Y_TILED_GEN12_RC_CCS 0x07 Y_TILED_GEN12_MC_CCS
+         *   0x08 Y_TILED_GEN12_RC_CCS_CC
+         *   0x09 4_TILED
+         *   0x0a..0x0c 4_TILED_DG2_*  0x0d..0x0f 4_TILED_MTL_*
+         *   0x10 4_TILED_LNL_CCS      0x11 4_TILED_BMG_CCS
+         *
+         * The CCS variants are GPU-compressed: a CPU read of the mapping
+         * returns data no deswizzle can decode, and only an EGL import of the
+         * DMA-BUF fd decompresses correctly. 4_TILED (0x09) is not compressed
+         * but uses the Tile4 layout, for which there is no deswizzler here.
+         *
+         * Either way the answer is -ENOTSUP, so the caller ends the stream and
+         * falls back (rustdesk demotes to PipeWire) instead of being handed
+         * corruption reported as a valid frame. That is not hypothetical: this
+         * used to fall through to the linear memcpy below and return 0, and on
+         * a Meteor Lake scanout (0x0f) it produced a full screen of tile noise
+         * that the caller had no way to tell from a real capture. */
+        return -ENOTSUP;
     }
 
     /* Nvidia modifier: vendor = 0x10 (NVIDIA) */
@@ -354,19 +361,35 @@ int drmtap_deswizzle(const void *src, void *dst,
                                          src_stride, dst_stride, src_size);
     }
 
-    /* Unknown modifier — try linear copy as fallback (bounded by src_size). */
-    for (uint32_t y = 0; y < height; y++) {
-        size_t row_off = (size_t)y * src_stride;
-        if (row_off + (size_t)width * 4 > src_size) {
-            /* Zero-fill unbacked rows rather than leaking uninitialized dst. */
-            memset((uint8_t *)dst + y * dst_stride, 0, (size_t)width * 4);
-            continue;
+    /* DRM_FORMAT_MOD_INVALID means the framebuffer advertised NO modifier, so the
+     * layout is unstated rather than known-tiled. In practice that is a linear
+     * buffer from a simple driver (virtio, embedded), and copying it row by row is
+     * the historical contract of this entry point. Keep it. */
+    if (modifier == DRM_FORMAT_MOD_INVALID) {
+        for (uint32_t y = 0; y < height; y++) {
+            size_t row_off = (size_t)y * src_stride;
+            if (row_off + (size_t)width * 4 > src_size) {
+                /* Zero-fill unbacked rows rather than leaking uninitialized dst. */
+                memset((uint8_t *)dst + y * dst_stride, 0, (size_t)width * 4);
+                continue;
+            }
+            memcpy((uint8_t *)dst + y * dst_stride,
+                   (const uint8_t *)src + row_off,
+                   width * 4);
         }
-        memcpy((uint8_t *)dst + y * dst_stride,
-               (const uint8_t *)src + row_off,
-               width * 4);
+        return 0;
     }
-    return 0;
+
+    /* Anything else is a vendor-tagged modifier naming a real layout we do not
+     * decode (AMD DCC/tiling, or a vendor added after this build). Copying it out
+     * linearly would relabel a tiled buffer LINEAR and hand back corruption that
+     * the caller reads as a valid frame, so fail closed and let it fall back.
+     *
+     * Caveat worth knowing: AMD's modifier encoding can describe a LINEAR tile
+     * mode, and such a buffer is now rejected rather than copied. That trade is
+     * deliberate -- silently wrong pixels are worse than a fallback -- but it is
+     * the one case where this is stricter than it strictly has to be. */
+    return -ENOTSUP;
 }
 
 /* ========================================================================= */

@@ -77,9 +77,14 @@ libdrmtap/
 libdrmtap builds with **meson + C11**:
 
 ```bash
-meson setup build
+meson setup build -Degl=enabled
 meson compile -C build
 ```
+
+Use `-Degl=enabled` rather than the `auto` default. On `auto`, a host without
+`libegl-dev`/`libgles2-mesa-dev` builds the EGL stub silently, and the first
+tiled scanout then fails with an error that reads like a hardware problem.
+`enabled` fails at configure time instead, which is the point.
 
 Optional dependencies unlock optional features (meson auto-detects them):
 

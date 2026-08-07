@@ -10,19 +10,25 @@ reports HDR (`P010` overlay-video and HLG excepted).
 
 ## ⚠️ Testing Status
 
-> **Verified on `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`,
-> dual 4K, EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`,
-> Wayland).**
+> **Verified here:** Intel Meteor Lake-P (`i915`, multi-display 4K, EGL
+> detiling), AMD RX560 (Polaris/gfx8), NVIDIA Jetson Orin Nano (`nvidia-drm`,
+> aarch64, Wayland), and `virtio_gpu` (QEMU/Parallels VMs).
 >
-> The AMD (`amdgpu`) backend is validated on real hardware (RX Vega 64, gfx9,
-> via EGL detile). Hit a problem on other AMD hardware? Please
-> [report results](https://github.com/fxd0h/libdrmtap/issues).
+> **Confirmed by outside testers, on their hardware:** AMD RX Vega 64 (gfx9, X11)
+> by GK-Gaming, and Intel Raptor Lake with a hybrid NVIDIA GPU (Ubuntu 26.04,
+> GNOME Wayland) by huzhifeng. One host each, not a support matrix.
+>
+> All of it depends on the EGL detile backend, which `libdrmtap-sys` always
+> compiles in. It needs the EGL and GLES2 headers at build time (`libegl-dev`
+> and `libgles2-mesa-dev` on Debian/Ubuntu); `cargo build` fails without them
+> rather than quietly producing a CPU-only library. Hit a problem on other
+> hardware? Please [report results](https://github.com/fxd0h/libdrmtap/issues).
 
 ## Installation
 
 ```toml
 [dependencies]
-libdrmtap = "0.3"
+libdrmtap = "0.5"
 ```
 
 This pulls in `libdrmtap-sys`, which embeds and statically compiles the C

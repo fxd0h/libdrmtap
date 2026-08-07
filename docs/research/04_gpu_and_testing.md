@@ -3,7 +3,7 @@
 > **Date**: 2026-03-14  
 > **Sources**: kmsvnc/drm.c, kms-screenshot.c, kernel.org vkms, DRM-CI
 
-> **Update (libdrmtap 0.4.4)** — The tables below capture the early *research* into how reference projects (kmsvnc, kms-screenshot, FFmpeg) deswizzle each vendor. libdrmtap ultimately took a different route: a single GPU-universal **EGL/GLES2 detiling** backend (`src/gpu_egl.c`) imports the scanout DMA-BUF as an `EGLImage`, draws it, and `glReadPixels()` to linear RGBA — so per-vendor tiling (Intel X/Y-tiled + CCS, AMD modifiers, Nvidia block-linear) is handled by the driver itself, with no per-GPU CPU deswizzle in the common case. A CPU deswizzle remains only as a fallback for some formats. **Verified:** Intel `i915`/`xe` (dual-4K Meteor Lake, CCS), Nvidia `nvidia-drm` incl. Tegra/Jetson (Orin Nano, aarch64), and virtio-gpu. **AMD `amdgpu` is verified on real hardware (RX Vega 64, gfx9).**
+> **Update (libdrmtap 0.4.4)** — The tables below capture the early *research* into how reference projects (kmsvnc, kms-screenshot, FFmpeg) deswizzle each vendor. libdrmtap ultimately took a different route: a single GPU-universal **EGL/GLES2 detiling** backend (`src/gpu_egl.c`) imports the scanout DMA-BUF as an `EGLImage`, draws it, and `glReadPixels()` to linear RGBA — so per-vendor tiling (Intel X/Y-tiled + CCS, AMD modifiers, Nvidia block-linear) is handled by the driver itself, with no per-GPU CPU deswizzle in the common case. A CPU deswizzle remains only as a fallback for some formats. **Verified here:** Intel `i915` (Meteor Lake-P, multi-display 4K, CCS), Nvidia `nvidia-drm` incl. Tegra/Jetson (Orin Nano, aarch64), virtio-gpu, and AMD `amdgpu` (RX560, Polaris/gfx8). **Confirmed by outside testers, one host each:** AMD RX Vega 64 (gfx9) and Intel Raptor Lake.
 >
 > ✅ **HDR10 is tone-mapped to SDR** ([#16](https://github.com/fxd0h/libdrmtap/issues/16), done). When the connector advertises HDR (`HDR_OUTPUT_METADATA`, PQ), `AR30`/`XR30` (10-bit) and `XR48`/`AR48`/`XB48`/`AB48` (16-bit) scanouts are PQ-decoded, BT.2020 → BT.709 gamut-mapped, tone-mapped (highlight-preserving, peak-aware) and sRGB-encoded to 8-bit — in both the CPU and the EGL (tiled) paths. Plain SDR 10-bit gets a straight bit-depth reduction. `P010` (overlay-video YUV) and HLG are not tone-mapped.
 
@@ -141,7 +141,8 @@ igt_runner --device /dev/dri/card1 tests/kms_*
 
 #### Level 3: Real hardware testing
 - Intel `i915`/`xe` (Meteor Lake) → EGL detile path — ✅ verified (dual 4K, CCS)
-- AMD `amdgpu` → EGL detile / CPU fallback — implemented, **not yet hardware-verified**
+- AMD `amdgpu` → EGL detile path — ✅ verified here (RX560, gfx8) and by a tester (RX Vega 64, gfx9); the AMD CPU-deswizzle
+  fallback is what remains unexercised on hardware
 - VM with virtio-gpu → direct linear map + V3 zero-copy — ✅ verified
 - Nvidia incl. Tegra/Jetson → EGL detile path — ✅ verified (Orin Nano, aarch64)
 

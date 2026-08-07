@@ -51,7 +51,7 @@ DRM/KMS (our approach): App → drmModeGetFB2() → DMA-BUF → pixels
 
 **What they'd need from libdrmtap**: C API → Rust `-sys` crate, privileged helper already solved, multi-GPU/multi-monitor, no compositor dependency.
 
-**Status (in progress)**: A DRM/KMS capture backend built on `libdrmtap-sys` is now proposed upstream in `rustdesk/rustdesk#15420` — under maintainer review, not yet merged.
+**Status (shipped)**: A DRM/KMS capture backend landed upstream in `rustdesk/rustdesk#15420`, merged on 2026-08-06. It loads the library with `dlopen` at runtime rather than linking `libdrmtap-sys`, so a host without it keeps the PipeWire path.
 
 ---
 

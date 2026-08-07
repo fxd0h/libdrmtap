@@ -93,6 +93,12 @@ struct drmtap_ctx {
         int      fb2_num_planes;
         uint32_t fb2_pitches[4];
         uint32_t fb2_offsets[4];
+        /* 1 = a DMA_BUF_SYNC_START is open on prime_fd and still owes its END.
+         * The fast path keeps its mapping across frames, so the CPU-access
+         * window closes at the next grab, not at frame release -- a fast frame
+         * carries no _priv and is never released. Without this flag each slot
+         * accumulated one unmatched START per frame for its whole lifetime. */
+        int      sync_started;
     } fast_slots[4];
     uint32_t fast_plane_id;         /* cached primary plane id */
     uint32_t fast_last_fb_id;       /* fb_id from last capture (change detect) */
@@ -187,8 +193,10 @@ struct drmtap_ctx {
 // Set error message on context (or global static if ctx is NULL)
 void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
 
-// Debug log to stderr (only when ctx->debug is set)
-void drmtap_debug_log(drmtap_ctx *ctx, const char *fmt, ...);
+/* Debug log to stderr, only when ctx->debug is set. Takes a CONST ctx so a
+ * read-only helper can still report -- gpu_egl.c used to pass NULL from twenty
+ * sites for want of that, which silenced every EGL failure diagnostic it had. */
+void drmtap_debug_log(const drmtap_ctx *ctx, const char *fmt, ...);
 
 /* The command frame (helper_cmd_grab_t), its CMD_* types and the magic/version
  * validation are defined in wire.h, shared with the helper so the two ends of
@@ -367,5 +375,10 @@ uint32_t drmtap_scanout_width_of(uint32_t fb_width,
                                  const drmtap_plane_rect *rect,
                                  int layout_is_linear,
                                  drmtap_scanout_why *why);
+
+/* Kernel spelling of a DRM connector type ("eDP", "HDMI-A", "LVDS", ...), the
+ * prefix of drmtap_display.name. "Unknown" for a type this build does not know.
+ * Pure, so the whole table is testable without the matching hardware. */
+const char *drmtap_connector_type_name(uint32_t connector_type);
 
 #endif /* DRMTAP_INTERNAL_H */

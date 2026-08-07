@@ -5,6 +5,33 @@ semantic versioning. The C library, the meson project, the `libdrmtap-sys` crate
 the `libdrmtap` wrapper crate all share ONE version (since 0.5.0; before that the
 wrapper had its own 0.3.x line).
 
+## [Unreleased]
+
+Three fixes from the audit of the C sources that RustDesk `dlopen`s into its root
+service. No API or ABI change.
+
+Connector names covered nine of the twenty-one types the kernel defines, so LVDS,
+DSI, USB, Composite, SVIDEO, Component, DIN, TV, DPI, Writeback and SPI all came back
+as `Unknown` (#46). That is the built-in panel of any pre-eDP laptop, the built-in
+panel of an ARM board, and both DisplayLink and the T2 MacBook Touch Bar. The label
+being wrong is the visible half; the real cost is that `connector_type_id` counts per
+type, so collapsing eleven types onto one prefix collapsed their id spaces too and an
+LVDS panel next to a DSI panel enumerated as two displays both called `Unknown-1`.
+The table is now the kernel's own, the one `/sys/class/drm/card*-<name>` is built
+from, and it is a pure function with a unit test rather than a switch reachable only
+on hardware that has the connector.
+
+`DMA_BUF_IOCTL_SYNC` was unbalanced on the direct-mmap grab path (#43): two STARTs
+and one END per frame, or one START and no END when the mmap failed and EGL took
+over, which left a CPU access open from the exporter's point of view. The first
+START had nothing to invalidate and is gone.
+
+The auxiliary planes of a compressed scanout reached `eglCreateImage` unvalidated
+(#44), while plane 0 was checked thoroughly against the real fd size. They are now
+bounded as well -- offset plus one row must lie inside the buffer, which is as strong
+a bound as is computable without the per-format plane height -- and an offset or
+pitch above `INT32_MAX` is rejected instead of narrowed into a negative `EGLint`.
+
 ## [0.5.2] - 2026-07-30
 
 Documentation only; no code changed. Published so the crates.io pages carry the

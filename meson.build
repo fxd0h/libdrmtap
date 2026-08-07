@@ -338,6 +338,11 @@ test_convert = executable('test_convert',
     dependencies: [libdrmtap_test_dep],
     include_directories: lib_include,
 )
+test_connector_names = executable('test_connector_names',
+    'tests/test_connector_names.c',
+    dependencies: [libdrmtap_test_dep, libdrm_dep],
+    include_directories: lib_include,
+)
 # Wire-protocol tests are self-contained (socketpair + fake peer, no DRM, no
 # libdrmtap link): they guard the helper IPC's fd-access-mode / CLOEXEC /
 # ancillary-truncation / fixed-frame-reassembly invariants.
@@ -354,6 +359,7 @@ test('helper', test_helper, suite: 'unit')
 test('hdr', test_hdr, suite: 'unit')
 test('wire', test_wire, suite: 'unit')
 test('convert', test_convert, suite: 'unit')
+test('connector_names', test_connector_names, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
 # LSan: suppress the deliberate process-lifetime EGL/Mesa display allocation
