@@ -7,30 +7,109 @@ wrapper had its own 0.3.x line).
 
 ## [Unreleased]
 
-Three fixes from the audit of the C sources that RustDesk `dlopen`s into its root
-service. No API or ABI change.
+Four fixes from the audit of the C sources that RustDesk `dlopen`s into its root
+service, and the diagnostics that would have turned issue #45 into a one-line answer
+instead of a day. No API or ABI change.
 
-Connector names covered nine of the twenty-one types the kernel defines, so LVDS,
-DSI, USB, Composite, SVIDEO, Component, DIN, TV, DPI, Writeback and SPI all came back
-as `Unknown` (#46). That is the built-in panel of any pre-eDP laptop, the built-in
-panel of an ARM board, and both DisplayLink and the T2 MacBook Touch Bar. The label
-being wrong is the visible half; the real cost is that `connector_type_id` counts per
-type, so collapsing eleven types onto one prefix collapsed their id spaces too and an
-LVDS panel next to a DSI panel enumerated as two displays both called `Unknown-1`.
-The table is now the kernel's own, the one `/sys/class/drm/card*-<name>` is built
-from, and it is a pure function with a unit test rather than a switch reachable only
-on hardware that has the connector.
+### A tiled scanout was handed back relabelled linear, reported as success
 
-`DMA_BUF_IOCTL_SYNC` was unbalanced on the direct-mmap grab path (#43): two STARTs
-and one END per frame, or one START and no END when the mmap failed and EGL took
-over, which left a CPU access open from the exporter's point of view. The first
-START had nothing to invalidate and is gone.
+`drmtap_deswizzle` decoded Intel modifiers `0x01`-`0x03`, answered `-ENOTSUP` for
+`0x05`-`0x08`, and sent **everything else** to a linear memcpy that returned 0. So an
+unrecognised layout was copied out row by row and reported as a successfully
+converted frame. That covered `Y_TILED_CCS` (`0x04`, missed because the CCS list
+started at `0x05`), the **entire Tile4 family** (`0x09` `4_TILED` plus the DG2 / MTL /
+LNL / BMG CCS variants `0x0a`-`0x11`) which is what current Intel actually scans out,
+and every AMD-vendor modifier.
 
-The auxiliary planes of a compressed scanout reached `eglCreateImage` unvalidated
-(#44), while plane 0 was checked thoroughly against the real fd size. They are now
-bounded as well -- offset plus one row must lie inside the buffer, which is as strong
-a bound as is computable without the per-format plane height -- and an offset or
-pitch above `INT32_MAX` is rejected instead of narrowed into a negative `EGLint`.
+Measured on a Meteor Lake scanout, modifier `0x10000000000000f`, same machine and a
+static screen: the CPU path returned a full screen of tile noise and the EGL path
+returned the desktop, differing in 3922556 of 3932177 bytes, while cpu-vs-cpu and
+egl-vs-egl were byte-identical. Both reported success.
+
+This is the half #38 (0.5.0-era, "fail closed on undecodable scanouts") did not
+reach. That release made sure a `-ENOTSUP` from the deswizzler was propagated rather
+than suppressed; what it never checked is whether the deswizzler *produced* one. For
+these modifiers it did not.
+
+Any layout that cannot be decoded now returns `-ENOTSUP`, so a consumer fails over
+(RustDesk demotes to PipeWire) instead of showing garbage.
+`DRM_FORMAT_MOD_INVALID` keeps its linear treatment, because it means the framebuffer
+stated no modifier rather than that it is known to be tiled. `gpu_intel.c` loses the
+same fail-open tail, the false claim that Gen12 CCS is decompressed transparently on
+a CPU read, and three constant names that were off by one against `drm_fourcc.h`.
+
+Not reachable from a RustDesk build, which asserts the built `.so` really carries the
+EGL backend and refuses a stub. Reachable for anyone building the library by hand.
+
+### Connector names covered nine of the twenty-one kernel types (#46)
+
+`LVDS`, `DSI`, `USB`, `Composite`, `SVIDEO`, `Component`, `DIN`, `TV`, `DPI`,
+`Writeback` and `SPI` all came back as `Unknown`: the built-in panel of any pre-eDP
+laptop, the built-in panel of an ARM board, and both DisplayLink and the T2 MacBook
+Touch Bar. The label being wrong is the visible half; the real cost is that
+`connector_type_id` counts per type, so collapsing eleven types onto one prefix
+collapsed their id spaces too, and an LVDS panel next to a DSI panel enumerated as
+two displays both called `Unknown-1`. The table is now the kernel's own, the one
+`/sys/class/drm/card*-<name>` is built from, extracted as a pure function with a unit
+test rather than a switch reachable only on hardware that has the connector.
+
+### `DMA_BUF_IOCTL_SYNC` was unbalanced in three places (#43)
+
+On the direct-mmap grab path: two STARTs and one END per frame, or one START and no
+END when the mmap failed and EGL took over. The first START had nothing to
+invalidate and is gone.
+
+On the **fast path** it was worse, and that one is not #43's fix repeated: three
+STARTs and no END at all, and because its `prime_fd` lives in a cached slot, one slot
+accumulated an unmatched START for every frame of its lifetime. The START there is
+load-bearing -- it is the only cache invalidation before the first read of a freshly
+populated slot -- so what was missing was the END, which now happens at the top of
+the next grab and in `drmtap_fast_cleanup`. And a third time in slot eviction, which
+closed the fd and cleared the slot while a window was still open. strace over six
+grabs: 6 SYNC ioctls, all START, before; 12 paired after.
+
+### Auxiliary planes reached `eglCreateImage` unvalidated (#44)
+
+Plane 0 was checked thoroughly against the real fd size; planes 1 and 2 got none of
+it. They are now bounded as well -- offset plus one row must lie inside the buffer,
+which is as strong a bound as is computable without the per-format plane height,
+since a CCS plane's height is a fraction of the image height and the obvious stronger
+bound would reject legitimate compressed scanouts. An offset or pitch above
+`INT32_MAX` is rejected rather than narrowed into a negative `EGLint`.
+
+### Diagnostics
+
+All twenty EGL diagnostics in `gpu_egl.c` passed `NULL` as the context, and that
+function returns immediately on a NULL context, so the whole set was dead code:
+`eglInitialize failed`, `eglChooseConfig failed`, `eglCreateContext failed`, shader
+compilation, `eglCreateImage failed`, the retry outcome, the GL error across convert.
+A capture that printed no EGL line at all now prints nine.
+
+A line at open time states whether the EGL backend is compiled in, next to the driver
+line so it lands in every bug report, and says so loudly when it is not. The
+fail-closed errors name which cause applies and, on a build without the backend,
+which packages to install; they no longer call every rejected modifier "compressed",
+which was not true for all of them. The `egl` feature still defaults to `auto`, so
+the README and CONTRIBUTING quick starts now pass `-Degl=enabled`, which fails at
+configure time instead of silently producing the CPU-only stub. That stub is what
+issue #45 turned out to be.
+
+### Documentation
+
+The tested-hardware claim was duplicated across eleven files and had drifted apart:
+three still presented an outside tester's RX Vega 64 as if it were ours, one said AMD
+was untested eight lines above another saying it was verified, and none carried the
+Raptor Lake confirmation from #45. Every claim now says whose machine it is --
+verified here on Intel Meteor Lake-P, AMD RX560, Jetson Orin Nano and virtio_gpu;
+confirmed by outside testers, one host each, on AMD RX Vega 64 (GK-Gaming) and Intel
+Raptor Lake (huzhifeng).
+
+The two crate READMEs had told people to build with `-Degl=enabled`, which is a Meson
+option that does nothing for a crate: `build.rs` always defines `HAVE_EGL`, so what a
+crate user needs is the EGL and GLES2 headers at build time. And the wrapper README
+still advertised `libdrmtap = "0.3"`, a range that cannot resolve to this library at
+all -- the exact failure 0.5.2 was released to correct, surviving in a line that
+release did not touch.
 
 ## [0.5.2] - 2026-07-30
 

@@ -700,6 +700,13 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
     int worth_looking = crtc->mode_valid && crtc->mode.hdisplay > 0 &&
                         crtc->mode.hdisplay < fb_width;
     uint32_t hdisplay = crtc->mode.hdisplay;
+    /* Both are copied out HERE because crtc is freed on the next line, so neither
+     * declaration can move down to its use. cppcheck 2.19 asks for exactly that
+     * for vdisplay, whose only use is the log line further down; taking that
+     * advice would read freed memory. The CI image carries an older cppcheck that
+     * does not report it, so suppress it rather than wait for the image to update
+     * and break the build. */
+    // cppcheck-suppress variableScope
     uint32_t vdisplay = crtc->mode.vdisplay;
     drmModeFreeCrtc(crtc);
     if (!worth_looking) {
