@@ -13,14 +13,19 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
 
 ## ⚠️ Testing Status
 
-> **Verified working:** `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake
-> (`i915`, dual 3840x2160, EGL CCS detiling of the tiled/compressed framebuffer),
-> and NVIDIA Jetson Orin Nano (`nvidia-drm`, Wayland).
+> **Verified here:** Intel Meteor Lake-P (`i915`, multiple displays up to
+> 3840x2160, EGL detiling of the tiled/compressed framebuffer), AMD RX560
+> (Polaris/gfx8, tiled `XR30`), NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64,
+> Wayland), and `virtio_gpu` (QEMU/Parallels VMs).
 >
-> The AMD (`amdgpu`) backend is **validated on real hardware** (RX Vega 64,
-> gfx9, via EGL detile).
+> **Confirmed by outside testers, on their hardware:** AMD RX Vega 64 (gfx9, X11)
+> by GK-Gaming, and Intel Raptor Lake with a hybrid NVIDIA GPU (Ubuntu 26.04,
+> GNOME Wayland) by huzhifeng. One host each, not a support matrix.
 >
-> If you test AMD or other configurations, please report results via
+> All of it depends on the EGL backend being present — a build without it cannot
+> detile a modern scanout. Build the C library with `-Degl=enabled`.
+>
+> If you test other configurations, please report results via
 > [GitHub Issues](https://github.com/fxd0h/libdrmtap/issues).
 
 ## Requirements

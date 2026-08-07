@@ -16,9 +16,10 @@ crate.
 **Tested and verified** on Ubuntu 24.04:
 - RustDesk's `screenshot` example captured the desktop via DRM
 - Full `cargo build` passes (zero errors)
-- Verified on virtio_gpu (QEMU/KVM), Intel Meteor Lake (i915, EGL CCS detiling,
-  dual 4K), and NVIDIA Jetson Orin Nano (nvidia-drm, Wayland). AMD (amdgpu) is
-  implemented but still untested.
+- Verified here on virtio_gpu (QEMU/KVM), Intel Meteor Lake-P (i915, EGL
+  detiling, multi-display 4K), AMD RX560 (Polaris/gfx8) and NVIDIA Jetson Orin
+  Nano (nvidia-drm, aarch64, Wayland). Outside testers have confirmed AMD RX
+  Vega 64 (gfx9) and Intel Raptor Lake, each on one host of their own.
 
 ## What It Does
 
@@ -28,8 +29,8 @@ capture. This means:
 - **No user consent popup** (no "Select the screen to be shared")
 - **Works everywhere**: login screen, headless, VMs, kiosks, Wayland
 - **No PipeWire dependency**
-- **Handles GPU tiling** automatically (Intel i915, Nvidia, and AMD amdgpu
-  verified — RX Vega 64, gfx9)
+- **Handles GPU tiling** automatically (Intel i915 and Nvidia verified here;
+  AMD amdgpu verified here on RX560 and by an outside tester on RX Vega 64)
 
 ## Files
 

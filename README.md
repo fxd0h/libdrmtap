@@ -90,14 +90,32 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Rust bindings ([crates.io](https://crates.io/crates/libdrmtap)) | ✅ Published |
 | MIT License | ✅ |
 
-> ⚠️ **Testing status**: Capture pipeline verified with the V3 zero-copy path on
-> `virtio_gpu` (QEMU/Parallels VMs), Intel Meteor Lake (`i915`, dual 3840x2160,
-> EGL CCS detiling), and NVIDIA Jetson Orin Nano (`nvidia-drm`, aarch64, Wayland).
-> The AMD (`amdgpu`) backend is verified on real hardware on two generations, by
-> two different people: **RX Vega 64 (gfx9), confirmed by an outside tester** (via
-> the EGL detile path — see [#26](https://github.com/fxd0h/libdrmtap/issues/26)),
-> and **RX560 (Polaris/gfx8), verified here** (2880x1800 `eDP-1`, tiled `XR30`
-> scanout, EGL detile).
+> ⚠️ **Testing status**: every entry below is a machine someone captured from,
+> and it says whose. A tester confirmation is one host on one day, not a support
+> matrix.
+>
+> **Verified here:**
+> - **Intel Meteor Lake-P** (`i915`, Core Ultra 7 155H) — multiple displays up to
+>   3840x2160, `4_TILED_MTL_RC_CCS_CC` scanout detiled through EGL.
+> - **AMD RX560** (Polaris/gfx8) — 2880x1800 `eDP-1`, tiled `XR30`, EGL detile.
+> - **NVIDIA Jetson Orin Nano** (`nvidia-drm`, aarch64, Wayland).
+> - **`virtio_gpu`** (QEMU/Parallels VMs), V3 zero-copy path.
+>
+> **Confirmed by outside testers, on their hardware and not ours:**
+> - **AMD RX Vega 64** (gfx9), X11, modifier `0x200000004801a01`, unprivileged via
+>   the helper — GK-Gaming, 2026-07-29
+>   ([#26](https://github.com/fxd0h/libdrmtap/issues/26),
+>   [#36](https://github.com/fxd0h/libdrmtap/issues/36)).
+> - **Intel Raptor Lake with a hybrid NVIDIA GPU** (ThinkBook 16p G5 IRX, Ubuntu
+>   26.04, GNOME Wayland, `eDP-1`, `Y_TILED_GEN12_RC_CCS_CC`) — huzhifeng,
+>   2026-08-07 ([#45](https://github.com/fxd0h/libdrmtap/issues/45)).
+>
+> Whichever GPU you have, this depends on the EGL backend being present: a build
+> without it cannot detile a modern scanout at all. Configure with
+> `-Degl=enabled`, which fails loudly rather than silently producing the CPU-only
+> stub — that is what [#45](https://github.com/fxd0h/libdrmtap/issues/45) turned
+> out to be.
+>
 > **Multi-GPU render-node selection is verified on the Jetson Orin's two DRM
 > devices** (`tegra`/renderD128 with no connectors + `nvidia-drm`/renderD129
 > driving the display): the converter now binds renderD129, the node that
