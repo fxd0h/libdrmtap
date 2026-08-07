@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <stdint.h>
 
 #include "drmtap.h"
@@ -173,18 +174,29 @@ static void test_deswizzle_nvidia_x_tiled_roundtrip(void) {
         }
     }
 
-    /* Deswizzle: Nvidia vendor = 0x10 */
-    uint64_t mod_nvidia = 0x1000000000000000ULL;
+    /* This used to feed 0x1000000000000000 and assert the roundtrip succeeded.
+     * 0x10 is not a vendor: DRM_FORMAT_MOD_VENDOR_NVIDIA is 0x03, and 0x10 is the
+     * low byte of the block-linear encoding. So the constant matched nothing the
+     * kernel produces, the library carried the same mistake, and this test
+     * certified it -- the roundtrip passed against a modifier no driver emits
+     * while every real Nvidia scanout took a different path entirely.
+     *
+     * What the library does now is fail closed for the whole vendor, because the
+     * decoder below has never run on a real frame and its tile geometry has never
+     * been checked against a Tegra scanout. Assert THAT, so the day someone wires
+     * it up they have to come here and say so. The tiling loop above is kept as
+     * the reference for that work. */
+    uint64_t mod_nvidia = 0x0300000000000010ULL;  /* 16BX2_BLOCK, a real one */
     int ret = drmtap_deswizzle(tiled, result, w, h, stride, stride, mod_nvidia, (size_t)stride * h);
-    TEST_ASSERT(ret == 0);
-
-    /* Verify */
-    TEST_ASSERT(memcmp(linear, result, stride * h) == 0);
+    TEST_ASSERT(ret == -ENOTSUP);
+    TEST_ASSERT(drmtap_deswizzle(tiled, result, w, h, stride, stride,
+                                 0x0300000000000001ULL /* TEGRA_TILED */,
+                                 (size_t)stride * h) == -ENOTSUP);
 
     free(linear);
     free(tiled);
     free(result);
-    printf("  PASS: Nvidia X-TILED roundtrip (32x128)\n");
+    printf("  PASS: Nvidia modifiers fail closed (no validated CPU deswizzle)\n");
 }
 
 /* ========================================================================= */

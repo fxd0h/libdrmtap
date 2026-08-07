@@ -834,6 +834,13 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                      (const char *)&fb2->pixel_format,
                      (unsigned long)fb2->modifier);
 
+    /* drmModeGetFB2 minted a handle somebody has to close (see drmtap_gem_close).
+     * Hold it here until priv adopts it, so every error return below can close it
+     * without knowing how far the function got. The fast path already did this;
+     * three returns on THIS path did not, and leaked one handle per grab. Set to 0
+     * the moment ownership moves, so nothing is closed twice. */
+    uint32_t pending_gem = fb2->handles[0];
+
     /* Bound the DIMENSIONS too, not just stride*height: width is unconstrained by
      * validate_fb_size, and every converted output is sized width*height*4. */
     ret = drmtap_validate_fb_dims(fb2->width, fb2->height);
@@ -843,6 +850,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     if (ret != 0) {
         drmtap_set_error(ctx, "rejecting framebuffer geometry %ux%u stride=%u",
                          fb2->width, fb2->height, fb2->pitches[0]);
+        drmtap_gem_close(ctx, pending_gem);
         drmModeFreeFB2(fb2);
         return ret;
     }
@@ -873,6 +881,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
              * its per-frame V2/V3 success returns -- leaks it. */
             needs_helper = 1;
             drmtap_gem_close(ctx, fb2->handles[0]);
+            pending_gem = 0;
         } else if (ret < 0) {
             ret = -errno;
             drmtap_set_error(ctx, "drmPrimeHandleToFD failed: %s", strerror(errno));
@@ -1111,6 +1120,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     priv->prime_fd = prime_fd;
     priv->helper_drm_fd = -1;
     priv->gem_handle = fb2->handles[0];
+    pending_gem = 0;  /* priv owns it now */
     priv->mapped = MAP_FAILED;
     priv->mapped_size = 0;
 
@@ -1231,10 +1241,16 @@ cleanup:
     if (fb2) {
         drmModeFreeFB2(fb2);
     }
-    /* Close the GEM handle if this error path was reached after the direct grab
-     * adopted one (priv->gem_handle set); otherwise it leaks like every grab. */
+    /* Close the GEM handle. This used to run only `if (priv)`, but two of the paths
+     * that reach this label -- drmPrimeHandleToFD failing for anything other than
+     * EACCES/EPERM, and the priv calloc failing -- get here BEFORE priv exists, so
+     * the handle they minted was leaked once per grab attempt. pending_gem is
+     * whatever has not been handed over yet, and is 0 once priv owns it or the
+     * helper branch already closed it. */
     if (priv) {
         drmtap_gem_close(ctx, priv->gem_handle);
+    } else {
+        drmtap_gem_close(ctx, pending_gem);
     }
     free(priv);
     /* Leave the frame owning nothing on this error exit too, matching the

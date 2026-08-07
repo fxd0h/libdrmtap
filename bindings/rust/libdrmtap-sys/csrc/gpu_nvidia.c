@@ -33,7 +33,10 @@
 #include "drmtap.h"
 
 /* Nvidia modifier vendor byte */
-#define NV_VENDOR 0x10
+/* DRM_FORMAT_MOD_VENDOR_NVIDIA (drm_fourcc.h:470). This was 0x10, which is the low
+ * byte of the block-linear encoding rather than a vendor, so this backend never
+ * matched a real Nvidia modifier. See the note in pixel_convert.c. */
+#define NV_VENDOR 0x03
 
 /* ========================================================================= */
 /* Backend API                                                               */

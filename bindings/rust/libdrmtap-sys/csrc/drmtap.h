@@ -593,9 +593,14 @@ int drmtap_set_output_buffer(drmtap_ctx *ctx, void *dst, size_t len);
 /**
  * @brief Deswizzle tiled framebuffer data to linear.
  *
- * Converts GPU-tiled pixel data (Intel X/Y-tiled, Nvidia blocklinear)
- * to a linear row-by-row layout. The modifier tells which tiling format
- * to decode. Linear data (modifier == 0) is copied row-by-row.
+ * Converts Intel X/Y/Yf-tiled pixel data to a linear row-by-row layout, and
+ * copies linear data (modifier 0, or DRM_FORMAT_MOD_INVALID meaning the
+ * framebuffer stated no modifier) row by row.
+ *
+ * EVERY OTHER LAYOUT FAILS CLOSED with -ENOTSUP, including all the compressed
+ * Intel variants, the Tile4 family, and every AMD and Nvidia modifier: those
+ * need the GPU detile path. Returning them copied out linearly would hand back
+ * a tiled buffer relabelled linear, reported as a valid frame.
  *
  * @param src        Source (tiled) pixel data
  * @param dst        Destination (linear) buffer (must be allocated by caller)

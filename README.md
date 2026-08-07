@@ -81,8 +81,8 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
 | EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |
 | Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU fallback |
-| AMD (amdgpu) deswizzle | ✅ CPU fallback |
-| Nvidia (nvidia-drm) blocklinear deswizzle | ✅ CPU fallback |
+| AMD (amdgpu) deswizzle | ⛔ EGL only — no CPU decoder, fails closed |
+| Nvidia (nvidia-drm) blocklinear deswizzle | ⛔ EGL only — the CPU decoder is unvalidated and not wired up |
 | HDR10 → SDR tone-map (AR30/XR30/AB30/XB30, XR48/AR48/XB48/AB48) | ✅ Implemented (P010 not yet) |
 | Frame differencing (dirty rects) | ✅ Implemented |
 | Thread-safe (one `drmtap_ctx` per thread) | ✅ By design |
@@ -112,7 +112,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 >
 > Whichever GPU you have, most of this depends on the EGL detile backend. The
 > CPU path on its own still handles linear scanouts and the plain tilings (Intel
-> X/Y/Yf-tiled, Nvidia block-linear), but a **compressed** scanout, or any tiled
+> X/Y/Yf-tiled), but a **compressed** scanout, or any tiled
 > layout it has no deswizzler for, **fails closed** — it returns an error rather
 > than passing the raw bytes off as linear pixels. Current Intel and AMD desktops
 > scan out exactly those. The `egl` Meson feature defaults to `auto`, which

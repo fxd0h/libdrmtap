@@ -159,55 +159,17 @@ static int deswizzle_intel_y_tiled(const void *src, void *dst,
 #define NV_TILE_WIDTH  16     /* pixels */
 #define NV_TILE_HEIGHT 128    /* rows */
 
-static int deswizzle_nvidia_x_tiled(const void *src, void *dst,
-                                    uint32_t width, uint32_t height,
-                                    uint32_t src_stride, uint32_t dst_stride,
-                                    size_t src_size) {
-    uint32_t bpp = 4;
-    uint32_t tile_w = NV_TILE_WIDTH;
-    uint32_t tile_h = NV_TILE_HEIGHT;
-    uint32_t tile_w_bytes = tile_w * bpp;
-    uint32_t tiles_x = (width + tile_w - 1) / tile_w;
+/* The Nvidia block-linear deswizzler lived here and was removed in this commit.
+ * It had never run: the dispatcher tested vendor 0x10, which is not a vendor at
+ * all (DRM_FORMAT_MOD_VENDOR_NVIDIA is 0x03; 0x10 is the low byte of the
+ * block-linear encoding), so no modifier any driver emits ever reached it, and
+ * the roundtrip test hard-coded the same wrong constant and certified it.
+ *
+ * Rather than switch on an untried decoder to satisfy a table in the README, the
+ * vendor now fails closed and the README says so. `git log -S deswizzle_nvidia_x_tiled`
+ * has the implementation for whoever validates it against a real Tegra scanout;
+ * tests/test_deswizzle.c still carries the tiling loop it was written against. */
 
-    (void)src_stride;
-
-    const uint8_t *s = (const uint8_t *)src;
-    uint8_t *d = (uint8_t *)dst;
-
-    for (uint32_t y = 0; y < height; y++) {
-        uint32_t tile_row = y / tile_h;
-        uint32_t tile_y = y % tile_h;
-
-        for (uint32_t tx = 0; tx < tiles_x; tx++) {
-            uint32_t tile_idx = tile_row * tiles_x + tx;
-            uint32_t tile_size = tile_w_bytes * tile_h;
-            uint32_t src_off = tile_idx * tile_size + tile_y * tile_w_bytes;
-
-            uint32_t dst_x = tx * tile_w;
-            uint32_t copy_w = (dst_x + tile_w > width)
-                              ? width - dst_x : tile_w;
-
-            /* Bound the row copy by the real source size (the block-linear
-             * footprint rounds height up to tile_h): copy only what is backed,
-             * zero-fill the rest, never read past src_size. */
-            uint8_t *drow = d + y * dst_stride + dst_x * bpp;
-            size_t want = (size_t)copy_w * bpp;
-            if ((size_t)src_off >= src_size) {
-                memset(drow, 0, want);
-            } else {
-                size_t avail = src_size - (size_t)src_off;
-                if (avail >= want) {
-                    memcpy(drow, s + src_off, want);
-                } else {
-                    memcpy(drow, s + src_off, avail);
-                    memset(drow + avail, 0, want - avail);
-                }
-            }
-        }
-    }
-
-    return 0;
-}
 
 /* ========================================================================= */
 /* Pixel format conversion                                                   */
@@ -355,10 +317,25 @@ int drmtap_deswizzle(const void *src, void *dst,
         return -ENOTSUP;
     }
 
-    /* Nvidia modifier: vendor = 0x10 (NVIDIA) */
-    if (vendor == 0x10) {
-        return deswizzle_nvidia_x_tiled(src, dst, width, height,
-                                         src_stride, dst_stride, src_size);
+    /* Nvidia, vendor 0x03 (DRM_FORMAT_MOD_VENDOR_NVIDIA, drm_fourcc.h:470).
+     *
+     * This branch used to test 0x10, which is not a vendor at all: it is the low
+     * byte of the block-linear encoding, fourcc_mod_code(NVIDIA, 0x10 | ...) at
+     * drm_fourcc.h:1013. So no real Nvidia modifier ever reached
+     * deswizzle_nvidia_x_tiled -- it has never run on a single frame -- and the
+     * roundtrip test hard-coded the same wrong constant, which is why the mistake
+     * survived: the test certified it.
+     *
+     * The constant is correct now, but the decoder is deliberately NOT wired back
+     * up. Its 16x128 tile geometry has never been checked against a real Tegra
+     * scanout, and turning on an unvalidated decoder would trade a clean failure
+     * for pixels nobody has confirmed -- the exact defect class the rest of this
+     * function was just fixed for. Fail closed until someone captures a tiled
+     * Nvidia scanout with EGL disabled and compares it against the EGL output.
+     * Until then the EGL path is what serves Nvidia, which is what the Jetson
+     * Orin runs today. */
+    if (vendor == 0x03) {
+        return -ENOTSUP;
     }
 
     /* DRM_FORMAT_MOD_INVALID means the framebuffer advertised NO modifier, so the
