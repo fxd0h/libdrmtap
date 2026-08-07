@@ -236,10 +236,12 @@ static void detect_driver(drmtap_ctx *ctx) {
     drmtap_debug_log(ctx, "EGL detile backend: compiled in");
 #else
     drmtap_debug_log(ctx,
-        "EGL detile backend: NOT COMPILED IN. Tiled and compressed scanouts "
-        "(every modern Intel, AMD and Nvidia desktop) cannot be captured by this "
-        "build. Install libegl-dev and libgles2-mesa-dev, then reconfigure with "
-        "-Degl=enabled");
+        "EGL detile backend: NOT COMPILED IN. The CPU path still decodes the "
+        "plain tilings (Intel X/Y/Yf-tiled, Nvidia block-linear) and linear "
+        "scanouts, but a COMPRESSED scanout, or any tiled layout it does not "
+        "decode, will fail closed -- and that is what current Intel and AMD "
+        "desktops scan out. Install libegl-dev and libgles2-mesa-dev, then "
+        "reconfigure with -Degl=enabled");
 #endif
 }
 

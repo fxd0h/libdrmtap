@@ -332,17 +332,18 @@ static int dmabuf_sync_end(int fd) {
     return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
-/* Close whatever CPU-access window the fast path left open.
- *
- * The slow path pairs its START with an END in drmtap_frame_release, but a fast
- * frame points into a mapping the context keeps CACHED across frames and carries
- * no _priv, so it is never released and there is no such moment. The window
- * therefore closes at the next grab, which is also when the caller has provably
- * finished reading the previous frame. Called before every new START and from
- * drmtap_fast_cleanup, so a slot owes at most one END at any time.
- *
- * At most one slot can be open, but sweeping all of them is what makes that an
- * invariant rather than an assumption. */
+// Close whatever CPU-access window the fast path left open.
+//
+// The slow path pairs its START with an END in drmtap_frame_release, but a fast
+// frame points into a mapping the context keeps CACHED across frames and carries
+// no _priv, so it is never released and there is no such moment. The window
+// therefore closes at the next grab, which is also when the caller has provably
+// finished reading the previous frame. Called before every new START, before a
+// slot can be evicted, and from drmtap_fast_cleanup, so a slot owes at most one
+// END at any time.
+//
+// At most one slot can be open, but sweeping all of them is what makes that an
+// invariant rather than an assumption.
 static void fast_sync_close(drmtap_ctx *ctx) {
     for (int i = 0; i < DRMTAP_FAST_SLOTS; i++) {
         if (ctx->fast_slots[i].sync_started && ctx->fast_slots[i].prime_fd >= 0) {
@@ -352,11 +353,11 @@ static void fast_sync_close(drmtap_ctx *ctx) {
     }
 }
 
-/* Invalidate the CPU caches for a cached slot before reading it, recording the
- * START so exactly one END follows. The virtio sub-path does NOT come through
- * here: it makes the buffer coherent with TRANSFER_FROM_HOST instead of a
- * dma-buf sync, so pairing an END with it would be an END that never had a
- * START. */
+// Invalidate the CPU caches for a cached slot before reading it, recording the
+// START so exactly one END follows. The virtio sub-path does NOT come through
+// here: it makes the buffer coherent with TRANSFER_FROM_HOST instead of a
+// dma-buf sync, so pairing an END with it would be an END that never had a
+// START.
 static void fast_sync_begin(drmtap_ctx *ctx, int slot) {
     fast_sync_close(ctx);
     if (ctx->fast_slots[slot].prime_fd >= 0) {
@@ -1516,9 +1517,10 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
              * runtime: no dma-buf fd on this path (helper V2 pixel mode), or no
              * usable render node. Point at that, not at the build. */
             drmtap_set_error(ctx,
-                "scanout modifier 0x%lx needs a GPU detile. This build has the "
-                "EGL backend, so it did not run here: either this path carries "
-                "no dma-buf fd, or no usable render node was found",
+                "scanout modifier 0x%lx needs a GPU detile, and the EGL detile "
+                "this build carries was unavailable or failed: no dma-buf fd on "
+                "this path, no usable render node, or the import itself failed. "
+                "Run with debug logging on -- the EGL: lines say which",
                 (unsigned long)modifier);
 #else
             /* The single most common cause of this error, and previously
@@ -1591,8 +1593,8 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
 #ifdef HAVE_EGL
     drmtap_set_error(ctx,
         "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle here, "
-        "and the EGL detile this build carries did not run: either this path "
-        "carries no dma-buf fd, or no usable render node was found",
+        "and the EGL detile this build carries was unavailable or failed. Run "
+        "with debug logging on -- the EGL: lines say which",
         driver, (unsigned long)modifier);
 #else
     drmtap_set_error(ctx,
@@ -1762,6 +1764,13 @@ static int find_or_alloc_slot(drmtap_ctx *ctx, uint32_t fb_id) {
         }
     }
     // Cache full — evict slot 0 (oldest)
+    // Close its sync window first: after the munmap and close below the fd is
+    // gone and the END can no longer be issued. The one caller already closes
+    // every window before getting here, so this is a backstop for the next one.
+    if (ctx->fast_slots[0].sync_started && ctx->fast_slots[0].prime_fd >= 0) {
+        dmabuf_sync_end(ctx->fast_slots[0].prime_fd);
+        ctx->fast_slots[0].sync_started = 0;
+    }
     if (ctx->fast_slots[0].mmap_ptr &&
         ctx->fast_slots[0].mmap_ptr != MAP_FAILED) {
         munmap(ctx->fast_slots[0].mmap_ptr, ctx->fast_slots[0].mmap_size);
@@ -1888,6 +1897,12 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     }
 
     /* Step 4: fb_id changed — check if we have this buffer cached */
+    /* Before find_or_alloc_slot, which EVICTS slot 0 when the cache is full:
+     * eviction closes prime_fd and memsets the slot, so an open sync window
+     * would lose both its fd and its flag and the END would never be issued.
+     * This grab supersedes the previous frame anyway, so the window is finished
+     * with by now. */
+    fast_sync_close(ctx);
     int slot = find_or_alloc_slot(ctx, fb_id);
 
     if (ctx->fast_slots[slot].fb_id == fb_id && ctx->fast_slots[slot].mmap_ptr) {
@@ -2023,11 +2038,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     /* mmap */
     size_t size = (size_t)fb2->pitches[0] * fb2->height;
     void *mapped = MAP_FAILED;
-    /* This grab supersedes the previous frame, so whatever window a cached slot
-     * left open is finished with. Close it before opening a new one. */
-    fast_sync_close(ctx);
-    /* Whether the START below succeeded. It is taken before the slot exists, so
-     * it is carried here and recorded when the slot is stored. */
+    // Whether the START below succeeded. It is taken before the slot is stored,
+    // so it is carried here and recorded when it is.
     int sync_started = 0;
 
     if (is_virtio_gpu(ctx)) {
