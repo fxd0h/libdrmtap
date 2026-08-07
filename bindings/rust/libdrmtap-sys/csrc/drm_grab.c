@@ -1475,12 +1475,31 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
              * instead of failing over). Fail closed so the caller ends the stream
              * and falls back (e.g. to PipeWire) instead. */
             drmtap_debug_log(ctx,
-                "auto-process: CCS modifier 0x%lx needs GPU deswizzle "
-                "(EGL/DMA-BUF), CPU deswizzle not possible -- failing closed",
+                "auto-process: modifier 0x%lx has no CPU deswizzle here and the "
+                "GPU detile did not run -- failing closed",
                 (unsigned long)modifier);
+#ifdef HAVE_EGL
+            /* EGL IS compiled in, so the detile was skipped or it failed at
+             * runtime: no dma-buf fd on this path (helper V2 pixel mode), or no
+             * usable render node. Point at that, not at the build. */
             drmtap_set_error(ctx,
-                "compressed scanout (modifier 0x%lx) needs a GPU deswizzle, "
-                "which is unavailable on this path", (unsigned long)modifier);
+                "scanout modifier 0x%lx needs a GPU detile. This build has the "
+                "EGL backend, so it did not run here: either this path carries "
+                "no dma-buf fd, or no usable render node was found",
+                (unsigned long)modifier);
+#else
+            /* The single most common cause of this error, and previously
+             * indistinguishable from the runtime one. `meson setup build` alone
+             * leaves the egl feature on 'auto', which silently builds the stub
+             * when the headers are missing, and nothing says so until a real
+             * tiled scanout arrives -- which on modern Intel is every frame. */
+            drmtap_set_error(ctx,
+                "scanout modifier 0x%lx needs a GPU detile, and THIS BUILD HAS "
+                "NO EGL BACKEND. Install the EGL development packages "
+                "(Debian/Ubuntu: libegl-dev libgles2-mesa-dev) and reconfigure "
+                "with -Degl=enabled, which fails the build instead of silently "
+                "producing this stub", (unsigned long)modifier);
+#endif
             return -ENOTSUP;
         }
         if (ret == 0) {
@@ -1536,9 +1555,19 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
     drmtap_debug_log(ctx, "auto-process: unknown driver '%s' mod=0x%lx cannot "
                      "deswizzle and EGL unavailable -- failing closed",
                      driver, (unsigned long)modifier);
+#ifdef HAVE_EGL
     drmtap_set_error(ctx,
-        "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle and "
-        "EGL detile is unavailable", driver, (unsigned long)modifier);
+        "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle here, "
+        "and the EGL detile this build carries did not run: either this path "
+        "carries no dma-buf fd, or no usable render node was found",
+        driver, (unsigned long)modifier);
+#else
+    drmtap_set_error(ctx,
+        "tiled scanout (driver '%s', modifier 0x%lx) has no CPU deswizzle, and "
+        "THIS BUILD HAS NO EGL BACKEND. Install the EGL development packages "
+        "(Debian/Ubuntu: libegl-dev libgles2-mesa-dev) and reconfigure with "
+        "-Degl=enabled", driver, (unsigned long)modifier);
+#endif
     return -ENOTSUP;
 }
 

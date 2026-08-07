@@ -159,10 +159,12 @@ sudo apt install meson gcc libdrm-dev pkg-config
 # Optional (for EGL GPU-universal detiling):
 sudo apt install libegl-dev libgles2-mesa-dev
 
-# Build
+# Build. -Degl=enabled is not optional in practice: the EGL backend is what
+# detiles a modern scanout, and without it meson quietly builds a stub that
+# fails on the first real frame. Passing it turns that into a configure error.
 git clone https://github.com/fxd0h/libdrmtap.git
 cd libdrmtap
-meson setup build
+meson setup build -Degl=enabled
 meson compile -C build
 ```
 
@@ -210,7 +212,7 @@ with mouse and keyboard input:
 
 ```bash
 # Build with libvncserver (optional dependency)
-meson setup build && meson compile -C build
+meson setup build -Degl=enabled && meson compile -C build
 
 # Run (needs root for uinput access)
 sudo ./build/vnc_server
