@@ -5,7 +5,7 @@ semantic versioning. The C library, the meson project, the `libdrmtap-sys` crate
 the `libdrmtap` wrapper crate all share ONE version (since 0.5.0; before that the
 wrapper had its own 0.3.x line).
 
-## [Unreleased]
+## [0.5.3] - 2026-08-07
 
 Four fixes from the audit of the C sources that RustDesk `dlopen`s into its root
 service, and the diagnostics that would have turned issue #45 into a one-line answer
@@ -591,6 +591,7 @@ entry point is additive and would not on its own have justified more than a patc
   fixes.
 
 [0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
+[0.5.3]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.3
 [0.5.1]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.1
 [0.5.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.0
 [0.4.15]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.15
