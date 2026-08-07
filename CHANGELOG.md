@@ -7,9 +7,15 @@ wrapper had its own 0.3.x line).
 
 ## [0.5.3] - 2026-08-07
 
-Four fixes from the audit of the C sources that RustDesk `dlopen`s into its root
+Fixes from the audit of the C sources that RustDesk `dlopen`s into its root
 service, and the diagnostics that would have turned issue #45 into a one-line answer
-instead of a day. No API or ABI change.
+instead of a day.
+
+No ABI change: no signature, struct or symbol moved. `drmtap_deswizzle` does change
+its **contract**, and deliberately -- it now returns `-ENOTSUP` for layouts it used to
+copy out linearly and report as converted. A caller that ignored its return value was
+already getting garbage on those; one that checks it will start seeing failures where
+it saw false successes.
 
 ### A tiled scanout was handed back relabelled linear, reported as success
 
@@ -40,6 +46,40 @@ a CPU read, and three constant names that were off by one against `drm_fourcc.h`
 
 Not reachable from a RustDesk build, which asserts the built `.so` really carries the
 EGL backend and refuses a stub. Reachable for anyone building the library by hand.
+
+### The Nvidia backend tested a vendor byte that does not exist
+
+`gpu_nvidia.c` matched `modifier >> 56 == 0x10`. `DRM_FORMAT_MOD_VENDOR_NVIDIA` is
+`0x03` (`drm_fourcc.h:470`); `0x10` is the low byte of the block-linear encoding, not
+a vendor. So the branch never matched a real Nvidia modifier in any release, and every
+Nvidia-vendor scanout fell through to the linear copy described above and was reported
+as a converted frame.
+
+A unit test covered this and asserted the roundtrip **succeeded** for `0x10`, so the
+test certified the wrong constant instead of catching it. It now feeds a real
+`16BX2_BLOCK` modifier and asserts `-ENOTSUP`. The dead `deswizzle_nvidia_x_tiled`
+is gone rather than left to be trusted later.
+
+With the byte corrected, real Nvidia modifiers finally reach that branch -- and it
+answered by allocating `stride * height`, calling a decoder that cannot decode them,
+and throwing the buffer away; under memory pressure it reported `-ENOMEM` instead of
+the truth. It says so and returns `-ENOTSUP` directly.
+
+### GEM handles from `drmModeGetFB2` were leaked, on four counts
+
+`drmModeGetFB2` mints a handle the caller has to close. Three early returns between
+that call and the close did not: a rejected framebuffer geometry, and two failure
+paths below it. One handle leaked per grab attempt on each. The handle is now held in
+one place from the moment it is minted until ownership moves, so every error return
+closes it without needing to know how far the function got.
+
+And it mints one for **every plane** it reports, not just the first, while only
+`handles[0]` is ever used here: the dma-buf export and the EGL import both go through
+the single fd derived from it. On a scanout whose planes live in separate BOs -- CCS
+is where `num_planes >= 2` comes from -- the others were leaked, one per grab, on the
+slow path and the fast path alike. They are closed as soon as they arrive now,
+deduplicated first, because planes that share a BO come back as the SAME handle and a
+second close would free one the caller still owns.
 
 ### Connector names covered nine of the twenty-one kernel types (#46)
 
@@ -76,19 +116,6 @@ which is as strong a bound as is computable without the per-format plane height,
 since a CCS plane's height is a fraction of the image height and the obvious stronger
 bound would reject legitimate compressed scanouts. An offset or pitch above
 `INT32_MAX` is rejected rather than narrowed into a negative `EGLint`.
-
-### Two more from the CodeRabbit pass on the release PR
-
-`drmModeGetFB2` mints a GEM handle for **every** plane it reports, and a fresh one on
-every call; only `handles[0]` is ever used here, so on a scanout whose planes live in
-separate BOs the rest leaked one handle per grab, on both the slow and the fast path.
-They are now closed as soon as they arrive, deduplicated first because planes sharing
-a BO come back as the same handle and a second close would free one still owned.
-
-And the Nvidia branch no longer allocates a full frame on its way to `-ENOTSUP`. With
-the vendor byte corrected, real Nvidia modifiers reach a decoder that cannot decode
-them; going through it meant a `stride * height` allocation thrown away, and
-`-ENOMEM` instead of the truth if that allocation failed.
 
 ### Diagnostics
 
