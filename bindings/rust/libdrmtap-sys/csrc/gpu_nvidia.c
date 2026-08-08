@@ -38,7 +38,7 @@
  * byte of the block-linear encoding rather than a vendor, so the backend never matched
  * a real Nvidia modifier. See the note in pixel_convert.c.
  * https://gitlab.freedesktop.org/mesa/drm/-/blob/main/include/drm/drm_fourcc.h */
-#define NV_VENDOR DRM_FORMAT_MOD_VENDOR_NVIDIA
+#define DRMTAP_NV_VENDOR DRM_FORMAT_MOD_VENDOR_NVIDIA
 
 /* ========================================================================= */
 /* Backend API                                                               */
@@ -73,7 +73,7 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
 
     /* Check if it's an Nvidia modifier */
     uint8_t vendor = (uint8_t)(modifier >> 56);
-    if (vendor == NV_VENDOR) {
+    if (vendor == DRMTAP_NV_VENDOR) {
         /* There is no CPU decoder for Nvidia block-linear here: the one that used to
          * be called from this branch tested vendor byte 0x10, which is not a vendor at
          * all, so it never ran on a real modifier and was removed rather than trusted.

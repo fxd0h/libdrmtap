@@ -334,7 +334,9 @@ static int load_egl_procs(void) {
      * funnels through here (egl_init and drmtap_gpu_egl_available) before any
      * EGL/GL call is made, so this is the single lazy-load chokepoint. */
     if (load_gl_libraries() < 0) {
-        return -1;
+        /* -2 so the caller can say "no libEGL/libGLESv2 here", which is a missing package,
+         * rather than "the symbols are absent", which is a driver too old. */
+        return -2;
     }
 
     pfn_eglQueryDevicesEXT = (PFNEGLQUERYDEVICESEXTPROC)
@@ -574,8 +576,11 @@ static EGLDisplay egl_display_for_ctx(const drmtap_ctx *ctx) {
 /* ========================================================================= */
 
 static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
-    if (load_egl_procs() < 0) {
-        drmtap_set_error(ctx, "egl: required EGL procs not available");
+    int procs = load_egl_procs();
+    if (procs < 0) {
+        drmtap_set_error(ctx, "%s", procs == -2
+            ? "egl: libEGL.so.1/libGLESv2.so.2 could not be loaded (install libegl1 and libgles2)"
+            : "egl: EGL libraries loaded but required procs are missing (driver too old?)");
         return -ENOTSUP;
     }
 
