@@ -385,7 +385,7 @@ libdrmtap/
 │   ├── gpu_egl.c          ← GPU-universal EGL/GLES2 detiler (PRIMARY detile path)
 │   ├── gpu_intel.c        ← Intel i915/xe tiling modifiers (CCS/X/Y-tiled)
 │   ├── gpu_amd.c          ← AMD amdgpu tiling (RX560 here, RX Vega 64 by a tester)
-│   ├── gpu_nvidia.c       ← Nvidia block-linear, NOT wired up (never validated)
+│   ├── gpu_nvidia.c       ← Nvidia: linear passthrough, block-linear -> -ENOTSUP (no CPU decoder)
 │   ├── gpu_generic.c      ← Generic/VM linear backend (virtio-gpu, simple VMs)
 │   └── privilege_helper.c ← Helper spawn + SCM_RIGHTS / DMA-BUF passing
 ├── helper/

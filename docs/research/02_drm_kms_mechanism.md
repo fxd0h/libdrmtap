@@ -76,7 +76,10 @@ void *mapped = mmap(NULL, size, PROT_READ, MAP_SHARED, drm_fd, mreq.offset);
 ```
 **Advantage**: Simple, doesn't need VAAPI or Prime  
 **Problem**: Doesn't handle tiling well, needs manual deswizzle  
-**Note**: Nvidia requires X-TILED deswizzle (16×128)
+**Note**: Nvidia block-linear has no CPU decoder here. The 16×128 "X-TILED" one this document used
+to describe was removed in 0.5.3: it tested vendor byte `0x10`, which is not a vendor
+(`DRM_FORMAT_MOD_VENDOR_NVIDIA` is `0x03`), so it never ran on a real modifier and was never
+validated. EGL is the only path for these.
 
 ### Pipeline 3: Prime + direct mmap (simple fallback)
 ```c
@@ -99,7 +102,7 @@ Modern framebuffers are NOT stored in linear memory. Each GPU uses its own tilin
 | Intel i915 | I915_FORMAT_MOD_Y_TILED | 128×8 tiles | VAAPI |
 | Intel CCS | I915_FORMAT_MOD_CCS | Compressed | ❌ Doesn't work, requires `INTEL_DEBUG=noccs` |
 | AMD amdgpu | AMD_FMT_MOD_* | Variable | VAAPI or AMDGPU SDMA copy |
-| Nvidia | Custom | 16×128 tiles | Manual CPU deswizzle |
+| Nvidia | `fourcc_mod_code(NVIDIA, …)`, vendor `0x03` | block-linear | EGL only — CPU returns `-ENOTSUP` |
 | VM (vmwgfx, virtio) | DRM_FORMAT_MOD_LINEAR | Linear ✅ | Direct, no conversion |
 
 **Key for libdrmtap**: detect the modifier and route accordingly — linear buffers are mapped

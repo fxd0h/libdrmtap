@@ -82,7 +82,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |
 | Intel (i915/xe) X/Y-tiled deswizzle | ✅ CPU fallback |
 | AMD (amdgpu) deswizzle | ⛔ EGL only — no CPU decoder, fails closed |
-| Nvidia (nvidia-drm) blocklinear deswizzle | ⛔ EGL only — the CPU decoder is unvalidated and not wired up |
+| Nvidia (nvidia-drm) blocklinear deswizzle | ⛔ EGL only — there is no CPU decoder; the CPU path returns `-ENOTSUP` (0.5.3) |
 | HDR10 → SDR tone-map (AR30/XR30/AB30/XB30, XR48/AR48/XB48/AB48) | ✅ Implemented (P010 not yet) |
 | Frame differencing (dirty rects) | ✅ Implemented |
 | Thread-safe (one `drmtap_ctx` per thread) | ✅ By design |
