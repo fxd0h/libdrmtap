@@ -874,9 +874,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     if (ret != 0) {
         drmtap_set_error(ctx, "rejecting framebuffer geometry %ux%u stride=%u",
                          fb2->width, fb2->height, fb2->pitches[0]);
-        drmtap_gem_close(ctx, pending_gem);
-        drmModeFreeFB2(fb2);
-        return ret;
+        goto cleanup;
     }
 
     /* Cache multi-plane info for EGL CCS import */

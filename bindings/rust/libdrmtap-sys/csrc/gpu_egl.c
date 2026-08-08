@@ -142,6 +142,9 @@ static int load_gl_libraries(void) {
     static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&lk);
     if (g_gl_libs_state == 0) {
+        /* -1 = the libraries are not here at all (a missing package); -2 = they loaded but a
+         * core symbol did not resolve (a driver too old). The caller reports different
+         * remedies, so the two cannot share a value. */
         g_gl_libs_state = -1;
         g_libegl_handle = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
         if (!g_libegl_handle) {
@@ -152,6 +155,7 @@ static int load_gl_libraries(void) {
             g_libgles_handle = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
         }
         if (g_libegl_handle && g_libgles_handle) {
+            g_gl_libs_state = -2;
             int ok = 1;
             /* *(void **)&pfn is the POSIX-documented way to store a dlsym
              * result into a function pointer without the pedantic
@@ -333,10 +337,9 @@ static int load_egl_procs(void) {
     /* Bring in libEGL/libGLESv2 first — every EGL entry point in this file
      * funnels through here (egl_init and drmtap_gpu_egl_available) before any
      * EGL/GL call is made, so this is the single lazy-load chokepoint. */
-    if (load_gl_libraries() < 0) {
-        /* -2 so the caller can say "no libEGL/libGLESv2 here", which is a missing package,
-         * rather than "the symbols are absent", which is a driver too old. */
-        return -2;
+    int libs = load_gl_libraries();
+    if (libs < 0) {
+        return libs;
     }
 
     pfn_eglQueryDevicesEXT = (PFNEGLQUERYDEVICESEXTPROC)
@@ -578,7 +581,7 @@ static EGLDisplay egl_display_for_ctx(const drmtap_ctx *ctx) {
 static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     int procs = load_egl_procs();
     if (procs < 0) {
-        drmtap_set_error(ctx, "%s", procs == -2
+        drmtap_set_error(ctx, "%s", procs == -1
             ? "egl: libEGL.so.1/libGLESv2.so.2 could not be loaded (install libegl1 and libgles2)"
             : "egl: EGL libraries loaded but required procs are missing (driver too old?)");
         return -ENOTSUP;
