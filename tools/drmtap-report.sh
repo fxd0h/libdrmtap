@@ -80,7 +80,9 @@ for st in /sys/kernel/debug/dri/[0-9]*/state; do
     [ -r "$st" ] || continue
     dri=$(basename "$(dirname "$st")")
     planes=$(grep -c '^plane\[' "$st" 2>/dev/null)
-    bound=$(grep -A 2 '^plane\[' "$st" 2>/dev/null | grep -c 'crtc=crtc\|crtc=pipe')
+    # Anything but "(null)" is bound. Matching CRTC names instead would only count the
+    # drivers whose naming we happen to have seen.
+    bound=$(grep -A 2 '^plane\[' "$st" 2>/dev/null | grep -c 'crtc=[^(]')
     val "dri/$dri planes" "$planes total, $bound bound to a crtc"
 done
 

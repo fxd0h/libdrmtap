@@ -167,10 +167,18 @@ Step 1 is not the whole story for the cursor plane. A client that also enables
 `DRM_CLIENT_CAP_ATOMIC` — libdrmtap does, to read a connector's `CRTC_ID` — stops being shown the
 cursor plane of a para-virtualized driver (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`) unless it
 enables `DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT` as well: the kernel takes that cap as the client
-declaring it honors the cursor hotspot properties those drivers require. Measured on virtio-gpu,
+declaring it honors the cursor hotspot properties those drivers require. Source is the cap's own
+kerneldoc in
+[`include/uapi/drm/drm.h`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/drm/drm.h)
+— "If this client cap is not set the DRM core will hide cursor plane on those virtualized drivers
+because not setting it implies that the client is not capable of dealing with those extra
+restrictions" — which also states it is supported from kernel 6.6 on.
+
+Measured 2026-08-08 on virtio-gpu, kernel 6.8.0-136-generic, Ubuntu 24.04.4:
 `drmModeGetPlaneResources` returns two planes with universal planes alone, one after adding the
-atomic cap, and two again after adding the hotspot cap. Bare metal refuses the hotspot cap with
-`EOPNOTSUPP` and is unaffected either way.
+atomic cap, and two again after adding the hotspot cap. Same day on i915 (Meteor Lake, kernel
+7.0.0-28-generic): the hotspot cap is refused with `EOPNOTSUPP`, as documented, and the count is
+twenty-four planes either way.
 
 **For multi-monitor**: each monitor has its own CRTC → its own primary plane → its own framebuffer.
 
