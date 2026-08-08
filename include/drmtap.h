@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 3
+#define DRMTAP_VERSION_PATCH 4
 
 /**
  * @brief Get the library version as a packed integer.
@@ -487,9 +487,13 @@ typedef struct {
  * Cursor is returned separately from the framebuffer so remote desktop
  * clients can render it on the client side for lower latency.
  *
+ * A cursor with no plane bound to the CRTC is reported as `visible = 0` and success,
+ * not as an error: a hidden hardware cursor clears that binding, so an error there would
+ * make a consumer keep painting a stale cursor.
+ *
  * @param ctx    Capture context
  * @param cursor Output cursor info (caller-allocated)
- * @return 0 on success, -ENOENT if no cursor plane, negative errno on error
+ * @return 0 on success (hidden included), negative errno on error
  */
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 

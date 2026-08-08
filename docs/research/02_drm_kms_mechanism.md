@@ -163,6 +163,15 @@ kmsvnc implements this logic:
 4. Filter by CRTC if one is specified
 5. Verify that `plane->fb_id != 0` (has active framebuffer)
 
+Step 1 is not the whole story for the cursor plane. A client that also enables
+`DRM_CLIENT_CAP_ATOMIC` — libdrmtap does, to read a connector's `CRTC_ID` — stops being shown the
+cursor plane of a para-virtualized driver (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`) unless it
+enables `DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT` as well: the kernel takes that cap as the client
+declaring it honors the cursor hotspot properties those drivers require. Measured on virtio-gpu,
+`drmModeGetPlaneResources` returns two planes with universal planes alone, one after adding the
+atomic cap, and two again after adding the hotspot cap. Bare metal refuses the hotspot cap with
+`EOPNOTSUPP` and is unaffected either way.
+
 **For multi-monitor**: each monitor has its own CRTC → its own primary plane → its own framebuffer.
 
 ---

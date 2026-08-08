@@ -72,6 +72,18 @@ for conn in /sys/class/drm/card[0-9]*-*; do
     val "$(basename "$conn")" "$st${mode:+ $mode}"
 done
 
+# A para-virtualized driver hides its cursor plane from an atomic client that has not
+# declared DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, which read as "cursor permanently hidden"
+# until 0.5.4. Report what the driver actually offers so a cursor report needs no round trip.
+say "cursor plane (needs root; blank means the dump is unreadable here)"
+for st in /sys/kernel/debug/dri/[0-9]*/state; do
+    [ -r "$st" ] || continue
+    dri=$(basename "$(dirname "$st")")
+    planes=$(grep -c '^plane\[' "$st" 2>/dev/null)
+    bound=$(grep -A 2 '^plane\[' "$st" 2>/dev/null | grep -c 'crtc=crtc\|crtc=pipe')
+    val "dri/$dri planes" "$planes total, $bound bound to a crtc"
+done
+
 # ------------------------------------------------------------------ the build
 say "libdrmtap build"
 if [ -d .git ]; then
