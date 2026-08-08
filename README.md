@@ -76,7 +76,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Zero-copy DMA-BUF output (V3) | ✅ Implemented |
 | Mapped RGBA output | ✅ Verified |
 | Continuous capture (polling loop) | ✅ Verified |
-| Cursor capture (position + pixels) | ✅ Verified |
+| Cursor capture (position + pixels) | ✅ Verified (on a para-virtualized driver, needs 0.5.4 — see Known Limitations) |
 | Privileged helper (setcap, no root) | ✅ Verified |
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
 | EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |
