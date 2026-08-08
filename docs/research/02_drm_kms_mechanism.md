@@ -102,12 +102,17 @@ Modern framebuffers are NOT stored in linear memory. Each GPU uses its own tilin
 | Intel i915 | I915_FORMAT_MOD_Y_TILED | 128×8 tiles | VAAPI |
 | Intel CCS | I915_FORMAT_MOD_CCS | Compressed | ❌ Doesn't work, requires `INTEL_DEBUG=noccs` |
 | AMD amdgpu | AMD_FMT_MOD_* | Variable | VAAPI or AMDGPU SDMA copy |
-| Nvidia | `fourcc_mod_code(NVIDIA, …)`, vendor `0x03` | block-linear | EGL only — CPU returns `-ENOTSUP` |
+| Nvidia | `fourcc_mod_code(NVIDIA, …)`, vendor `0x03` | block-linear | Manual CPU deswizzle |
 | VM (vmwgfx, virtio) | DRM_FORMAT_MOD_LINEAR | Linear ✅ | Direct, no conversion |
 
 **Key for libdrmtap**: detect the modifier and route accordingly — linear buffers are mapped
 directly, and everything tiled/compressed (Intel X/Y + CCS, AMD, Nvidia block-linear) goes through
 the GPU-universal **EGL** detile path. No per-vendor VAAPI pipeline is required (see Key Findings #1).
+
+The "Solution" column above is what the ecosystem does, not what this library does. libdrmtap's CPU
+path decodes **only** Intel X/Y/Yf-tiled; every other modifier returns `-ENOTSUP` and requires EGL.
+Do not implement a row of that table from this page — the Nvidia one was implemented once and the
+result never ran, because it tested vendor byte `0x10` and the vendor is `0x03` (fixed in 0.5.3).
 
 ### Manual Deswizzle (kmsvnc)
 ```c
