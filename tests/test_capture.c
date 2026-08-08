@@ -146,11 +146,10 @@ static void test_cursor_capture(void) {
     drmtap_cursor_info cursor = {0};
     int ret = drmtap_get_cursor(ctx, &cursor);
 
-    if (ret == -ENOENT) {
-        printf("  SKIP: no cursor plane found\n");
-        drmtap_close(ctx);
-        return;
-    }
+    /* No `-ENOENT` arm on purpose: no cursor plane bound is reported as success with
+     * `visible = 0`, so accepting -ENOENT here would let a return to that older
+     * contract pass this test. */
+    TEST_ASSERT(ret != -ENOENT);
 
     if (ret == -EACCES) {
         printf("  SKIP: cursor capture needs CAP_SYS_ADMIN\n");
