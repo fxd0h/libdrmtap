@@ -5,6 +5,27 @@ semantic versioning. The C library, the meson project, the `libdrmtap-sys` crate
 the `libdrmtap` wrapper crate all share ONE version (since 0.5.0; before that the
 wrapper had its own 0.3.x line).
 
+## [Unreleased]
+
+### No cursor at all on virtio-gpu, vmwgfx, qxl and vboxvideo
+
+The context asks for `DRM_CLIENT_CAP_ATOMIC`, which it needs to read a connector's
+`CRTC_ID` property. Since kernel 6.6 a para-virtualized driver responds to that cap by
+**hiding its cursor plane** from the client, unless the client also sets
+`DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT` to declare that it honors the cursor hotspot
+properties. So `drmtap_get_cursor` found no cursor plane, reported the cursor hidden on
+every call, and a consumer that trusts that answer showed no cursor anywhere -- at a
+greeter and in a session alike. Measured on virtio-gpu: `drmModeGetPlaneResources`
+returns two planes without the atomic cap, one with it, and two again with this one.
+
+Cursor reads already honor `HOTSPOT_X` / `HOTSPOT_Y`, which is exactly what the new cap
+asserts, so nothing else had to change. The cap returns `EOPNOTSUPP` on non-virtualized
+drivers, where it is a no-op: measured on i915, twenty-four planes with and without it.
+
+The privileged helper never had the bug -- it does not ask for the atomic cap -- so this
+only ever affected an in-process privileged caller, which is how RustDesk's root service
+runs.
+
 ## [0.5.3] - 2026-08-07
 
 Fixes from the audit of the C sources that RustDesk `dlopen`s into its root
