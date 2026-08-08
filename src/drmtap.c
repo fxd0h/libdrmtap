@@ -32,6 +32,11 @@
 
 #include "drmtap_internal.h"
 
+/* Kernel 6.6; define it so a build against older headers still declares it. */
+#ifndef DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT
+#define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
+#endif
+
 /* True if this thread holds CAP_SYS_ADMIN in its effective set. drmModeGetFB2
  * returns framebuffer handles without DRM master only for a caller that holds
  * CAP_SYS_ADMIN; a process running as uid 0 that has dropped CAP_SYS_ADMIN does
@@ -363,6 +368,19 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
         drmtap_debug_log(ctx,
                          "warning: DRM_CLIENT_CAP_ATOMIC not supported "
                          "(connector CRTC_ID fallback unavailable)");
+    }
+
+    /* A para-virtualized driver (virtio-gpu, vmwgfx, qxl, vboxvideo) HIDES its cursor plane from an
+     * atomic client that has not declared it honors the cursor hotspot properties, so the cap above
+     * costs us the cursor unless this one follows: the plane vanishes from
+     * drmModeGetPlaneResources and the cursor reads as permanently hidden. Measured on virtio-gpu:
+     * two planes without ATOMIC, one with it, two again with this. Cursor reads DO honor
+     * HOTSPOT_X/HOTSPOT_Y, which is what the cap asserts. EOPNOTSUPP on real hardware. */
+    if (drmSetClientCap(ctx->drm_fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, 1) < 0) {
+        drmtap_debug_log(ctx,
+                         "DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT refused (%s); expected on a "
+                         "non-virtualized driver",
+                         strerror(errno));
     }
 
     drmtap_debug_log(ctx, "context opened: %s (%s)",
