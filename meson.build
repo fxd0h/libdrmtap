@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('libdrmtap', 'c',
-    version: '0.5.2',
+    version: '0.5.3',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -310,7 +310,10 @@ test_formats = executable('test_formats',
 )
 test_deswizzle = executable('test_deswizzle',
     'tests/test_deswizzle.c',
-    dependencies: [libdrmtap_test_dep],
+    # libdrm too: the modifiers under test are built with fourcc_mod_code() from
+    # drm_fourcc.h rather than written out as literals, which is what let a wrong
+    # vendor byte sit in this file asserting the wrong behaviour (0.5.3).
+    dependencies: [libdrmtap_test_dep, libdrm_dep],
     include_directories: lib_include,
 )
 test_helper = executable('test_helper',

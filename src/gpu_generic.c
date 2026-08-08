@@ -66,7 +66,7 @@ int drmtap_gpu_generic_process(drmtap_ctx *ctx, void *data,
     (void)format;
 
     if (modifier != 0) {
-        drmtap_debug_log(ctx, "generic backend: unexpected modifier 0x%lx",
+        drmtap_set_error(ctx, "generic backend: unexpected modifier 0x%lx",
                          (unsigned long)modifier);
         return -ENOTSUP;
     }

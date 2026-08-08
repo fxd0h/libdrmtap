@@ -29,11 +29,16 @@
 #include <errno.h>
 #include <stdint.h>
 
+#include <drm_fourcc.h>
+
 #include "drmtap_internal.h"
 #include "drmtap.h"
 
-/* Nvidia modifier vendor byte */
-#define NV_VENDOR 0x10
+/* The vendor byte comes from libdrm, never a literal: this was 0x10, which is the low
+ * byte of the block-linear encoding rather than a vendor, so the backend never matched
+ * a real Nvidia modifier. See the note in pixel_convert.c.
+ * https://gitlab.freedesktop.org/mesa/drm/-/blob/main/include/drm/drm_fourcc.h */
+#define DRMTAP_NV_VENDOR DRM_FORMAT_MOD_VENDOR_NVIDIA
 
 /* ========================================================================= */
 /* Backend API                                                               */
@@ -53,6 +58,12 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
                               uint32_t stride, uint32_t format,
                               uint64_t modifier) {
     (void)format;
+    /* Only `modifier` decides anything on this backend now: linear needs no work and
+     * block-linear has no CPU decoder, so the pixel arguments are never read. */
+    (void)data;
+    (void)width;
+    (void)height;
+    (void)stride;
 
     /* Linear — no conversion needed (rare on Nvidia but possible) */
     if (modifier == 0) {
@@ -62,25 +73,18 @@ int drmtap_gpu_nvidia_process(drmtap_ctx *ctx, void *data,
 
     /* Check if it's an Nvidia modifier */
     uint8_t vendor = (uint8_t)(modifier >> 56);
-    if (vendor == NV_VENDOR) {
-        drmtap_debug_log(ctx,
-                         "nvidia: blocklinear modifier 0x%lx, CPU deswizzle",
+    if (vendor == DRMTAP_NV_VENDOR) {
+        /* There is no CPU decoder for Nvidia block-linear here: the one that used to
+         * be called from this branch tested vendor byte 0x10, which is not a vendor at
+         * all, so it never ran on a real modifier and was removed rather than trusted.
+         * `drmtap_deswizzle` answers -ENOTSUP for this vendor, so going through it
+         * would allocate a full frame only to throw it away -- and report -ENOMEM
+         * instead of the truth if that allocation failed. Say it directly. */
+        drmtap_set_error(ctx,
+                         "nvidia: block-linear modifier 0x%lx has no CPU decoder; "
+                         "use the EGL path or a linear scanout",
                          (unsigned long)modifier);
-
-        /* Deswizzle using our Nvidia X-TILED (16×128) algorithm */
-        size_t size = (size_t)stride * height;
-        void *tmp = malloc(size);
-        if (!tmp) {
-            return -ENOMEM;
-        }
-
-        int ret = drmtap_deswizzle(data, tmp, width, height,
-                                    stride, stride, modifier, size);
-        if (ret == 0) {
-            memcpy(data, tmp, size);
-        }
-        free(tmp);
-        return ret;
+        return -ENOTSUP;
     }
 
     /* nouveau may use different modifiers */

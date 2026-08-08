@@ -76,6 +76,29 @@ static void drmtap_gem_close(drmtap_ctx *ctx, uint32_t handle) {
     drmIoctl(ctx->drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
 }
 
+// GetFB2 mints a handle per plane, fresh on every call; only handles[0] is used here,
+// so the rest leak one per grab when the planes live in separate BOs (CCS). Dedupe
+// before closing: planes sharing a BO return the SAME handle, and a second close
+// would free one the caller still owns.
+static void close_auxiliary_gem_handles(drmtap_ctx *ctx, const drmModeFB2 *fb2) {
+    for (int p = 1; p < 4; p++) {
+        uint32_t h = fb2->handles[p];
+        if (h == 0 || h == fb2->handles[0]) {
+            continue;
+        }
+        int dup = 0;
+        for (int q = 1; q < p; q++) {
+            if (fb2->handles[q] == h) {
+                dup = 1;
+                break;
+            }
+        }
+        if (!dup) {
+            drmtap_gem_close(ctx, h);
+        }
+    }
+}
+
 /* Test hook: DRMTAP_FORCE_MMAP_FAIL=1 makes the fast-path cache-miss drop a
  * successful CPU mapping so the EGL-detile fd fallback runs on any EGL-capable GPU,
  * not only a discrete/tiled one that genuinely refuses the mmap. Off by default. */
@@ -700,6 +723,13 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
     int worth_looking = crtc->mode_valid && crtc->mode.hdisplay > 0 &&
                         crtc->mode.hdisplay < fb_width;
     uint32_t hdisplay = crtc->mode.hdisplay;
+    /* Both are copied out HERE because crtc is freed on the next line, so neither
+     * declaration can move down to its use. cppcheck 2.19 asks for exactly that
+     * for vdisplay, whose only use is the log line further down; taking that
+     * advice would read freed memory. The CI image carries an older cppcheck that
+     * does not report it, so suppress it rather than wait for the image to update
+     * and break the build. */
+    // cppcheck-suppress variableScope
     uint32_t vdisplay = crtc->mode.vdisplay;
     drmModeFreeCrtc(crtc);
     if (!worth_looking) {
@@ -827,6 +857,14 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                      (const char *)&fb2->pixel_format,
                      (unsigned long)fb2->modifier);
 
+    /* drmModeGetFB2 minted a handle somebody has to close (see drmtap_gem_close).
+     * Hold it here until priv adopts it, so every error return below can close it
+     * without knowing how far the function got. The fast path already did this;
+     * three returns on THIS path did not, and leaked one handle per grab. Set to 0
+     * the moment ownership moves, so nothing is closed twice. */
+    uint32_t pending_gem = fb2->handles[0];
+    close_auxiliary_gem_handles(ctx, fb2);
+
     /* Bound the DIMENSIONS too, not just stride*height: width is unconstrained by
      * validate_fb_size, and every converted output is sized width*height*4. */
     ret = drmtap_validate_fb_dims(fb2->width, fb2->height);
@@ -836,8 +874,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     if (ret != 0) {
         drmtap_set_error(ctx, "rejecting framebuffer geometry %ux%u stride=%u",
                          fb2->width, fb2->height, fb2->pitches[0]);
-        drmModeFreeFB2(fb2);
-        return ret;
+        goto cleanup;
     }
 
     /* Cache multi-plane info for EGL CCS import */
@@ -866,6 +903,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
              * its per-frame V2/V3 success returns -- leaks it. */
             needs_helper = 1;
             drmtap_gem_close(ctx, fb2->handles[0]);
+            pending_gem = 0;
         } else if (ret < 0) {
             ret = -errno;
             drmtap_set_error(ctx, "drmPrimeHandleToFD failed: %s", strerror(errno));
@@ -1104,6 +1142,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     priv->prime_fd = prime_fd;
     priv->helper_drm_fd = -1;
     priv->gem_handle = fb2->handles[0];
+    pending_gem = 0;  /* priv owns it now */
     priv->mapped = MAP_FAILED;
     priv->mapped_size = 0;
 
@@ -1224,10 +1263,16 @@ cleanup:
     if (fb2) {
         drmModeFreeFB2(fb2);
     }
-    /* Close the GEM handle if this error path was reached after the direct grab
-     * adopted one (priv->gem_handle set); otherwise it leaks like every grab. */
+    /* Close the GEM handle. This used to run only `if (priv)`, but two of the paths
+     * that reach this label -- drmPrimeHandleToFD failing for anything other than
+     * EACCES/EPERM, and the priv calloc failing -- get here BEFORE priv exists, so
+     * the handle they minted was leaked once per grab attempt. pending_gem is
+     * whatever has not been handed over yet, and is 0 once priv owns it or the
+     * helper branch already closed it. */
     if (priv) {
         drmtap_gem_close(ctx, priv->gem_handle);
+    } else {
+        drmtap_gem_close(ctx, pending_gem);
     }
     free(priv);
     /* Leave the frame owning nothing on this error exit too, matching the
@@ -1967,6 +2012,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                          fb_id, strerror(errno));
         return ret;
     }
+
+    close_auxiliary_gem_handles(ctx, fb2);
 
     if (fb2->handles[0] == 0) {
         /* drmModeGetFB2 zeroes the GEM handles for a caller without CAP_SYS_ADMIN.
