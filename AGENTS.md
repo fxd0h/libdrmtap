@@ -378,7 +378,8 @@ libdrmtap/
 ├── LICENSE                ← MIT
 ├── CONTRIBUTING.md        ← How to contribute
 ├── SECURITY.md            ← Threat model + helper hardening
-├── meson.build            ← Build system (reads the version out of include/drmtap.h)
+├── meson.build            ← Build system (its own project() version; parses
+│                            include/drmtap.h only to fail on drift)
 ├── include/
 │   └── drmtap.h           ← Public API (the only public header)
 ├── src/

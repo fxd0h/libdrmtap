@@ -479,7 +479,7 @@ typedef struct {
      * this CRTC's origin — not to a multi-monitor desktop origin, and not in the
      * compositor's logical (scaled) coordinates. The pointer itself is at
      * `(x + hot_x, y + hot_y)` where the hotspot is known. Tracks the pointer on
-     * bare metal too; stale while `visible` is 0.
+     * bare metal too; reads 0 while `visible` is 0, see `drmtap_get_cursor`.
      */
     int32_t x, y;
     /**
@@ -506,8 +506,9 @@ typedef struct {
  * A cursor with no plane bound to the CRTC is reported as `visible = 0` and success,
  * not as an error: both a hidden hardware cursor and an idle pointer that the compositor
  * has stopped scanning out clear that binding, so an error there would make a consumer
- * keep painting a stale cursor. When `visible` is 0, only `visible` is meaningful:
- * `pixels` is NULL and the other fields hold whatever the plane last had.
+ * keep painting a stale cursor. The whole struct is cleared on entry, so a hidden
+ * result carries no position: `pixels` is NULL and every numeric field reads 0.
+ * Only `visible` is meaningful there - 0,0 is not where the cursor is.
  *
  * @param ctx    Capture context
  * @param cursor Output cursor info (caller-allocated)

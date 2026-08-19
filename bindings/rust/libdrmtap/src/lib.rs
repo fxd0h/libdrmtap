@@ -346,8 +346,12 @@ impl Cursor {
     /// nvidia) this is always `0` and is indistinguishable from a real top-left
     /// hotspot. A caller that injects the pointer itself can recover the true value:
     /// the plane sits at the pointer minus the hotspot, so once both are still,
-    /// `hotspot = injected_position - plane_position`. Otherwise estimate it from the
-    /// image, which costs about half a glyph on a wide centre-hotspot shape.
+    /// `hotspot = injected_position - plane_position`. Convert first: this position is
+    /// CRTC-relative physical pixels, while an injected point is usually in the
+    /// compositor's logical layout, so map it into scanout space (subtract that
+    /// output's origin, scale by physical over logical) before subtracting. Otherwise
+    /// estimate the hotspot from the image, which costs about half a glyph on a wide
+    /// centre-hotspot shape.
     pub fn hot_x(&self) -> i32 {
         self.raw.hot_x
     }
