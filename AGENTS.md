@@ -215,7 +215,13 @@ tests/
 ├── test_formats.c        # Pixel format detection and conversion
 ├── test_capture.c        # Frame capture (requires vkms)
 ├── test_helper.c         # Privileged helper IPC
-└── test_deswizzle.c      # Tiling format conversion (unit, no GPU)
+├── test_deswizzle.c      # Tiling format conversion (unit, no GPU)
+├── test_connector_names.c # Connector naming
+├── test_convert.c        # Pixel conversion paths
+├── test_hdr.c            # HDR metadata
+├── test_outbuf.c         # Output buffer growth and caps
+├── test_scanout.c        # Scanout geometry
+└── test_wire.c           # Helper wire protocol
 ```
 
 ### Running Tests
@@ -372,7 +378,8 @@ libdrmtap/
 ├── LICENSE                ← MIT
 ├── CONTRIBUTING.md        ← How to contribute
 ├── SECURITY.md            ← Threat model + helper hardening
-├── meson.build            ← Build system (project version lives here)
+├── meson.build            ← Build system (its own project() version; parses
+│                            include/drmtap.h only to fail on drift)
 ├── include/
 │   └── drmtap.h           ← Public API (the only public header)
 ├── src/
@@ -396,9 +403,10 @@ libdrmtap/
 │   ├── test_formats.c      ← unit suite
 │   ├── test_helper.c       ← unit suite
 │   ├── test_deswizzle.c    ← unit suite
+│   ├── ...                 ← six more unit suites, see the Testing section
 │   └── lsan.supp           ← LeakSanitizer suppressions
 ├── examples/
-│   ├── screenshot.c        ← Capture one frame → PNG
+│   ├── screenshot.c        ← Capture one frame → PPM on stdout
 │   ├── stream.c            ← Continuous capture
 │   └── vnc_server.c        ← VNC demo (optional libvncserver)
 ├── bindings/

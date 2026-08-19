@@ -2,8 +2,52 @@
 
 Notable changes to libdrmtap. Loosely follows Keep a Changelog; the project uses
 semantic versioning. The C library, the meson project, the `libdrmtap-sys` crate and
-the `libdrmtap` wrapper crate all share ONE version (since 0.5.0; before that the
-wrapper had its own 0.3.x line).
+the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move and
+did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
+could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
+
+## [Unreleased]
+
+### Docs: the cursor plane position was documented as unavailable, and it is not
+
+The README's cursor limitation said that on bare metal a compositor moves the cursor
+with the legacy `drmModeMoveCursor` ioctl, "which never updates the atomic
+`CRTC_X`/`CRTC_Y` plane position either", and sent readers to root-only debugfs for the
+exact position. Measured on 2026-08-18/19 and it is wrong: the plane position tracks the
+pointer on amdgpu under KWin and on i915 under Mutter (a 100 logical px pointer move
+moved `CRTC_X` by 266 physical px on that scaled output, monotonically over three
+samples). It is also what `drmtap_get_cursor` has always returned, so the claim
+contradicted the library's own feature table.
+
+What is genuinely missing on bare metal is only the hotspot, and the live plane position
+makes it recoverable: a consumer that injects the pointer can measure
+`hotspot = injected_position - plane_position` once both settle, which is exact, instead
+of estimating from the bitmap, which costs about half a glyph on a wide centre-hotspot
+shape (measured: guess `(4,16)` vs real `(26,23)` on a horizontal resize arrow). Both
+routes are now documented, along with which coordinate space `x`/`y` is in - the plane's
+top-left, in the CRTC's physical pixels - in the README, the public header, the Rust
+wrapper and the research notes.
+
+### Removed: the `patches/rustdesk/` bundle
+
+It targeted RustDesk v1.4.6 and the static-crate design with a privileged helper. The
+upstream integration merged on 2026-08-06 `dlopen`s the library and has no helper at
+all, and `contrib/integrations/rustdesk/` is the maintained reference. The bundle also
+shipped a `postinst` that installed the helper world-executable and then applied
+`cap_sys_admin+ep` to it, which is exactly what README.md and SECURITY.md tell
+integrators never to do.
+
+### Other doc corrections
+
+- `cursor.c` said it read the position from `SRC_X`/`SRC_Y`; it reads `CRTC_X`/`CRTC_Y`.
+- `docs/research/05` documented `-ENOENT` when no cursor plane is bound; the shipped
+  contract returns 0 with `visible = 0`, deliberately.
+- `drm_grab.c` described the atomic cap as requested lazily; `drmtap_open` sets it for
+  every context.
+- The shared version line is described as holding from 0.5.1, which is when it actually
+  did, rather than 0.5.0, which announced it and shipped the wrapper still on 0.3.4.
+- `AGENTS.md`: the canonical version lives in `include/drmtap.h`, not `meson.build`; the
+  test inventory was six files short; `screenshot.c` writes PPM, not PNG.
 
 ## [0.5.4] - 2026-08-08
 

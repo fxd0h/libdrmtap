@@ -327,22 +327,36 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Cursor x position on screen
+    /// X of the cursor IMAGE's top-left corner, not the click point: the plane's
+    /// `CRTC_X`, in the CRTC's physical scanout pixels and relative to that CRTC,
+    /// not to a multi-monitor desktop origin and not in logical (scaled) units.
     pub fn x(&self) -> i32 {
         self.raw.x
     }
 
-    /// Cursor y position on screen
+    /// Y of the cursor IMAGE's top-left corner; see [`Cursor::x`].
     pub fn y(&self) -> i32 {
         self.raw.y
     }
 
-    /// Hotspot x offset within cursor image
+    /// Hotspot x within the cursor image, or `0` when the driver does not expose one.
+    ///
+    /// `HOTSPOT_X`/`HOTSPOT_Y` are plane properties only para-virtualized drivers
+    /// (virtio-gpu, vmwgfx, qxl, vboxvideo) create, so on bare metal (i915, amdgpu,
+    /// nvidia) this is always `0` and is indistinguishable from a real top-left
+    /// hotspot. A caller that injects the pointer itself can recover the true value:
+    /// the plane sits at the pointer minus the hotspot, so once both are still,
+    /// `hotspot = injected_position - plane_position`. Convert first: this position is
+    /// CRTC-relative physical pixels, while an injected point is usually in the
+    /// compositor's logical layout, so map it into scanout space (subtract that
+    /// output's origin, scale by physical over logical) before subtracting. Otherwise
+    /// estimate the hotspot from the image, which costs about half a glyph on a wide
+    /// centre-hotspot shape.
     pub fn hot_x(&self) -> i32 {
         self.raw.hot_x
     }
 
-    /// Hotspot y offset within cursor image
+    /// Hotspot y within the cursor image; see [`Cursor::hot_x`] for when it is `0`.
     pub fn hot_y(&self) -> i32 {
         self.raw.hot_y
     }
