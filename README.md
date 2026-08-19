@@ -76,7 +76,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Zero-copy DMA-BUF output (V3) | ✅ Implemented |
 | Mapped RGBA output | ✅ Verified |
 | Continuous capture (polling loop) | ✅ Verified |
-| Cursor capture (position + pixels) | ✅ Verified (on a para-virtualized driver, needs 0.5.4 — see Known Limitations) |
+| Cursor capture (position + pixels) | ✅ Verified on bare metal (amdgpu, i915) and on a para-virtualized driver (needs 0.5.4 there — see Known Limitations) |
 | Privileged helper (setcap, no root) | ✅ Verified |
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
 | EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |
@@ -245,8 +245,9 @@ sudo ./build/vnc_server
 
 ### RustDesk integration
 
-libdrmtap is being upstreamed into [RustDesk](https://github.com/rustdesk/rustdesk)
-via [rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420).
+libdrmtap is upstream in [RustDesk](https://github.com/rustdesk/rustdesk):
+[rustdesk/rustdesk#15420](https://github.com/rustdesk/rustdesk/pull/15420) was
+merged on 2026-08-06 and ships in the `rustdesk-unattended-wayland` build.
 The integration adds a `drm` backend to `scrap` that **dlopens** `libdrmtap.so.0`
 at runtime: it does not link libdrmtap at build time and does not depend on the
 [`libdrmtap-sys`](https://crates.io/crates/libdrmtap-sys) crate, whose `build.rs`
@@ -373,7 +374,14 @@ libdrmtap uses a **dual-path** approach for GPU-tiled framebuffers:
 
 ## Known Limitations
 
-- **Cursor hotspot on bare-metal drivers.** The cursor *image* and *position* are captured exactly, but the cursor **hotspot** (the click point inside the image, e.g. an arrow's tip or an I-beam's centre) is only exposed by the DRM cursor plane on virtualized drivers (`virtio-gpu`, `vmwgfx`), via the `HOTSPOT_X`/`HOTSPOT_Y` plane properties. On bare-metal drivers (i915, amdgpu, nvidia) those properties are absent, and compositors such as Mutter move the cursor with the legacy `drmModeMoveCursor` API — which never updates the atomic `CRTC_X`/`CRTC_Y` plane position either. As a result, on bare metal the hotspot must be *approximated* from the captured image (e.g. the top-left of an arrow's bounding box, the centre of a tall/narrow I-beam), so the rendered cursor can land a few pixels off the true click point. `drmtap_cursor_info.hot_x`/`hot_y` carry the real hotspot when the driver provides it and `0` otherwise; consumers should fall back to an image-derived estimate in that case. The exact position *is* available from the kernel's `/sys/kernel/debug/dri/N/state` debug dump, but that interface is root-only, not a stable ABI, and driver-specific — so it is unsuitable for production use.
+- **Cursor hotspot on bare-metal drivers.** The cursor **hotspot** (the click point inside the image, e.g. an arrow's tip or an I-beam's centre) is only exposed by the DRM cursor plane on para-virtualized drivers (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`), via the `HOTSPOT_X`/`HOTSPOT_Y` plane properties. On bare-metal drivers (i915, amdgpu, nvidia) those properties do not exist at all — measured on amdgpu and on i915 with a found/not-found flag and `CRTC_X` as the positive control — so `drmtap_cursor_info.hot_x`/`hot_y` come back `0` there.
+
+  The cursor *image* and *position* are unaffected: `drmtap_cursor_info.x`/`y` is the cursor plane's `CRTC_X`/`CRTC_Y`, and it tracks the pointer live on bare metal whichever ioctl the compositor drives it with. Measured on amdgpu under KWin, and on i915 under Mutter, where moving the pointer by 100 logical px moved `CRTC_X` by 266 physical px on that scaled output, monotonically over three samples. (While the pointer is idle a compositor may leave the plane unbound — `CRTC_ID` and `FB_ID` read 0 and the coordinates go stale — which libdrmtap reports as a hidden cursor, not as a position.)
+
+  That live position is what makes the hotspot recoverable, and it is why there are two ways out on bare metal rather than one:
+
+  - **Measure it**, if the consumer injects the pointer itself (remote desktop, test automation). It knows where it put the pointer, the plane sits at that point minus the hotspot, so once both settle `hotspot = injected_position - plane_position` — mind the coordinate spaces, the plane is in the CRTC's physical pixels while an injected point is usually in the compositor's logical layout. RustDesk does this in [rustdesk/rustdesk#15897](https://github.com/rustdesk/rustdesk/pull/15897).
+  - **Approximate it from the image** (top-left of an arrow's bounding box, centre of a tall/narrow I-beam) when there is no injected pointer to compare against. Fine for an arrow, and off by roughly half the glyph for a wide centre-hotspot shape: on a horizontal resize arrow the bounding-box guess gave `(4,16)` where the real hotspot was `(26,23)`, i.e. 19 px out horizontally.
 
   Those same hotspot properties are why, since kernel 6.6, a para-virtualized driver (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`) **hides its cursor plane entirely** from a client that has enabled `DRM_CLIENT_CAP_ATOMIC` and has not also enabled `DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT`: the second cap is how a client declares it honors them. libdrmtap needs the atomic cap to read a connector's `CRTC_ID`, so it enables both (since 0.5.4 — before it, the cursor read found no plane on those drivers and reported the cursor hidden forever). The hotspot cap is refused with `EOPNOTSUPP` on bare metal, which is harmless and is also a cheap way to tell the two kinds of driver apart.
 

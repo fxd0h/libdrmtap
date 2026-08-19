@@ -163,15 +163,18 @@ int drmtap_version(void);
 // Remote desktop clients render cursor on the client side for lower latency.
 
 typedef struct {
-    int32_t x, y;           // cursor position on screen
-    int32_t hot_x, hot_y;   // hotspot within cursor image
+    int32_t x, y;           // top-left of the cursor image on its CRTC (plane
+                            // CRTC_X/CRTC_Y, physical px), not the click point
+    int32_t hot_x, hot_y;   // hotspot within the image; 0 on bare metal, where the
+                            // HOTSPOT_X/Y plane properties do not exist
     uint32_t width, height;
     uint32_t *pixels;       // ARGB8888, pre-multiplied alpha (NULL if hidden)
     int visible;            // 0 = cursor hidden
 } drmtap_cursor_info;
 
 // Get current cursor state (position + image)
-// Returns 0 on success, -ENOENT if no cursor plane, negative errno on error
+// Returns 0 on success, negative errno on error. No cursor plane bound is NOT an
+// error: it returns 0 with visible = 0, so a consumer stops painting a stale cursor.
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 

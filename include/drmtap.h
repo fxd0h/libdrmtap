@@ -473,8 +473,24 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
 
 /** Cursor state: position, image, and visibility. */
 typedef struct {
-    int32_t x, y;           /**< Cursor position on screen (pixels) */
-    int32_t hot_x, hot_y;   /**< Hotspot offset within cursor image */
+    /**
+     * Top-left corner of the cursor IMAGE, not the click point: the plane's
+     * `CRTC_X`/`CRTC_Y`, in this CRTC's physical scanout pixels and relative to
+     * this CRTC's origin — not to a multi-monitor desktop origin, and not in the
+     * compositor's logical (scaled) coordinates. The pointer itself is at
+     * `(x + hot_x, y + hot_y)` where the hotspot is known. Tracks the pointer on
+     * bare metal too; stale while `visible` is 0.
+     */
+    int32_t x, y;
+    /**
+     * Hotspot within the cursor image, and `0` unless the driver exposes it:
+     * `HOTSPOT_X`/`HOTSPOT_Y` are plane properties only para-virtualized drivers
+     * (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`) create, so on bare metal
+     * (i915, amdgpu, nvidia) these are always `0` — indistinguishable from a real
+     * top-left hotspot. See the cursor entry in the README's Known Limitations for
+     * the two ways to recover it, one of which is exact.
+     */
+    int32_t hot_x, hot_y;
     uint32_t width, height; /**< Cursor image dimensions */
     uint32_t *pixels;       /**< ARGB8888 premultiplied alpha (NULL if hidden) */
     int visible;            /**< 1 = visible, 0 = hidden */
@@ -488,8 +504,10 @@ typedef struct {
  * clients can render it on the client side for lower latency.
  *
  * A cursor with no plane bound to the CRTC is reported as `visible = 0` and success,
- * not as an error: a hidden hardware cursor clears that binding, so an error there would
- * make a consumer keep painting a stale cursor.
+ * not as an error: both a hidden hardware cursor and an idle pointer that the compositor
+ * has stopped scanning out clear that binding, so an error there would make a consumer
+ * keep painting a stale cursor. When `visible` is 0, only `visible` is meaningful:
+ * `pixels` is NULL and the other fields hold whatever the plane last had.
  *
  * @param ctx    Capture context
  * @param cursor Output cursor info (caller-allocated)

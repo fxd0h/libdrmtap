@@ -11,9 +11,11 @@
  * @brief Cursor plane capture — position, image, and hotspot
  *
  * Reads the cursor plane from DRM/KMS to extract:
- *   - Cursor position (SRC_X, SRC_Y properties of the cursor plane)
+ *   - Cursor position (CRTC_X, CRTC_Y properties of the cursor plane: where the
+ *     image is placed on the CRTC, not the click point)
  *   - Cursor image (framebuffer attached to the cursor plane)
- *   - Hotspot (HOTSPOT_X, HOTSPOT_Y properties, driver-dependent)
+ *   - Hotspot (HOTSPOT_X, HOTSPOT_Y properties, para-virtualized drivers only —
+ *     absent on i915/amdgpu/nvidia, where these read back 0)
  *
  * Cursor data is returned separately from the main framebuffer so
  * remote desktop clients can render it locally for lower latency.

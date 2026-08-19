@@ -41,7 +41,7 @@ dver=$(grep -E "libdrmtap-sys = \{ version = \"$sem\"" \
     "$root/bindings/rust/libdrmtap/Cargo.toml" | grep -oE "$sem" | head -1)
 check "wrapper's libdrmtap-sys dependency" "$dver" "$ver"
 
-# The wrapper crate's OWN version, in lockstep with the library since 0.5.0. It used
+# The wrapper crate's OWN version, in lockstep with the library since 0.5.1. It used
 # to be a separate 0.3.x track, and that is precisely how -sys 0.5.0 shipped while the
 # published wrapper still depended on `^0.4.7` -- a range that cannot reach it -- so
 # crates.io users of the wrapper kept the old library with no warning anywhere.
@@ -60,8 +60,8 @@ fi
 # not the canonical version so a human can decide whether each is a stale
 # current-pointer (bump it) or intentional history ("shipped in X.Y.Z" — leave
 # it). Scans the WHOLE repo's docs + config (every *.md, *.toml, *.rs — the
-# top-level READMEs, AGENTS.md, docs/, contrib/, patches/, and the crates), NOT
-# just the top-level READMEs: contrib/ + patches/ + docs/research/ carry
+# top-level READMEs, AGENTS.md, docs/, contrib/, and the crates), NOT
+# just the top-level READMEs: contrib/ + docs/research/ carry
 # current-pointer versions (integration snippets, "published on crates.io" status
 # lines, scrap dependency pins) that a 4-file scan silently missed and let ship
 # stale. Build artifacts are excluded. (Up to 0.4.15 the wrapper's own 0.3.x line was

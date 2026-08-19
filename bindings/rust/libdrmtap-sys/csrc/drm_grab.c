@@ -646,10 +646,10 @@ uint32_t drmtap_scanout_width_of(uint32_t fb_width,
 /* Read the primary plane rectangle of the context's CRTC. The SRC and CRTC properties
  * are atomic-only: a client that has not asked for DRM_CLIENT_CAP_ATOMIC is shown
  * none of them (measured on appletbdrm -- SRC_W present with the cap, absent without).
- * The cap is therefore requested here, LAZILY: this function is only called once a
- * framebuffer has turned out to be wider than its mode, so the common case never
- * touches it. It is a per-fd flag, needs no privilege and no DRM master, no atomic
- * commit is ever issued, and no other client is affected. rect->valid stays 0 when
+ * The cap is set for every context in drmtap_open() (connector CRTC_ID needs it too),
+ * and requested again here so this path keeps working if that ever stops being true.
+ * It is a per-fd flag, needs no privilege and no DRM master, no atomic commit is ever
+ * issued, and no other client is affected. rect->valid stays 0 when
  * anything is missing, which the decision above treats as "cannot tell". */
 static void read_primary_plane_rect(drmtap_ctx *ctx, drmtap_plane_rect *rect) {
     memset(rect, 0, sizeof(*rect));

@@ -121,7 +121,7 @@ FFmpeg has `kmsgrab` which does DRM/KMS capture correctly. But you can't embed F
 - No PipeWire, no portal, no user prompt
 - Works identically on GNOME, KDE, Sway, Cosmic, or any compositor
 - Works headless (DRM doesn't need a display server)
-- Cursor handled via DRM cursor planes (kernel-level; hotspot is exact under virtualization, approximated on bare metal)
+- Cursor handled via DRM cursor planes (kernel-level; position is exact everywhere, and so is the hotspot under virtualization. On bare metal the hotspot is not exposed at all: a consumer that injects the pointer can measure it, one that does not has to estimate it from the image)
 - Immune to compositor updates
 
 ---
