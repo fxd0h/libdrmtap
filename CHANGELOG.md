@@ -6,7 +6,35 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
-## [Unreleased]
+## [0.5.5] - 2026-09-07
+
+### Added: build without the privileged helper at all
+
+`-Dhelper=disabled` already skipped building and installing `drmtap-helper`, but
+`src/privilege_helper.c` was compiled into the library unconditionally, so the `.so`
+still carried the spawn: `fork`, `execl`, `socketpair`, `waitpid` and the six absolute
+search paths, in a build that could never use any of them. The option now selects
+`src/privilege_helper_stub.c` instead, and `nm -D` on such a build reports none of those
+symbols and none of the paths.
+
+The point is not the binary, which the option already handled, but the trust: a consumer
+whose device access is arranged some other way - udev rules, membership of `video` or
+`render`, seat management - no longer carries a `CAP_SYS_ADMIN` binary it never wanted to
+reason about. Raised by @bjaraujo in #52, tracked as #53.
+
+With the option off, a caller that lacks `CAP_SYS_ADMIN` gets `-EACCES` naming the
+capability rather than a silent fallback, and the grab path drops its advice to install a
+helper, which would point at something that build cannot spawn. `-EACCES` and not
+`-ENOSYS` because the caller hit a permission it does not have, which is what the rest of
+the library returns for that and what `tests/test_capture.c` branches on.
+
+`-Dhelper=auto` without libseccomp or libcap is deliberately NOT the same thing. It means
+only that this host cannot produce a confined helper, so the client side stays in and a
+helper installed from elsewhere still works.
+
+`tools/verify-no-helper-build.sh` builds both ways and compares, with the default build as
+a positive control: it fails if the default `.so` ever stops referencing the spawn symbols,
+that is, if the check stops discriminating.
 
 ### Docs: the cursor plane position was documented as unavailable, and it is not
 
@@ -701,6 +729,7 @@ entry point is additive and would not on its own have justified more than a patc
   fixes.
 
 [0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
+[0.5.5]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.5
 [0.5.4]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.4
 [0.5.3]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.3
 [0.5.1]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.1
