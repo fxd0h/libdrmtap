@@ -5,7 +5,18 @@
 #   'enabled' : build the helper; hard-fail if libseccomp/libcap are missing.
 #   'auto'    : build the helper if libseccomp/libcap are present; otherwise skip
 #               it (build the library only) rather than ship it unconfined.
-#   'disabled': do not build the helper at all.
+#   'disabled': no helper at all — the binary is not built, AND the library is
+#               compiled with no fork/exec path, so `nm -D` on the .so shows no
+#               fork, exec or socketpair and the search paths are not in it
+#               either. For a consumer whose device access is already arranged
+#               another way (udev rules, video/render membership, seat
+#               management), that removes a privileged binary it never wanted to
+#               have to trust. A caller without CAP_SYS_ADMIN then gets -EACCES
+#               naming the missing capability, instead of a silent fallback.
+#               NOTE: 'auto' with libseccomp/libcap missing is NOT this. It only
+#               means this host cannot produce a confined helper; the library
+#               keeps its client side so a helper installed from elsewhere still
+#               works.
 option('helper', type: 'feature', value: 'auto',
     description: 'Build the privileged drmtap-helper (requires libseccomp + libcap)')
 
