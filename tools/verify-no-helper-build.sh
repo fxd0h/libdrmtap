@@ -61,8 +61,12 @@ if [ "$n_paths" -eq 0 ]; then
 else
     no "$n_paths search path(s) still in the .so"
 fi
-if [ -x "$A/drmtap-helper" ]; then
-    no "the helper binary was built anyway"
+# -f, not -x: the question here is whether the artifact EXISTS at all. With -x a
+# helper that was built without the exec bit reads as absent and this reports a
+# pass it did not earn. The positive control below keeps -x, because there the
+# claim is that the default build produces a helper that can actually run.
+if [ -f "$A/drmtap-helper" ]; then
+    no "a helper artifact exists in the -Dhelper=disabled build"
 else
     ok "no helper binary produced"
 fi
