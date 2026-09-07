@@ -7,6 +7,12 @@ scanout. Reading the active scanout of a session you are not the DRM master of
 requires `CAP_SYS_ADMIN`. This document describes, accurately, how the privilege
 is isolated, what the helper actually does, and what it does **not** do.
 
+A build configured with `-Dhelper=disabled` has none of this: no helper binary,
+and a library compiled with no fork/exec path at all, so nothing below applies
+to it. A caller without `CAP_SYS_ADMIN` gets `-EACCES` naming the capability
+instead of a fallback. Everything else in this document describes the default
+build.
+
 This document is intended to match the code in `helper/drmtap-helper.c` and
 `src/privilege_helper.c`. If you find a claim here that the code does not
 support, that is a bug in this document — please report it.

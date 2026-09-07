@@ -1,0 +1,86 @@
+#!/bin/bash
+# Proves what -Dhelper=disabled is supposed to buy: a library with NO fork/exec
+# path, not merely a build that skips installing the helper binary.
+# Builds both ways and compares. Run from the source root.
+set -u
+SRC="${1:-$PWD}"
+A=$(mktemp -d); B=$(mktemp -d); trap 'rm -rf "$A" "$B"' EXIT
+fail=0
+ok() { printf 'PASS  %s\n' "$1"; }
+no() { printf 'FAIL  %s\n' "$1"; fail=1; }
+# Fails when there is no library to inspect. Without this, a missing artifact
+# makes nm and strings return nothing and every "no spawn symbols" check passes
+# for the wrong reason - the same shape of false pass this script exists to stop.
+so_of() {
+    local so
+    so=$(ls "$1"/libdrmtap.so.0.* 2>/dev/null | grep -v '\.p$' | head -1)
+    [ -f "$so" ] || return 1
+    printf '%s\n' "$so"
+}
+# The symbols a spawn needs. Matched WITHOUT a $ anchor: nm prints them
+# versioned (fork@GLIBC_2.2.5), and anchoring silently matched nothing - the
+# first version of this check reported 0 for both builds and proved nothing.
+SPAWN='(^|[[:space:]])(fork|execl|execv|execve|posix_spawn|socketpair|waitpid)@'
+
+if meson setup "$A" "$SRC" -Dhelper=disabled >"$A/setup.log" 2>&1 && ninja -C "$A" >"$A/build.log" 2>&1; then
+    ok "builds with -Dhelper=disabled"
+else
+    no "-Dhelper=disabled does not build"
+    tail -5 "$A/setup.log" "$A/build.log"
+fi
+if meson setup "$B" "$SRC" >"$B/setup.log" 2>&1 && ninja -C "$B" >"$B/build.log" 2>&1; then
+    ok "builds with the default (helper=auto)"
+else
+    no "the default build broke"
+    tail -5 "$B/build.log"
+fi
+
+# POSITIVE control first: if the default build shows no spawn symbols either,
+# the check is broken, not the code.
+SO_B=$(so_of "$B") || { no "the default build produced no .so to inspect"; SO_B=/dev/null; }
+SO_A=$(so_of "$A") || { no "the -Dhelper=disabled build produced no .so to inspect"; SO_A=/dev/null; }
+n_def=$(nm -D --undefined-only "$SO_B" 2>/dev/null | grep -cE "$SPAWN")
+if [ "$n_def" -gt 0 ]; then
+    ok "control: the default .so does reference spawn symbols ($n_def)"
+else
+    no "control failed: the default .so shows none either, so this check discriminates nothing"
+fi
+n_off=$(nm -D --undefined-only "$SO_A" 2>/dev/null | grep -cE "$SPAWN")
+if [ "$n_off" -eq 0 ]; then
+    ok "the -Dhelper=disabled .so references no fork/exec/socketpair"
+else
+    no "spawn symbols survive with the helper disabled:"
+    nm -D --undefined-only "$SO_A" | grep -E "$SPAWN"
+fi
+
+# The search paths are strings; they should be gone too, or the .so still tells
+# an attacker where a helper would be looked for.
+n_paths=$(strings "$SO_A" | grep -c '^/usr.*drmtap-helper$')
+if [ "$n_paths" -eq 0 ]; then
+    ok "no helper search paths left in the .so"
+else
+    no "$n_paths search path(s) still in the .so"
+fi
+# -f, not -x: the question here is whether the artifact EXISTS at all. With -x a
+# helper that was built without the exec bit reads as absent and this reports a
+# pass it did not earn. The positive control below keeps -x, because there the
+# claim is that the default build produces a helper that can actually run.
+if [ -f "$A/drmtap-helper" ]; then
+    no "a helper artifact exists in the -Dhelper=disabled build"
+else
+    ok "no helper binary produced"
+fi
+if [ -x "$B/drmtap-helper" ]; then
+    ok "control: the default build does produce the helper"
+else
+    printf 'SKIP  the default build produced no helper (libseccomp/libcap missing here)\n'
+fi
+
+for d in "$A" "$B"; do
+  r=$( cd "$d" && meson test 2>&1 | grep -E '^Fail:' | tr -s ' ' )
+  case "$r" in *"Fail: 0"*) ok "tests pass in $(basename "$d")";; *) no "tests fail in $(basename "$d"): $r";; esac
+done
+
+echo
+if [ $fail -eq 0 ]; then echo "ALL CHECKS PASS"; else echo "SOMETHING FAILED"; fi
+exit $fail
