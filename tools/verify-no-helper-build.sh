@@ -14,7 +14,7 @@ no() { printf 'FAIL  %s\n' "$1"; fail=1; }
 so_of() {
     local so
     so=$(ls "$1"/libdrmtap.so.0.* 2>/dev/null | grep -v '\.p$' | head -1)
-    [ -n "$so" ] && [ -f "$so" ] || return 1
+    [ -f "$so" ] || return 1
     printf '%s\n' "$so"
 }
 # The symbols a spawn needs. Matched WITHOUT a $ anchor: nm prints them
@@ -22,29 +22,55 @@ so_of() {
 # first version of this check reported 0 for both builds and proved nothing.
 SPAWN='(^|[[:space:]])(fork|execl|execv|execve|posix_spawn|socketpair|waitpid)@'
 
-meson setup "$A" "$SRC" -Dhelper=disabled >"$A/setup.log" 2>&1 && ninja -C "$A" >"$A/build.log" 2>&1 \
-  && ok "builds with -Dhelper=disabled" || { no "-Dhelper=disabled does not build"; tail -5 "$A/setup.log" "$A/build.log"; }
-meson setup "$B" "$SRC" >"$B/setup.log" 2>&1 && ninja -C "$B" >"$B/build.log" 2>&1 \
-  && ok "builds with the default (helper=auto)" || { no "the default build broke"; tail -5 "$B/build.log"; }
+if meson setup "$A" "$SRC" -Dhelper=disabled >"$A/setup.log" 2>&1 && ninja -C "$A" >"$A/build.log" 2>&1; then
+    ok "builds with -Dhelper=disabled"
+else
+    no "-Dhelper=disabled does not build"
+    tail -5 "$A/setup.log" "$A/build.log"
+fi
+if meson setup "$B" "$SRC" >"$B/setup.log" 2>&1 && ninja -C "$B" >"$B/build.log" 2>&1; then
+    ok "builds with the default (helper=auto)"
+else
+    no "the default build broke"
+    tail -5 "$B/build.log"
+fi
 
 # POSITIVE control first: if the default build shows no spawn symbols either,
 # the check is broken, not the code.
 SO_B=$(so_of "$B") || { no "the default build produced no .so to inspect"; SO_B=/dev/null; }
 SO_A=$(so_of "$A") || { no "the -Dhelper=disabled build produced no .so to inspect"; SO_A=/dev/null; }
 n_def=$(nm -D --undefined-only "$SO_B" 2>/dev/null | grep -cE "$SPAWN")
-[ "$n_def" -gt 0 ] && ok "control: the default .so does reference spawn symbols ($n_def)" \
-                   || no "control failed: the default .so shows none either, so this check discriminates nothing"
+if [ "$n_def" -gt 0 ]; then
+    ok "control: the default .so does reference spawn symbols ($n_def)"
+else
+    no "control failed: the default .so shows none either, so this check discriminates nothing"
+fi
 n_off=$(nm -D --undefined-only "$SO_A" 2>/dev/null | grep -cE "$SPAWN")
-[ "$n_off" -eq 0 ] && ok "the -Dhelper=disabled .so references no fork/exec/socketpair" \
-                   || { no "spawn symbols survive with the helper disabled:"; nm -D --undefined-only "$SO_A" | grep -E "$SPAWN"; }
+if [ "$n_off" -eq 0 ]; then
+    ok "the -Dhelper=disabled .so references no fork/exec/socketpair"
+else
+    no "spawn symbols survive with the helper disabled:"
+    nm -D --undefined-only "$SO_A" | grep -E "$SPAWN"
+fi
 
 # The search paths are strings; they should be gone too, or the .so still tells
 # an attacker where a helper would be looked for.
 n_paths=$(strings "$SO_A" | grep -c '^/usr.*drmtap-helper$')
-[ "$n_paths" -eq 0 ] && ok "no helper search paths left in the .so" || { no "$n_paths search path(s) still in the .so"; }
-[ -x "$A/drmtap-helper" ] && no "the helper binary was built anyway" || ok "no helper binary produced"
-[ -x "$B/drmtap-helper" ] && ok "control: the default build does produce the helper" \
-                          || printf 'SKIP  the default build produced no helper (libseccomp/libcap missing here)\n'
+if [ "$n_paths" -eq 0 ]; then
+    ok "no helper search paths left in the .so"
+else
+    no "$n_paths search path(s) still in the .so"
+fi
+if [ -x "$A/drmtap-helper" ]; then
+    no "the helper binary was built anyway"
+else
+    ok "no helper binary produced"
+fi
+if [ -x "$B/drmtap-helper" ]; then
+    ok "control: the default build does produce the helper"
+else
+    printf 'SKIP  the default build produced no helper (libseccomp/libcap missing here)\n'
+fi
 
 for d in "$A" "$B"; do
   r=$( cd "$d" && meson test 2>&1 | grep -E '^Fail:' | tr -s ' ' )
@@ -52,5 +78,5 @@ for d in "$A" "$B"; do
 done
 
 echo
-[ $fail -eq 0 ] && echo "ALL CHECKS PASS" || echo "SOMETHING FAILED"
+if [ $fail -eq 0 ]; then echo "ALL CHECKS PASS"; else echo "SOMETHING FAILED"; fi
 exit $fail
