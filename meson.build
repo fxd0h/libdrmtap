@@ -83,6 +83,7 @@ lib_sources = files(
     'src/drm_grab.c',
     'src/gpu_generic.c',
     'src/pixel_convert.c',
+    'src/privilege_helper.c',
 )
 
 lib_deps = [libdrm_dep, threads_dep, m_dep]
@@ -148,20 +149,6 @@ endif
 # Cursor capture
 lib_sources += files('src/cursor.c')
 
-# The library's side of the helper. `-Dhelper=disabled` is a statement about this
-# build, so it takes the fork/exec path out of the .so as well as skipping the
-# binary: with it, `nm -D` on the .so shows no fork and no exec. `auto` without
-# libseccomp/libcap means only that THIS host cannot produce a confined helper,
-# and one installed from elsewhere must still be usable, so there the client
-# side stays in.
-drmtap_no_helper = get_option('helper').disabled()
-if drmtap_no_helper
-    lib_sources += files('src/privilege_helper_stub.c')
-    message('drmtap-helper: disabled; the library gets no fork/exec path')
-else
-    lib_sources += files('src/privilege_helper.c')
-endif
-
 # ============================================================================
 # Build the shared + static library
 # ============================================================================
@@ -185,9 +172,6 @@ endif
 # at all, it only warns, and -Werror would then fail), so gate it on -O like the
 # helper does.
 libdrmtap_c_args = ['-fstack-protector-strong']
-if drmtap_no_helper
-    libdrmtap_c_args += '-DDRMTAP_NO_HELPER=1'
-endif
 if get_option('optimization') not in ['plain', '0']
     libdrmtap_c_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=2']
 endif
