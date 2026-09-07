@@ -939,8 +939,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
             /* Built with -Dhelper=disabled: the stub has already said the one
              * useful thing, and telling the user to install a helper this build
              * cannot spawn would send them the wrong way. */
-            drmModeFreeFB2(fb2);
-            return -EACCES;
+            ret = -EACCES;
+            goto cleanup;
 #else
             drmtap_set_error(ctx,
                 "No CAP_SYS_ADMIN and helper failed (ret=%d). Install the "
@@ -951,8 +951,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                 "sudo setcap cap_sys_admin+ep /usr/local/bin/drmtap-helper "
                 "(see SECURITY.md)",
                 ret);
-            drmModeFreeFB2(fb2);
-            return -EACCES;
+            ret = -EACCES;
+            goto cleanup;
 #endif
         }
 

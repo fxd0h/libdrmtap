@@ -1,5 +1,15 @@
-/* SPDX-License-Identifier: MIT */
 /*
+ * libdrmtap — DRM/KMS screen capture library for Linux
+ * https://github.com/fxd0h/libdrmtap
+ *
+ * Copyright (c) 2026 Mariano Abad <weimaraner@gmail.com>
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
+ * @file privilege_helper_stub.c
+ * @brief Helper-free build of the privileged fallback (-Dhelper=disabled).
+ *
  * Stand-in for privilege_helper.c in a build configured with -Dhelper=disabled.
  *
  * The point of that option is not to skip installing the helper binary — the
@@ -18,14 +28,11 @@
 
 #include "drmtap_internal.h"
 
-/* Same wording for every entry point: whichever one the caller reached, the
- * fact it needs is the same, and it is not "the helper failed".
- *
- * -EACCES rather than -ENOSYS: what the caller hit is that it may not read the
- * scanout, which is what the rest of the library already returns for that and
- * what consumers branch on (tests/test_capture.c treats -EACCES as "skip, no
- * permission"). That this build also has no fallback is a fact about the build,
- * so it belongs in the message rather than in the errno. */
+// One wording for every entry point: the fact the caller needs is the same.
+// -EACCES and not -ENOSYS, because what it hit is that it may not read the
+// scanout, which is what the rest of the library returns for that and what
+// tests/test_capture.c branches on. Having no fallback is a fact about the
+// build, so it goes in the message, not in the errno.
 static int no_helper(drmtap_ctx *ctx) {
     drmtap_set_error(ctx,
         "this libdrmtap was built with -Dhelper=disabled, so it cannot fall "
