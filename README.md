@@ -197,10 +197,11 @@ meson setup build -Degl=enabled -Dhelper=enabled
 meson compile -C build
 
 # If you do NOT want the helper at all - device access arranged by udev rules,
-# membership of video/render, or seat management - build without it. That leaves
-# no fork/exec path in the library, not merely no binary, and a caller without
-# CAP_SYS_ADMIN then gets -EACCES naming the capability instead of a fallback:
-#   meson setup build -Degl=enabled -Dhelper=disabled
+# membership of video/render, or seat management - build without it instead.
+# That leaves no fork/exec path in the library, not merely no binary, and a
+# caller without CAP_SYS_ADMIN then gets -EACCES naming the capability rather
+# than a fallback:
+meson setup build-nohelper -Degl=enabled -Dhelper=disabled
 ```
 
 ### Install
