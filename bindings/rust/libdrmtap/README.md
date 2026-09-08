@@ -77,8 +77,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   framebuffers work on older kernels)
 - A C compiler and the development packages `libdrmtap-sys` builds against. On
   Debian/Ubuntu: `libdrm-dev libegl-dev libgles2-mesa-dev libseccomp-dev
-  libcap-dev`. libdrm, libseccomp and libcap are linked; libEGL and libGLESv2 are
-  needed only as headers, because the library dlopens them at runtime. The crate
+  libcap-dev`. libdrm, libseccomp and libcap are linked.
+  libEGL and libGLESv2 are not: the library dlopens `libEGL.so.1` and
+  `libGLESv2.so.2` on first use, so the build needs their headers and **the
+  target needs those runtime libraries**. Without them the EGL detile is skipped
+  and the CPU deswizzle takes over, which fails closed with `-ENOTSUP` on a
+  scanout it cannot map or detile. The crate
   compiles its embedded C sources statically, so there is no system `libdrmtap`
   install required
 - For unprivileged capture: `drmtap-helper`, which `libdrmtap-sys` always builds
