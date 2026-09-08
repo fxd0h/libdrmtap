@@ -188,9 +188,9 @@ sudo apt install libseccomp-dev libcap-dev
 
 # Build. Neither option is optional in practice, and both are passed as
 # `=enabled` for the same reason: on `auto` a missing dependency is a message in
-# the configure log rather than an error. -Degl builds a stub that fails on the
-# first real scanout; -Dhelper leaves out the binary that unprivileged capture
-# needs. Pass them and a missing dependency stops the build instead.
+# the configure log rather than an error. Without -Degl you get a stub that
+# fails on the first real scanout; without -Dhelper you get no binary for
+# unprivileged capture. Pass them and a missing dependency stops the build.
 git clone https://github.com/fxd0h/libdrmtap.git
 cd libdrmtap
 meson setup build -Degl=enabled -Dhelper=enabled
@@ -198,11 +198,9 @@ meson compile -C build
 
 # If you do NOT want the helper at all - device access arranged by udev rules,
 # membership of video/render, or seat management - build without it instead.
-# That leaves no fork/exec path in the library, not merely no binary. The helper
-# is only ever reached by a caller that cannot export the framebuffer handle
-# itself, and that caller now gets -EACCES naming what is missing rather than a
-# fallback. A caller that already holds DRM master or CAP_SYS_ADMIN exports
-# directly and never needed the helper, so it is unaffected:
+# That leaves no fork/exec path in the library, not merely no binary, and a
+# caller that cannot read the scanout itself then gets -EACCES naming what is
+# missing rather than a fallback:
 meson setup build-nohelper -Degl=enabled -Dhelper=disabled
 meson compile -C build-nohelper
 ```

@@ -44,9 +44,9 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
   crate links libdrm, libseccomp and libcap. libEGL and libGLESv2 are never
   linked: they are `dlopen`ed lazily as `libEGL.so.1` and `libGLESv2.so.2`, so
   the headers are a build requirement and those two shared libraries are a
-  RUNTIME requirement on the target. Without them the EGL detile is skipped and
-  the CPU deswizzle takes over, which fails closed with `-ENOTSUP` on a scanout
-  it cannot map or detile.
+  RUNTIME requirement on the target (`libegl1` and `libgles2` on Debian/Ubuntu).
+  Without them the EGL detile is unavailable and only the CPU paths remain,
+  which do not cover every scanout.
 
 The build also compiles the privileged `drmtap-helper` binary from the same
 embedded sources, with exploit-mitigation hardening (stack-protector-strong,
