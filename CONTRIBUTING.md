@@ -121,10 +121,11 @@ sudo modprobe vkms
 # so this works as-is; to point it anywhere else, edit `integration_env`.
 meson test -C build --suite integration
 
-# To aim at a different card without editing meson.build, run the binary
-# directly. Without DRM_DEVICE the library auto-detects the card driving the
-# MOST active CRTCs, which can be the wrong one on a multi-GPU system:
-DRM_DEVICE=/dev/dri/card0 ./build/test_integration
+# To aim at a different card without editing meson.build, run the suite's
+# binaries directly - they are `test_enumerate` and `test_capture`. Without
+# DRM_DEVICE the library auto-detects the card driving the MOST active CRTCs,
+# which can be the wrong one on a multi-GPU system:
+DRM_DEVICE=/dev/dri/card0 ./build/test_capture
 ```
 
 Running the suites under the sanitizer build (`build-asan` above) is the recommended pre-submit check.
