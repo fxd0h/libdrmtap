@@ -27,7 +27,7 @@ a breaking ABI change (see `DRMTAP_ABI_MAJOR` in the rustdesk loader).
 
 | Script | What it does |
 | --- | --- |
-| `set-version.sh X.Y.Z` | Stamps the 6 code sites (C header, csrc header, meson, the `libdrmtap-sys` crate, the wrapper crate's own version, and the wrapper's dependency on `libdrmtap-sys`). Leaves only prose in docs untouched; `check-version.sh` reads all six back and requires them to match. |
+| `set-version.sh X.Y.Z` | Stamps the 6 code sites (C header, csrc header, meson, the `libdrmtap-sys` crate, the wrapper crate's own version, and the wrapper's dependency on `libdrmtap-sys`). Everything else is left to a human: prose in docs, and the version-bearing snippets under `contrib/` and `docs/research/`. `check-version.sh` reads all six back and requires them to match. |
 | `sync-crate.sh [--check]` | Regenerates `bindings/rust/libdrmtap-sys/csrc/` from the library sources (with the one packaging include-path fixup). `--check` fails on drift instead of writing — used by CI. |
 | `check-version.sh` | Fails if any version site disagrees with the canonical header, or if `csrc/` has drifted from the library. Also prints a non-fatal advisory listing every libdrmtap version string **across the whole repo** (`*.md`/`*.toml`/`*.rs` under `docs/`, `contrib/`, `AGENTS.md`, the crates and the READMEs — not just the top-level ones) that is not the canonical version, for manual review. Wired into CI as the `version-coherence` job. |
 
