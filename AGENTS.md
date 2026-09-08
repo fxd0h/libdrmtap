@@ -395,7 +395,9 @@ libdrmtap/
 │   ├── gpu_nvidia.c       ← Nvidia: linear passthrough, block-linear -> -ENOTSUP (no CPU decoder)
 │   ├── gpu_generic.c      ← Generic/VM linear backend (virtio-gpu, simple VMs)
 │   ├── privilege_helper.c ← Helper spawn + SCM_RIGHTS / DMA-BUF passing
-│   └── privilege_helper_stub.c ← The same four entry points, all -EACCES.
+│   └── privilege_helper_stub.c ← The same four entry points. Spawn, grab and
+│                              get_cursor return -EACCES; stop is a void no-op,
+│                              because drmtap_close calls it unconditionally.
 │                              Selected by -Dhelper=disabled, which leaves no
 │                              fork, exec or search path in the .so. Keep its
 │                              signatures in step with privilege_helper.c.
