@@ -178,16 +178,29 @@ work on older kernels.
 # Dependencies: meson, gcc, libdrm-dev
 sudo apt install meson gcc libdrm-dev pkg-config
 
-# Optional (for EGL GPU-universal detiling):
+# For EGL GPU-universal detiling:
 sudo apt install libegl-dev libgles2-mesa-dev
 
-# Build. -Degl=enabled is not optional in practice: the EGL backend is what
-# detiles a modern scanout, and without it meson quietly builds a stub that
-# fails on the first real frame. Passing it turns that into a configure error.
+# For the privileged helper. Without these, `helper=auto` builds the library
+# ALONE and says so only in the configure log, and the setcap step further down
+# then fails on a binary that was never built.
+sudo apt install libseccomp-dev libcap-dev
+
+# Build. Neither option is optional in practice, and both are passed as
+# `=enabled` for the same reason: on `auto` a missing dependency is a message in
+# the configure log rather than an error. -Degl builds a stub that fails on the
+# first real scanout; -Dhelper leaves out the binary that unprivileged capture
+# needs. Pass them and a missing dependency stops the build instead.
 git clone https://github.com/fxd0h/libdrmtap.git
 cd libdrmtap
-meson setup build -Degl=enabled
+meson setup build -Degl=enabled -Dhelper=enabled
 meson compile -C build
+
+# If you do NOT want the helper at all - device access arranged by udev rules,
+# membership of video/render, or seat management - build without it. That leaves
+# no fork/exec path in the library, not merely no binary, and a caller without
+# CAP_SYS_ADMIN then gets -EACCES naming the capability instead of a fallback:
+#   meson setup build -Degl=enabled -Dhelper=disabled
 ```
 
 ### Install
@@ -198,12 +211,13 @@ sudo meson install -C build
 
 ### Set up privileged helper (for capture without root)
 
-A Meson install leaves the helper world-executable. Do **not** apply the
-capability to it in that state: a file capability applies to every user who can
-`exec` the binary, so `cap_sys_admin+ep` on a `0755` helper lets any local user
-read the DRM scanout (login screen, lock screen, other users' sessions). Restrict
-who can run it FIRST — `root:<capture-group>`, mode `0750` — then apply the
-capability. The `SO_PEERCRED` check inside the helper is defense-in-depth, not an
+A Meson install already places the helper at mode 0750, owner `root:root`, so it
+is never world-executable out of the box. What is left to you is the group. A
+file capability applies to every user who can `exec` the binary, so
+`cap_sys_admin+ep` on a helper that anyone can run lets any local user read the
+DRM scanout (login screen, lock screen, other users' sessions). Chown it to a
+trusted capture group FIRST, keep the mode at `0750`, and apply the capability
+LAST. The `SO_PEERCRED` check inside the helper is defense-in-depth, not an
 access-control boundary; the file mode is. This mirrors the procedure in
 [`SECURITY.md`](SECURITY.md).
 

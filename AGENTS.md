@@ -394,7 +394,11 @@ libdrmtap/
 │   ├── gpu_amd.c          ← AMD amdgpu tiling (RX560 here, RX Vega 64 by a tester)
 │   ├── gpu_nvidia.c       ← Nvidia: linear passthrough, block-linear -> -ENOTSUP (no CPU decoder)
 │   ├── gpu_generic.c      ← Generic/VM linear backend (virtio-gpu, simple VMs)
-│   └── privilege_helper.c ← Helper spawn + SCM_RIGHTS / DMA-BUF passing
+│   ├── privilege_helper.c ← Helper spawn + SCM_RIGHTS / DMA-BUF passing
+│   └── privilege_helper_stub.c ← The same four entry points, all -EACCES.
+│                              Selected by -Dhelper=disabled, which leaves no
+│                              fork, exec or search path in the .so. Keep its
+│                              signatures in step with privilege_helper.c.
 ├── helper/
 │   └── drmtap-helper.c    ← Privileged helper binary (CAP_SYS_ADMIN, seccomp-hardened)
 ├── tests/
@@ -416,7 +420,8 @@ libdrmtap/
 │   ├── README.md           ← Docs index
 │   └── research/           ← 9 technical research documents (00–08)
 └── .github/
-    ├── workflows/ci.yml    ← Build & Test (Ubuntu 22.04/24.04), Rust crate, cppcheck, CodeQL
+    ├── workflows/ci.yml    ← Build & Test (Ubuntu 22.04/24.04), cppcheck, Rust crate,
+                            version + csrc coherence, CodeQL
     ├── ISSUE_TEMPLATE/
     │   ├── bug_report.md
     │   └── feature_request.md

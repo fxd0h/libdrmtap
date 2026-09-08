@@ -84,8 +84,10 @@ At startup, in this order (`main()` in `helper/drmtap-helper.c`):
 3. **`PR_SET_NO_NEW_PRIVS`** — set via `prctl`, before seccomp; hard-fails if it
    cannot be set.
 4. **Opens the DRM device once, read-only** — `open(..., O_RDONLY | O_CLOEXEC)`.
-   Only read ioctls are issued (`GetFB2` / `PrimeHandleToFD` / `SetClientCap`),
-   which all work on an `O_RDONLY` fd on the CAP_SYS_ADMIN path; the helper never
+   Only non-modesetting ioctls are issued (`GetFB2`, `PrimeHandleToFD`,
+   `SetClientCap`, `GEM_CLOSE`, `MODE_MAP_DUMB`, `DMA_BUF_IOCTL_SYNC`, and the
+   virtio-gpu transfer/wait/getparam on a virtio guest), which all work on an
+   `O_RDONLY` fd on the CAP_SYS_ADMIN path; the helper never
    becomes DRM master and never modifies KMS state. Opening happens **before**
    seccomp so the filter can forbid `open`/`openat` outright (the seccomp step
    below).
@@ -99,9 +101,11 @@ At startup, in this order (`main()` in `helper/drmtap-helper.c`):
    default-**KILL** allowlist), allowing only: `read, write, close, ioctl,
    sendto, sendmsg, recvfrom, mmap, munmap, brk, fstat, newfstatat, fcntl,
    exit_group, exit, rt_sigreturn, clock_gettime`. `ioctl` is further restricted
-   by request **type** to DRM ioctls only — a masked equality on the request's
-   type byte (`'d'`), so a non-DRM `ioctl` such as `TIOCSTI` console injection
-   hits the default KILL. **`open`/`openat` are deliberately NOT on the
+   by request **type** to DRM ioctls (a masked equality on the request's type
+   byte, `'d'`) plus exactly `DMA_BUF_IOCTL_SYNC`, matched by value, which the
+   cursor read needs for cache coherence and which is type `'b'` rather than
+   `'d'`. Any other `ioctl`, such as `TIOCSTI` console injection, hits the
+   default KILL. **`open`/`openat` are deliberately NOT on the
    allowlist** — the device fd was already opened in step 4 and the grab loop
    only ever reuses it, so a compromised helper cannot open arbitrary files even
    while it holds `CAP_SYS_ADMIN`. **Hard-fails** if it cannot install.
@@ -193,14 +197,15 @@ Do not read the above as more locked down than it is:
   re-issues `drmModeGetFB2`, so the capability cannot be dropped after init. The
   helper reduces to exactly one capability and keeps it for the whole session.
   It is **not** dropped after initialization.
-- **The helper is dynamically linked** (it links `libdrm`, `libcap`,
-  `libseccomp`, and EGL/GLES). It is not statically linked. On a setcap binary
+- **The helper is dynamically linked** (it links `libdrm`, `libcap` and
+  `libseccomp` - no EGL or GLES: the GPU stack stays on the unprivileged side).
+  It is not statically linked. On a setcap binary
   the dynamic loader ignores `LD_PRELOAD`/`LD_LIBRARY_PATH` for the secure-exec
   case, but this is the loader's `AT_SECURE` behavior, not something the helper
   itself enforces.
-- **The seccomp filter narrows only `ioctl`, and only by request type.** `ioctl`
-  is restricted to the DRM type — a masked equality on the request's type byte
-  (`'d'`), so a non-DRM `ioctl` such as `TIOCSTI` console injection is killed —
+- **The seccomp filter narrows only `ioctl`.** It is restricted to the DRM type
+  byte (`'d'`, masked equality) plus the single value `DMA_BUF_IOCTL_SYNC`, so a
+  non-DRM `ioctl` such as `TIOCSTI` console injection is killed —
   but the fd argument itself is not filtered, and the other allowed syscalls have
   no per-argument narrowing at all. It otherwise blocks whole syscall classes
   (including `open`/`openat` entirely).
@@ -210,8 +215,9 @@ Do not read the above as more locked down than it is:
   driving *your* session's socket, but it is still a privileged process they can
   spawn). The recommended packaging is therefore to install it owned
   `root:<group>` mode `0750`, so only members of that group can execute it.
-  libdrmtap ships the hardened binary; this world-exec deployment decision is the
-  integrator's (e.g. RustDesk's) to make, not something libdrmtap enforces.
+  libdrmtap installs the binary `0750 root:root`, so a bare `meson install` is
+  never world-executable; choosing the capture group, and granting the
+  capability, is the integrator's (e.g. RustDesk's) step.
 - The helper does **not** sanitize its environment (`clearenv`), set
   `PR_SET_DUMPABLE`, detect/refuse containers, log to syslog, set rlimits, or
   emit desktop notifications. (Earlier versions of this document claimed some of
@@ -229,7 +235,7 @@ Do not read the above as more locked down than it is:
 | Helper exec'd standalone or by a different user | Refuses unless fd 3 is a connected socket whose `SO_PEERCRED` peer uid matches its own |
 | Unprivileged side points the helper at an arbitrary device | Device path must canonicalize under `/dev/dri/`, and the node is opened `O_RDONLY` |
 | Unprivileged side makes the helper open an arbitrary path/fd | The request protocol carries no path/fd; fd passing is helper -> main only; `open`/`openat` are not on the seccomp allowlist after init |
-| Compromised helper issues a non-DRM ioctl (e.g. `TIOCSTI` console injection) | seccomp allows `ioctl` only for the DRM request type (masked equality on the type byte); any other ioctl hits `SCMP_ACT_KILL_PROCESS` |
+| Compromised helper issues a non-DRM ioctl (e.g. `TIOCSTI` console injection) | seccomp allows `ioctl` for the DRM request type (masked equality on the type byte) plus exactly `DMA_BUF_IOCTL_SYNC` by value; any other ioctl hits `SCMP_ACT_KILL_PROCESS` |
 | Malformed scanout geometry drives an oversized allocation / overflow | Geometry guard rejects zero/absurd `pitch`/`height`, capping at one 8K BGRA frame |
 | Long-running helper exhausts kernel GEM handles / pins buffer objects | The helper closes the GEM handle `drmModeGetFB2` mints on every grab and cursor path (`helper_gem_close`), so handle/BO use cannot grow unboundedly |
 | Malformed convert descriptor faults the unprivileged converter (SIGBUS DoS) | `drmtap_convert_dmabuf` validates geometry, requires a genuine DMA-BUF, and bounds the read against the buffer size (`lseek`), failing closed on unknown size |

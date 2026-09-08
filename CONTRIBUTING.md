@@ -115,23 +115,28 @@ meson test -C build --suite unit
 ```bash
 # Synthetic scanout via vkms:
 sudo modprobe vkms
-# point DRM_DEVICE at the vkms card (check /dev/dri/ — it is often card1)
-DRM_DEVICE=/dev/dri/card1 meson test -C build --suite integration
+# The integration suite pins its own device: meson.build sets
+# DRM_DEVICE=/dev/dri/card1 in `integration_env`, and `meson test` cannot
+# override a test's environment from the command line. vkms is usually card1,
+# so this works as-is; to point it anywhere else, edit `integration_env`.
+meson test -C build --suite integration
 
-# ...or against your real GPU (point DRM_DEVICE at the right card; without it
-# the library auto-detects the first card with an active CRTC, which can be the
-# wrong one on multi-GPU systems):
-DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
+# To aim at a different card without editing meson.build, run the binary
+# directly. Without DRM_DEVICE the library auto-detects the card driving the
+# MOST active CRTCs, which can be the wrong one on a multi-GPU system:
+DRM_DEVICE=/dev/dri/card0 ./build/test_integration
 ```
 
 Running the suites under the sanitizer build (`build-asan` above) is the recommended pre-submit check.
 
 ## Continuous Integration
 
-Every push and pull request runs [GitHub Actions](.github/workflows/ci.yml):
+Every pull request, and every push to `main`, runs
+[GitHub Actions](.github/workflows/ci.yml):
 
 - **Build & Test** on Ubuntu **22.04** and **24.04** — debug build with ASan + UBSan, the `unit` suite, the `integration` suite against vkms when available, plus a clean release build.
 - **Rust crate** — builds and tests the `libdrmtap-sys` and `libdrmtap` workspace and verifies both crates still `cargo package`.
+- **Version & crate-source coherence** — `tools/check-version.sh`. If you touched `src/` or `helper/`, run `tools/sync-crate.sh` first, or this job fails on the crate's stale bundled `csrc/` copies.
 - **Static analysis** — `cppcheck` over `src/` and `helper/`.
 - **CodeQL** and **CodeRabbit** review run on every PR.
 
