@@ -39,8 +39,10 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
 - A C compiler — the embedded C sources are compiled statically at build time.
   There is **no** system `libdrmtap` install, `meson install`, or `pkg-config`
   lookup of a shared library.
-- `libdrm` development headers (located via `pkg-config`), plus EGL, OpenGL ES 2,
-  libseccomp, and libcap (and their `-dev` headers) — the crate links these.
+- `libdrm` development headers (located via `pkg-config`), plus the EGL and
+  OpenGL ES 2 headers (libEGL and libGLESv2 themselves are `dlopen`ed lazily and
+  never linked), plus libseccomp and libcap and their `-dev` headers — the crate
+  links those two.
 
 The build also compiles the privileged `drmtap-helper` binary from the same
 embedded sources, with exploit-mitigation hardening (stack-protector-strong,
