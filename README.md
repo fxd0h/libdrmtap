@@ -202,12 +202,19 @@ meson compile -C build
 # caller without CAP_SYS_ADMIN then gets -EACCES naming the capability rather
 # than a fallback:
 meson setup build-nohelper -Degl=enabled -Dhelper=disabled
+meson compile -C build-nohelper
 ```
 
 ### Install
 
 ```bash
 sudo meson install -C build
+```
+
+Install the directory you configured above. For the helper-disabled build:
+
+```bash
+sudo meson install -C build-nohelper
 ```
 
 ### Set up privileged helper (for capture without root)
