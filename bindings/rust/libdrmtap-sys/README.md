@@ -40,9 +40,13 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
   There is **no** system `libdrmtap` install, `meson install`, or `pkg-config`
   lookup of a shared library.
 - `libdrm` development headers (located via `pkg-config`), plus the EGL and
-  OpenGL ES 2 headers (libEGL and libGLESv2 themselves are `dlopen`ed lazily and
-  never linked), plus libseccomp and libcap and their `-dev` headers — the crate
-  links those two.
+  OpenGL ES 2 headers, plus libseccomp and libcap and their `-dev` headers — the
+  crate links libdrm, libseccomp and libcap. libEGL and libGLESv2 are never
+  linked: they are `dlopen`ed lazily as `libEGL.so.1` and `libGLESv2.so.2`, so
+  the headers are a build requirement and those two shared libraries are a
+  RUNTIME requirement on the target. Without them the EGL detile is skipped and
+  the CPU deswizzle takes over, which fails closed with `-ENOTSUP` on a scanout
+  it cannot map or detile.
 
 The build also compiles the privileged `drmtap-helper` binary from the same
 embedded sources, with exploit-mitigation hardening (stack-protector-strong,

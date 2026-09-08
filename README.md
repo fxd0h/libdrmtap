@@ -198,9 +198,11 @@ meson compile -C build
 
 # If you do NOT want the helper at all - device access arranged by udev rules,
 # membership of video/render, or seat management - build without it instead.
-# That leaves no fork/exec path in the library, not merely no binary, and a
-# caller without CAP_SYS_ADMIN then gets -EACCES naming the capability rather
-# than a fallback:
+# That leaves no fork/exec path in the library, not merely no binary. The helper
+# is only ever reached by a caller that cannot export the framebuffer handle
+# itself, and that caller now gets -EACCES naming what is missing rather than a
+# fallback. A caller that already holds DRM master or CAP_SYS_ADMIN exports
+# directly and never needed the helper, so it is unaffected:
 meson setup build-nohelper -Degl=enabled -Dhelper=disabled
 meson compile -C build-nohelper
 ```
