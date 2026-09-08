@@ -84,11 +84,13 @@ At startup, in this order (`main()` in `helper/drmtap-helper.c`):
 3. **`PR_SET_NO_NEW_PRIVS`** — set via `prctl`, before seccomp; hard-fails if it
    cannot be set.
 4. **Opens the DRM device once, read-only** — `open(..., O_RDONLY | O_CLOEXEC)`.
-   Only non-modesetting ioctls are issued (`GetFB2`, `PrimeHandleToFD`,
-   `SetClientCap`, `GEM_CLOSE`, `MODE_MAP_DUMB`, `DMA_BUF_IOCTL_SYNC`, and the
-   virtio-gpu transfer/wait/getparam on a virtio guest), which all work on an
-   `O_RDONLY` fd on the CAP_SYS_ADMIN path; the helper never
-   becomes DRM master and never modifies KMS state. Opening happens **before**
+   Only non-modesetting ioctls are issued on it (`GetFB2`, `PrimeHandleToFD`,
+   `SetClientCap`, `GEM_CLOSE`, `MODE_MAP_DUMB`, and the virtio-gpu
+   transfer/wait/getparam on a virtio guest), which all work on an `O_RDONLY` fd
+   on the CAP_SYS_ADMIN path; the helper never becomes DRM master and never
+   modifies KMS state. `DMA_BUF_IOCTL_SYNC` is issued too, but on the exported
+   DMA-BUF fd rather than on the device. The seccomp filter below allows it by
+   value, and the fd it targets is itself opened `O_RDONLY`. Opening happens **before**
    seccomp so the filter can forbid `open`/`openat` outright (the seccomp step
    below).
 5. **Drops any implicitly-granted DRM master** — calls `drmDropMaster` right
