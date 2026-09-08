@@ -75,10 +75,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - Linux with DRM/KMS (kernel 4.20+ for the tiled/modifier path; linear/VM
   framebuffers work on older kernels)
-- A C compiler — `libdrmtap-sys` compiles its embedded C sources statically, so
-  there is no system `libdrmtap` install required
-- For unprivileged capture: `drmtap-helper` with `cap_sys_admin+ep` (the helper
-  binary is built by `libdrmtap-sys`)
+- A C compiler and the development packages `libdrmtap-sys` builds against. On
+  Debian/Ubuntu: `libdrm-dev libegl-dev libgles2-mesa-dev libseccomp-dev
+  libcap-dev`. libdrm, libseccomp and libcap are linked; libEGL and libGLESv2 are
+  needed only as headers, because the library dlopens them at runtime. The crate
+  compiles its embedded C sources statically, so there is no system `libdrmtap`
+  install required
+- For unprivileged capture: `drmtap-helper`, which `libdrmtap-sys` always builds
+  (the meson `-Dhelper=disabled` option that drops it has no crate equivalent). A
+  file capability applies to every user who can `exec` the binary, so restrict who
+  can run it FIRST (`root:<capture-group>`, mode `0750`) and apply
+  `cap_sys_admin+ep` LAST. Procedure in
+  [SECURITY.md](https://github.com/fxd0h/libdrmtap/blob/main/SECURITY.md)
 
 ## License
 
