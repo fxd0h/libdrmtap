@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stddef.h>  /* offsetof */
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -235,6 +236,52 @@ static void test_cmd_frame_magic_version(void) {
     CHECK(!wire_cmd_valid(&bad), "unknown command type rejected");
 }
 
+/* Extending a reply that has no header of its own. The cursor reply gained the
+ * hotspot provenance, and the compatible way to do that was a new command whose
+ * reply embeds the frozen one -- NOT a protocol version bump, which would have
+ * made an older helper refuse CMD_GRAB as well and cost a host with a stale
+ * drmtap-helper all of its unprivileged capture. Two things have to hold for
+ * that to work, and both are pinned here: the new command must be accepted by
+ * the gate, and the legacy reply must remain a byte-exact PREFIX of the new one,
+ * so a client that reads only the first sizeof(helper_cursor_wire_t) bytes gets
+ * exactly what it always got. */
+static void test_cursor_reply_is_extended_by_prefix(void) {
+    helper_cmd_grab_t c2 = wire_cmd(CMD_GET_CURSOR2, 3);
+    CHECK(wire_cmd_valid(&c2), "CMD_GET_CURSOR2 is a declared command type");
+    CHECK(CMD_GET_CURSOR2 != CMD_GET_CURSOR && CMD_GET_CURSOR2 != CMD_GRAB &&
+          CMD_GET_CURSOR2 != CMD_QUIT, "CMD_GET_CURSOR2 does not collide");
+    CHECK(HELPER_PROTO_VERSION == 1u,
+          "the protocol version did NOT move: compatibility comes from the new command");
+
+    CHECK(sizeof(helper_cursor_wire_t) == 32, "legacy cursor reply is 32 bytes");
+    CHECK(sizeof(helper_cursor_wire2_t) == 36, "extended cursor reply is 36 bytes");
+    CHECK(offsetof(helper_cursor_wire2_t, base) == 0,
+          "the legacy reply sits at offset 0 of the extended one");
+
+    /* An extended reply, read by a legacy-sized reader. */
+    helper_cursor_wire2_t w2;
+    memset(&w2, 0, sizeof(w2));
+    w2.base.x = -11; w2.base.y = 22;
+    w2.base.hot_x = 0; w2.base.hot_y = 0;   /* the case the provenance exists for */
+    w2.base.width = 64; w2.base.height = 64;
+    w2.base.visible = 1; w2.base.data_size = 64u * 64u * 4u;
+    w2.hot_from_property = 1;
+
+    helper_cursor_wire_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    memcpy(&legacy, &w2, sizeof(legacy));
+    CHECK(legacy.x == -11 && legacy.y == 22 && legacy.hot_x == 0 && legacy.hot_y == 0 &&
+          legacy.width == 64 && legacy.height == 64 && legacy.visible == 1 &&
+          legacy.data_size == 64u * 64u * 4u,
+          "every legacy field survives the prefix read of an extended reply");
+
+    /* And the pixels follow the metadata, so a reader that takes the legacy
+     * length off the wire must leave the extra word for nobody: that is exactly
+     * why the extra word is only ever SENT in answer to CMD_GET_CURSOR2. */
+    CHECK(sizeof(w2) - sizeof(w2.base) == sizeof(uint32_t),
+          "the extension is one word, appended after the frozen part");
+}
+
 int main(void) {
     printf("Running wire-protocol tests (against src/wire.h)...\n");
     test_received_fd_is_cloexec();
@@ -245,6 +292,7 @@ int main(void) {
     test_fragmented_frame_reassembled();
     test_eof_midframe_rejected();
     test_cmd_frame_magic_version();
+    test_cursor_reply_is_extended_by_prefix();
     if (g_failures == 0) {
         printf("All wire-protocol tests passed.\n");
         return 0;

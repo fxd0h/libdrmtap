@@ -333,7 +333,13 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
         }
     }
 
-    helper_cmd_grab_t hcmd = wire_cmd(CMD_GET_CURSOR, ctx->crtc_id);
+    /* Ask for the reply that carries the hotspot provenance, unless this helper
+     * has already shown it does not know that command. A helper older than
+     * CMD_GET_CURSOR2 rejects the unknown type at its own gate and closes the
+     * connection WITHOUT replying, which is what the recv below sees. */
+    const int extended = !ctx->helper_no_cursor2;
+    helper_cmd_grab_t hcmd = wire_cmd(extended ? CMD_GET_CURSOR2 : CMD_GET_CURSOR,
+                                      ctx->crtc_id);
     ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
     if (n != sizeof(hcmd)) {
         drmtap_helper_stop(ctx);
@@ -346,12 +352,31 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
         }
     }
 
-    helper_cursor_wire_t w;
-    memset(&w, 0, sizeof(w));
-    if (recv_all(ctx->helper_fd, &w, sizeof(w)) < 0) {
+    helper_cursor_wire2_t w2;
+    memset(&w2, 0, sizeof(w2));
+    size_t meta_len = extended ? sizeof(w2) : sizeof(w2.base);
+    if (recv_all(ctx->helper_fd, &w2, meta_len) < 0) {
+        if (extended && !ctx->helper_cursor2_ok) {
+            /* Almost certainly a helper that does not know CMD_GET_CURSOR2. It
+             * closed the channel, so the retry needs a fresh one; latch first so
+             * this costs one respawn per context and not one per poll. Falling
+             * back keeps the capture working and gives up only the provenance,
+             * which drmtap_cursor_hotspot_valid() then reports as -ENOTSUP. */
+            ctx->helper_no_cursor2 = 1;
+            drmtap_debug_log(ctx,
+                "helper did not answer CMD_GET_CURSOR2; falling back to "
+                "CMD_GET_CURSOR (this helper predates hotspot provenance)");
+            drmtap_helper_stop(ctx);
+            if (drmtap_helper_spawn(ctx) < 0) {
+                drmtap_set_error(ctx, "helper cursor metadata recv failed");
+                return -EIO;
+            }
+            return drmtap_helper_get_cursor(ctx, cursor);
+        }
         drmtap_set_error(ctx, "helper cursor metadata recv failed");
         return -EIO;
     }
+    const helper_cursor_wire_t w = w2.base;
 
     cursor->x = w.x;
     cursor->y = w.y;
@@ -360,6 +385,17 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     cursor->width = w.width;
     cursor->height = w.height;
     cursor->visible = w.visible ? 1 : 0;
+    /* Only the privileged side can tell an absent HOTSPOT_X/Y from a real
+     * (0, 0), so the answer travels with the reply rather than being re-derived
+     * here from coordinates that cannot carry it. A legacy reply carries no such
+     * field: record NOTHING then, so the accessor answers "no provenance"
+     * instead of asserting the hotspot was a guess. */
+    if (extended) {
+        /* It answered, so this helper knows the command: a later failure is a
+         * transient, not an old binary. */
+        ctx->helper_cursor2_ok = 1;
+        drmtap_cursor_set_hot_provenance(cursor, w2.hot_from_property != 0);
+    }
 
     if (w.visible && w.data_size > 0) {
         /* Drain oversized payloads defensively (cursors are tiny, ~64x64). */

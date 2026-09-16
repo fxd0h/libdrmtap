@@ -343,8 +343,10 @@ impl Cursor {
     ///
     /// `HOTSPOT_X`/`HOTSPOT_Y` are plane properties only para-virtualized drivers
     /// (virtio-gpu, vmwgfx, qxl, vboxvideo) create, so on bare metal (i915, amdgpu,
-    /// nvidia) this is always `0` and is indistinguishable from a real top-left
-    /// hotspot. A caller that injects the pointer itself can recover the true value:
+    /// nvidia) this is always `0`. Which of the two a `0` is — a missing property or
+    /// a driver that really puts the hotspot at the corner — is NOT visible here:
+    /// ask [`Cursor::hotspot_from_driver`]. A caller that injects the pointer itself
+    /// can recover an absent value:
     /// the plane sits at the pointer minus the hotspot, so once both are still,
     /// `hotspot = injected_position - plane_position`. Convert first: this position is
     /// CRTC-relative physical pixels, while an injected point is usually in the
@@ -359,6 +361,28 @@ impl Cursor {
     /// Hotspot y within the cursor image; see [`Cursor::hot_x`] for when it is `0`.
     pub fn hot_y(&self) -> i32 {
         self.raw.hot_y
+    }
+
+    /// Whether [`Cursor::hot_x`]/[`Cursor::hot_y`] were read from the driver.
+    ///
+    /// `Some(true)` means both `HOTSPOT_X` and `HOTSPOT_Y` were present, so the
+    /// pair is the driver's answer even when it is `(0, 0)`; `Some(false)` means at
+    /// least one was absent, so those zeros carry no information and a consumer
+    /// that needs a hotspot has to estimate one. `None` means nothing recorded an
+    /// answer for this sample — a cursor read through a privileged helper older
+    /// than the one shipped with this release — and it must NOT be folded into
+    /// `Some(false)`: "nobody said" is not "it was a guess".
+    ///
+    /// Available since 0.5.6; `None` is what an older `libdrmtap.so` produces
+    /// through this same call.
+    pub fn hotspot_from_driver(&self) -> Option<bool> {
+        let mut valid: std::os::raw::c_int = 0;
+        let rc = unsafe { ffi::drmtap_cursor_hotspot_valid(&self.raw, &mut valid) };
+        if rc == 0 {
+            Some(valid != 0)
+        } else {
+            None
+        }
     }
 
     /// Cursor image width

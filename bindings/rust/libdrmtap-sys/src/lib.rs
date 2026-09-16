@@ -178,6 +178,15 @@ extern "C" {
 
     // Cursor
     pub fn drmtap_get_cursor(ctx: *mut drmtap_ctx, cursor: *mut drmtap_cursor_info) -> c_int;
+    /// Whether the cursor's hotspot came from the driver's HOTSPOT_X/HOTSPOT_Y
+    /// plane properties rather than from their absence. `0` on success with
+    /// `valid` set, `-EINVAL` on a null argument, `-ENOTSUP` when the sample
+    /// carries no such answer (a cursor read through an older privileged
+    /// helper). Added in 0.5.6.
+    pub fn drmtap_cursor_hotspot_valid(
+        cursor: *const drmtap_cursor_info,
+        valid: *mut c_int,
+    ) -> c_int;
     pub fn drmtap_cursor_release(ctx: *mut drmtap_ctx, cursor: *mut drmtap_cursor_info);
 
     // Info
