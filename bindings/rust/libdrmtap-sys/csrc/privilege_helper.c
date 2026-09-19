@@ -357,20 +357,34 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     size_t meta_len = extended ? sizeof(w2) : sizeof(w2.base);
     if (recv_all(ctx->helper_fd, &w2, meta_len) < 0) {
         if (extended && !ctx->helper_cursor2_ok) {
-            /* Almost certainly a helper that does not know CMD_GET_CURSOR2. It
-             * closed the channel, so the retry needs a fresh one; latch first so
-             * this costs one respawn per context and not one per poll. Falling
-             * back keeps the capture working and gives up only the provenance,
-             * which drmtap_cursor_hotspot_valid() then reports as -ENOTSUP. */
-            ctx->helper_no_cursor2 = 1;
-            drmtap_debug_log(ctx,
-                "helper did not answer CMD_GET_CURSOR2; falling back to "
-                "CMD_GET_CURSOR (this helper predates hotspot provenance)");
+            /* Two very different things land here, and recv_all cannot tell them
+             * apart: a helper that does not know CMD_GET_CURSOR2 (it rejects the
+             * unknown type at its gate and closes without replying), and a helper
+             * that does know it but died before answering. So the channel is
+             * replaced and the EXTENDED command tried once more; only a second
+             * failure on a freshly spawned helper is taken as evidence of an old
+             * binary. Latching on the first failure would turn one transient
+             * death into a context-long silent loss of the provenance - the
+             * context outlives a session, so "silent" means days. */
             drmtap_helper_stop(ctx);
             if (drmtap_helper_spawn(ctx) < 0) {
                 drmtap_set_error(ctx, "helper cursor metadata recv failed");
                 return -EIO;
             }
+            if (!ctx->helper_cursor2_retried) {
+                ctx->helper_cursor2_retried = 1;
+                drmtap_debug_log(ctx,
+                    "no answer to CMD_GET_CURSOR2; retrying it on a fresh helper "
+                    "before concluding the binary is old");
+                return drmtap_helper_get_cursor(ctx, cursor);
+            }
+            /* Twice, on two helpers: it does not know the command. Fall back,
+             * which keeps the capture working and gives up only the provenance,
+             * reported by drmtap_cursor_hotspot_valid() as -ENOTSUP. */
+            ctx->helper_no_cursor2 = 1;
+            drmtap_debug_log(ctx,
+                "helper did not answer CMD_GET_CURSOR2 twice; falling back to "
+                "CMD_GET_CURSOR (this helper predates hotspot provenance)");
             return drmtap_helper_get_cursor(ctx, cursor);
         }
         drmtap_set_error(ctx, "helper cursor metadata recv failed");

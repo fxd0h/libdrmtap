@@ -130,6 +130,11 @@ struct drmtap_ctx {
      * provenance for the rest of the context's life. */
     int      helper_no_cursor2;
     int      helper_cursor2_ok;
+    /* Set once the extended command has already been retried on a FRESH helper,
+     * so the two reasons a first reply can fail stay distinguishable: a helper
+     * that does not know the command refuses it again, one that merely died does
+     * not. Without this a single transient death would latch. */
+    int      helper_cursor2_retried;
 
     /* Set once the CRTC mode and the scanout framebuffer have been found to
      * disagree on width, so the reason a frame is narrower than the fb (or is
