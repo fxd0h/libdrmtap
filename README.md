@@ -76,7 +76,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Zero-copy DMA-BUF output (V3) | ✅ Implemented |
 | Mapped RGBA output | ✅ Verified |
 | Continuous capture (polling loop) | ✅ Verified |
-| Cursor capture (position + pixels) | ✅ Verified on bare metal (amdgpu, i915) and on a para-virtualized driver (needs 0.5.4 there — see Known Limitations) |
+| Cursor capture (position + pixels) | ✅ Verified on bare metal (amdgpu, i915) and on a para-virtualized driver (needs 0.5.4 there — see Known Limitations). Hotspot provenance (`drmtap_cursor_hotspot_valid()`, 0.5.6) verified in all three of its states: absent on i915, present on virtio-gpu, unavailable through a pre-0.5.6 helper |
 | Privileged helper (setcap, no root) | ✅ Verified |
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
 | EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |

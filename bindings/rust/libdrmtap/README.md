@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **`DrmTap::open()`** — auto-detect GPU and display
 - **`grab()`** — zero-copy DMA-BUF fd (for hardware encoders)
 - **`grab_mapped()`** — mmap'd pixel data (for software access)
-- **`get_cursor()`** — cursor plane position (top-left of the image, in the CRTC's physical pixels) + ARGB image. The hotspot comes back `0` on bare-metal drivers; see `Cursor::hot_x` for how to recover it
+- **`get_cursor()`** — cursor plane position (top-left of the image, in the CRTC's physical pixels) + ARGB image. The hotspot comes back `0` on bare-metal drivers; see `Cursor::hot_x` for how to recover it, and **`Cursor::hotspot_from_driver()`** (since 0.5.6) to tell that `0` apart from a hotspot the driver really published at the corner — `Some(true)` it was read from the driver, `Some(false)` the properties are absent, `None` nothing recorded an answer for that sample
 - **`list_displays()`** — enumerate connected monitors
 - **`displays_changed()`** — hotplug detection
 
