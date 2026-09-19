@@ -321,17 +321,22 @@ static int send_error_errno(int sock, const char *reason) {
 
 /* Cursor metadata sent before the cursor pixels — must match
  * helper_cursor_wire_t in the library (drmtap_internal.h). */
-struct cursor_metadata {
-    int32_t  x, y;          /* cursor plane CRTC_X/CRTC_Y (top-left on screen) */
-    int32_t  hot_x, hot_y;  /* hotspot offset within the cursor image */
-    uint32_t width, height; /* cursor image size */
-    uint32_t visible;       /* 1 = a hardware cursor plane is active on the CRTC */
-    uint32_t data_size;     /* width*height*4 if visible, else 0 */
-};
+/* The cursor reply layouts (helper_cursor_wire_t and helper_cursor_wire2_t)
+ * come from ../src/wire.h, shared with the library. They used to be a second
+ * declaration here that a comment asked to be kept byte-identical by hand; one
+ * definition cannot drift. */
 
-// Read a single uint64 plane/object property by name (0 if absent).
-static uint64_t get_prop_val(int drm_fd, uint32_t obj_id, uint32_t obj_type,
-                             const char *name) {
+/* Read a single uint64 plane/object property by name. `found` (optional) is set
+ * to 1 only when the property exists, which is the one thing the return value
+ * cannot express: an absent property and a property whose value is 0 both read
+ * back as 0. The hotspot pair needs that distinction — see the cursor entry in
+ * the library's drmtap.h — so it asks for `found`; the plane-type lookup does
+ * not care and passes NULL. */
+static uint64_t get_prop_val_found(int drm_fd, uint32_t obj_id, uint32_t obj_type,
+                                   const char *name, int *found) {
+    if (found) {
+        *found = 0;
+    }
     uint64_t val = 0;
     drmModeObjectProperties *props =
         drmModeObjectGetProperties(drm_fd, obj_id, obj_type);
@@ -341,6 +346,9 @@ static uint64_t get_prop_val(int drm_fd, uint32_t obj_id, uint32_t obj_type,
         if (prop) {
             if (strcmp(prop->name, name) == 0) {
                 val = props->prop_values[i];
+                if (found) {
+                    *found = 1;
+                }
                 drmModeFreeProperty(prop);
                 break;
             }
@@ -351,6 +359,12 @@ static uint64_t get_prop_val(int drm_fd, uint32_t obj_id, uint32_t obj_type,
     return val;
 }
 
+/* The value-only form, for the callers that cannot act on a missing property. */
+static uint64_t get_prop_val(int drm_fd, uint32_t obj_id, uint32_t obj_type,
+                             const char *name) {
+    return get_prop_val_found(drm_fd, obj_id, obj_type, name, NULL);
+}
+
 /* ========================================================================= */
 /* Cursor capture (privileged) — reads the hardware cursor plane             */
 /* ========================================================================= */
@@ -358,12 +372,22 @@ static uint64_t get_prop_val(int drm_fd, uint32_t obj_id, uint32_t obj_type,
 // Capture the hardware cursor plane bound to target_crtc and send its image.
 // If no cursor plane is active on that CRTC (cursor idle / on another monitor),
 // sends metadata with visible=0 and no pixels.
-static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
-    struct cursor_metadata meta = {0};
+/* Send the cursor reply in the shape the command asked for. `base` is the first
+ * member, so the legacy reply is a prefix of the extended one and one builder
+ * serves both: a CMD_GET_CURSOR client gets byte-for-byte what it always got. */
+static int send_cursor_meta(int sock, const helper_cursor_wire2_t *meta,
+                            int extended) {
+    return send_all(sock, meta,
+                    extended ? sizeof(*meta) : sizeof(meta->base));
+}
+
+static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc,
+                           int extended) {
+    helper_cursor_wire2_t meta = {0};
 
     drmModePlaneRes *planes = drmModeGetPlaneResources(drm_fd);
     if (!planes) {
-        send_all(sock, &meta, sizeof(meta));
+        send_cursor_meta(sock, &meta, extended);
         return 0;
     }
 
@@ -386,23 +410,29 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
     drmModeFreePlaneResources(planes);
 
     if (cursor_fb == 0) {
-        send_all(sock, &meta, sizeof(meta));  /* visible=0 */
+        send_cursor_meta(sock, &meta, extended);  /* visible=0 */
         return 0;
     }
 
-    meta.x = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "CRTC_X");
-    meta.y = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "CRTC_Y");
-    meta.hot_x = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "HOTSPOT_X");
-    meta.hot_y = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "HOTSPOT_Y");
+    meta.base.x = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "CRTC_X");
+    meta.base.y = (int32_t)get_prop_val(drm_fd, cursor_plane, DRM_MODE_OBJECT_PLANE, "CRTC_Y");
+    int have_hot_x = 0, have_hot_y = 0;
+    meta.base.hot_x = (int32_t)get_prop_val_found(drm_fd, cursor_plane,
+                     DRM_MODE_OBJECT_PLANE, "HOTSPOT_X", &have_hot_x);
+    meta.base.hot_y = (int32_t)get_prop_val_found(drm_fd, cursor_plane,
+                     DRM_MODE_OBJECT_PLANE, "HOTSPOT_Y", &have_hot_y);
+    /* Measured only when the pair is complete; an unprivileged client cannot
+     * recover this from the coordinates, which is why it is sent. */
+    meta.hot_from_property = (uint32_t)wire_hot_measured(have_hot_x, have_hot_y);
 
     drmModeFB2 *fb2 = drmModeGetFB2(drm_fd, cursor_fb);
     if (!fb2 || fb2->handles[0] == 0) {
         if (fb2) drmModeFreeFB2(fb2);
-        send_all(sock, &meta, sizeof(meta));  /* visible=0 */
+        send_cursor_meta(sock, &meta, extended);  /* visible=0 */
         return 0;
     }
-    meta.width = fb2->width;
-    meta.height = fb2->height;
+    meta.base.width = fb2->width;
+    meta.base.height = fb2->height;
     uint32_t cw = fb2->width, ch = fb2->height, cstride = fb2->pitches[0];
     uint32_t chandle = fb2->handles[0];
     drmModeFreeFB2(fb2);
@@ -414,7 +444,7 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
      * that product cannot overflow. */
     if (!(cw <= 256 && ch <= 256 && cstride != 0 && cstride >= cw * 4)) {
         helper_gem_close(drm_fd, chandle);
-        send_all(sock, &meta, sizeof(meta));  /* visible=0 */
+        send_cursor_meta(sock, &meta, extended);  /* visible=0 */
         return 0;
     }
 
@@ -431,7 +461,7 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
             close(prime_fd);
         }
         helper_gem_close(drm_fd, chandle);
-        send_all(sock, &meta, sizeof(meta));  /* visible=0 (couldn't read) */
+        send_cursor_meta(sock, &meta, extended);  /* visible=0 (couldn't read) */
         return 0;
     }
 
@@ -479,9 +509,9 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc) {
     close(prime_fd);
     helper_gem_close(drm_fd, chandle);
 
-    meta.visible = 1;
-    meta.data_size = (uint32_t)tight;
-    send_all(sock, &meta, sizeof(meta));
+    meta.base.visible = 1;
+    meta.base.data_size = (uint32_t)tight;
+    send_cursor_meta(sock, &meta, extended);
     send_all(sock, packed, tight);
     return 0;
 }
@@ -1072,7 +1102,11 @@ int main(int argc, char *argv[]) {
                 break;
 
             case CMD_GET_CURSOR:
-                cursor_and_send(sock, drm_fd, hcmd.crtc_id);
+                cursor_and_send(sock, drm_fd, hcmd.crtc_id, 0);
+                break;
+
+            case CMD_GET_CURSOR2:
+                cursor_and_send(sock, drm_fd, hcmd.crtc_id, 1);
                 break;
 
             case CMD_QUIT:

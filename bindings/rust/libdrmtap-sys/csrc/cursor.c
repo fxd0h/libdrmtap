@@ -36,6 +36,9 @@
 #include <linux/dma-buf.h>  /* struct dma_buf_sync, DMA_BUF_IOCTL_SYNC */
 
 #include "drmtap_internal.h"
+/* wire_hot_measured(): the hotspot-completeness rule, shared with the helper so
+ * the direct read and the helper read cannot disagree. */
+#include "wire.h"
 
 /* ========================================================================= */
 /* Property helpers                                                          */
@@ -162,6 +165,9 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
          * helper's cursor_and_send does, not as an error. Returning -ENOENT
          * would make the consumer keep displaying a stale cursor. */
         cursor->visible = 0;
+        /* No plane, so no properties to have read: the zero hotspot is an
+         * absence, and saying so is more useful to a consumer than -ENOTSUP. */
+        drmtap_cursor_set_hot_provenance(cursor, 0);
         return 0;
     }
 
@@ -175,6 +181,7 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
         /* Cursor is hidden */
         cursor->visible = 0;
         cursor->pixels = NULL;
+        drmtap_cursor_set_hot_provenance(cursor, 0);
         drmModeFreePlane(plane);
         return 0;
     }
@@ -190,14 +197,27 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     cursor->x = (int32_t)crtc_x;
     cursor->y = (int32_t)crtc_y;
 
-    /* Read hotspot if available (VM drivers like virtio export this) */
+    /* Read hotspot if available (VM drivers like virtio export this).
+     *
+     * Both return values are KEPT here. They used to be discarded, which threw
+     * away the only fact that separates "this driver publishes no hotspot" from
+     * "this driver publishes a hotspot and it is (0, 0)": the coordinates read
+     * the same in both cases. A consumer that corrects a rotated cursor has to
+     * know which one it is holding, so the answer is recorded on the sample and
+     * read back with drmtap_cursor_hotspot_valid(). Measured means BOTH were
+     * found: a plane exposing one of the pair would otherwise contribute a real
+     * coordinate and an invented zero. */
     uint64_t hot_x = 0, hot_y = 0;
-    get_property_value(ctx->drm_fd, cursor_plane_id,
-                       DRM_MODE_OBJECT_PLANE, "HOTSPOT_X", &hot_x);
-    get_property_value(ctx->drm_fd, cursor_plane_id,
-                       DRM_MODE_OBJECT_PLANE, "HOTSPOT_Y", &hot_y);
+    int have_hot_x = get_property_value(ctx->drm_fd, cursor_plane_id,
+                       DRM_MODE_OBJECT_PLANE, "HOTSPOT_X", &hot_x) == 0;
+    int have_hot_y = get_property_value(ctx->drm_fd, cursor_plane_id,
+                       DRM_MODE_OBJECT_PLANE, "HOTSPOT_Y", &hot_y) == 0;
     cursor->hot_x = (int32_t)hot_x;
     cursor->hot_y = (int32_t)hot_y;
+    /* Set before any later exit, so every path out of this function that got
+     * this far carries the answer — including the transient-miss returns. */
+    drmtap_cursor_set_hot_provenance(cursor,
+                                     wire_hot_measured(have_hot_x, have_hot_y));
 
     /* Get cursor framebuffer info */
     drmModeFB2 *fb2 = drmModeGetFB2(ctx->drm_fd, plane->fb_id);
@@ -338,4 +358,26 @@ void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     }
     free(cursor->pixels);
     cursor->pixels = NULL;
+    /* The provenance describes the sample that just went away. Leaving it set
+     * would let a released struct keep answering about pixels it no longer has,
+     * and a reused one answer about the previous sample if the next fill fails
+     * before recording its own. */
+    cursor->_priv = NULL;
+}
+
+int drmtap_cursor_hotspot_valid(const drmtap_cursor_info *cursor, int *valid) {
+    if (!cursor || !valid) {
+        return -EINVAL;
+    }
+    uintptr_t flags = (uintptr_t)cursor->_priv;
+    if (!(flags & CURSOR_PRIV_HOT_ANSWERED)) {
+        /* Nothing recorded the provenance for this sample: a struct that was
+         * never filled, one already released, or one filled through a path that
+         * predates this entry point (an older privileged helper, whose reply
+         * carried no such field). Refusing is the only honest answer — reporting
+         * 0 would claim the hotspot was a guess, which is a claim nobody made. */
+        return -ENOTSUP;
+    }
+    *valid = (flags & CURSOR_PRIV_HOT_MEASURED) ? 1 : 0;
+    return 0;
 }

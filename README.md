@@ -76,7 +76,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Zero-copy DMA-BUF output (V3) | ✅ Implemented |
 | Mapped RGBA output | ✅ Verified |
 | Continuous capture (polling loop) | ✅ Verified |
-| Cursor capture (position + pixels) | ✅ Verified on bare metal (amdgpu, i915) and on a para-virtualized driver (needs 0.5.4 there — see Known Limitations) |
+| Cursor capture (position + pixels) | ✅ Verified on bare metal (amdgpu, i915) and on a para-virtualized driver (needs 0.5.4 there — see Known Limitations). Hotspot provenance (`drmtap_cursor_hotspot_valid()`, 0.5.6) verified in all three of its states: absent on i915, present on virtio-gpu, unavailable through a pre-0.5.6 helper |
 | Privileged helper (setcap, no root) | ✅ Verified |
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
 | EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |
@@ -396,7 +396,7 @@ libdrmtap uses a **dual-path** approach for GPU-tiled framebuffers:
 
 ## Known Limitations
 
-- **Cursor hotspot on bare-metal drivers.** The cursor **hotspot** (the click point inside the image, e.g. an arrow's tip or an I-beam's centre) is only exposed by the DRM cursor plane on para-virtualized drivers (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`), via the `HOTSPOT_X`/`HOTSPOT_Y` plane properties. On bare-metal drivers (i915, amdgpu, nvidia) those properties do not exist at all — measured on amdgpu and on i915 with a found/not-found flag and `CRTC_X` as the positive control — so `drmtap_cursor_info.hot_x`/`hot_y` come back `0` there.
+- **Cursor hotspot on bare-metal drivers.** The cursor **hotspot** (the click point inside the image, e.g. an arrow's tip or an I-beam's centre) is only exposed by the DRM cursor plane on para-virtualized drivers (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`), via the `HOTSPOT_X`/`HOTSPOT_Y` plane properties. On bare-metal drivers (i915, amdgpu, nvidia) those properties do not exist at all — measured on amdgpu and on i915 with a found/not-found flag and `CRTC_X` as the positive control — so `drmtap_cursor_info.hot_x`/`hot_y` come back `0` there. Since 0.5.6 a consumer can tell that `0` apart from a hotspot the driver really published at the corner: `drmtap_cursor_hotspot_valid()` answers from the sample in hand (`Cursor::hotspot_from_driver()` in Rust). Testing `hot_x != 0 || hot_y != 0` instead is wrong in both directions - it overrides a real `(0, 0)` with a guess, and it would trust a hotspot no driver published.
 
   The cursor *image* and *position* are unaffected: `drmtap_cursor_info.x`/`y` is the cursor plane's `CRTC_X`/`CRTC_Y`, and it tracks the pointer live on bare metal whichever ioctl the compositor drives it with. Measured on amdgpu under KWin, and on i915 under Mutter, where moving the pointer by 100 logical px moved `CRTC_X` by 266 physical px on that scaled output, monotonically over three samples. (While the pointer is idle a compositor may leave the plane unbound — `CRTC_ID` and `FB_ID` read 0 and the coordinates go stale — which libdrmtap reports as a hidden cursor, not as a position.)
 

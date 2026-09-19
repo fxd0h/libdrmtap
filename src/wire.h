@@ -36,11 +36,26 @@
  * is no cross-machine transport to byte-swap for. Defined here, once, so the
  * helper, the library client and the tests cannot drift apart. */
 #define HELPER_PROTO_MAGIC   0x544D5244u  /* "DRMT" as a little-endian u32 */
+/* STAYS 1. Adding the hotspot provenance to the cursor reply was first done by
+ * bumping this, which is wrong in a way that only showed up when it was run: the
+ * version travels in every command, so an older helper then refuses CMD_GRAB
+ * too, and a host with a stale drmtap-helper anywhere in the search path loses
+ * ALL unprivileged capture in exchange for one bit of cursor metadata. Measured,
+ * not imagined - this box had a July helper in /usr/local/bin and the capture
+ * test went red. The compatible way to extend a protocol with no reply header is
+ * a NEW COMMAND whose reply has the new shape (CMD_GET_CURSOR2): an old helper
+ * rejects the unknown type at wire_cmd_valid and the client falls back to
+ * CMD_GET_CURSOR, keeping capture and losing only the provenance. Bump this only
+ * for a change that really cannot be expressed as a new command. */
 #define HELPER_PROTO_VERSION 1u
 
 /* Command types (the `type` field of a command frame). */
 #define CMD_GRAB       0x01u
 #define CMD_GET_CURSOR 0x02u
+/* Same capture as CMD_GET_CURSOR, answered with helper_cursor_wire2_t (which
+ * adds the hotspot provenance). A helper that does not know this type closes the
+ * connection without replying, which is the client's signal to fall back. */
+#define CMD_GET_CURSOR2 0x03u
 #define CMD_QUIT       0xFFu
 
 typedef struct {
@@ -72,7 +87,8 @@ static inline int wire_cmd_valid(const helper_cmd_grab_t *c) {
     return c->magic == HELPER_PROTO_MAGIC &&
            c->version == HELPER_PROTO_VERSION &&
            c->length == (uint32_t)sizeof(helper_cmd_grab_t) &&
-           (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR || c->type == CMD_QUIT);
+           (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR ||
+            c->type == CMD_GET_CURSOR2 || c->type == CMD_QUIT);
 }
 
 /* Send exactly len bytes, handling partial writes and EINTR. 0 ok, -1 error. */
@@ -226,5 +242,52 @@ static inline int wire_recv_fd(int sock, void *meta_buf, size_t meta_len, int *o
     }
     return 0;
 }
+
+/* ---- Cursor reply (helper -> library) -----------------------------------
+ * Fixed-size metadata, followed by `data_size` bytes of ARGB8888 pixels when
+ * `visible` and `data_size` are non-zero. Defined HERE, once, and used by both
+ * ends: it used to be declared twice (drmtap_internal.h and the helper's own
+ * `struct cursor_metadata`) with a comment asking the two to be kept identical,
+ * which is a drift waiting to happen the moment a field is added — and adding
+ * one is exactly what `hot_from_property` did. There is no header on this reply,
+ * so its layout is pinned by HELPER_PROTO_VERSION alone. */
+typedef struct {
+    int32_t  x, y;          /* cursor plane CRTC_X/CRTC_Y (top-left on screen) */
+    int32_t  hot_x, hot_y;  /* hotspot offset within the cursor image */
+    uint32_t width, height; /* cursor image size */
+    uint32_t visible;       /* 1 = a hardware cursor plane is active on the CRTC */
+    uint32_t data_size;     /* width*height*4 if visible, else 0 */
+} helper_cursor_wire_t;
+
+/* The CMD_GET_CURSOR2 reply: the frozen layout above, plus the one thing an
+ * unprivileged client cannot work out for itself. Embedding rather than copying
+ * keeps the common part impossible to drift. */
+typedef struct {
+    helper_cursor_wire_t base;
+    /* 1 = `base.hot_x`/`hot_y` were read from the plane's HOTSPOT_X *and*
+     * HOTSPOT_Y properties; 0 = at least one was absent, so those zeros are a
+     * lack of information and not a hotspot at the image's top-left corner. */
+    uint32_t hot_from_property;
+} helper_cursor_wire2_t;
+
+/* The one rule that decides `hot_from_property`, shared by both ends so the
+ * direct read and the helper's read cannot answer differently for the same
+ * plane. A pair is a hotspot only when it is COMPLETE: a plane exposing just one
+ * of HOTSPOT_X/HOTSPOT_Y would otherwise contribute one real coordinate and one
+ * invented zero, which is worse than declaring the hotspot unknown, because the
+ * error is silent and only on one axis. No driver known to us does this; the
+ * rule is written down because the alternative reading (either property is
+ * enough) is the one a reader would otherwise assume. */
+static inline int wire_hot_measured(int have_hot_x, int have_hot_y) {
+    return (have_hot_x && have_hot_y) ? 1 : 0;
+}
+
+/* All 4-byte fields, so there is no padding to disagree about between the two
+ * builds; pinned so a field added without a version bump fails the build here
+ * instead of desynchronizing a live stream. */
+_Static_assert(sizeof(helper_cursor_wire_t) == 32,
+               "the CMD_GET_CURSOR reply layout is frozen: extend via a new command");
+_Static_assert(sizeof(helper_cursor_wire2_t) == 36,
+               "the CMD_GET_CURSOR2 reply layout changed: add another command");
 
 #endif /* DRMTAP_WIRE_H */

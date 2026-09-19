@@ -121,6 +121,20 @@ struct drmtap_ctx {
      * reported as pages of "CACHE MISS ... cold start" with the real reason only
      * in drmtap_error(), it read as a broken cache (issue #36). */
     int      fast_no_privilege;
+    /* Latched when the spawned helper does not know CMD_GET_CURSOR2, so the
+     * cursor path stops paying a refused command plus a respawn on every poll.
+     * A property of that helper BINARY, so it survives a respawn of it.
+     * `helper_cursor2_ok` records that the command HAS worked on this context,
+     * which is what keeps a later transient failure (a crashed helper, a killed
+     * one) from being mistaken for an old binary and silently giving up the
+     * provenance for the rest of the context's life. */
+    int      helper_no_cursor2;
+    int      helper_cursor2_ok;
+    /* Set once the extended command has already been retried on a FRESH helper,
+     * so the two reasons a first reply can fail stay distinguishable: a helper
+     * that does not know the command refuses it again, one that merely died does
+     * not. Without this a single transient death would latch. */
+    int      helper_cursor2_retried;
 
     /* Set once the CRTC mode and the scanout framebuffer have been found to
      * disagree on width, so the reason a frame is narrower than the fb (or is
@@ -242,15 +256,31 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx);
 int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
                         void *pixel_buf, size_t buf_size);
 
-/* Cursor metadata received from the helper — must match struct cursor_metadata
- * in drmtap-helper.c. */
-typedef struct {
-    int32_t  x, y;
-    int32_t  hot_x, hot_y;
-    uint32_t width, height;
-    uint32_t visible;
-    uint32_t data_size;
-} helper_cursor_wire_t;
+/* The cursor reply struct (helper_cursor_wire_t) lives in wire.h, defined once
+ * for both ends of the protocol. It used to be duplicated here with a comment
+ * asking that it be kept identical to the helper's own copy by hand. */
+
+/* Flags packed into drmtap_cursor_info::_priv. A cursor owns no private
+ * allocation (unlike a frame, whose _priv is a frame_priv_t*), so the slot is a
+ * small bitfield rather than a pointer, and nothing has to free it.
+ *
+ * ANSWERED exists so "nobody recorded the provenance" stays distinguishable from
+ * "recorded, and it was not measured": a cursor struct filled by a build that
+ * did not carry the bit reads 0 for both, and drmtap_cursor_hotspot_valid()
+ * answers -ENOTSUP for it rather than asserting the hotspot was guessed. */
+#define CURSOR_PRIV_HOT_ANSWERED 0x1u
+#define CURSOR_PRIV_HOT_MEASURED 0x2u
+
+/* Record the hotspot provenance on a cursor being filled. `measured` is 1 only
+ * when BOTH hotspot properties were read. */
+static inline void drmtap_cursor_set_hot_provenance(drmtap_cursor_info *cursor,
+                                                    int measured) {
+    uintptr_t flags = CURSOR_PRIV_HOT_ANSWERED;
+    if (measured) {
+        flags |= CURSOR_PRIV_HOT_MEASURED;
+    }
+    cursor->_priv = (void *)flags;
+}
 
 /* Capture the cursor via the privileged helper (used when the library process
  * lacks CAP_SYS_ADMIN). Populates `cursor` (allocates cursor->pixels). */

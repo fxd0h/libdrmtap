@@ -28,6 +28,7 @@
         drmtap_convert_dmabuf;
         drmtap_frame_release;
         drmtap_get_cursor;
+        drmtap_cursor_hotspot_valid;
         drmtap_cursor_release;
         drmtap_error;
         drmtap_gpu_driver;

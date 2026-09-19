@@ -6,6 +6,93 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.6] - 2026-09-19
+
+### Added: whether a cursor hotspot came from the driver, or is just zero
+
+`drmtap_cursor_info.hot_x`/`hot_y` read `(0, 0)` in two situations that mean opposite
+things: the plane exposes no `HOTSPOT_X`/`HOTSPOT_Y` (every bare-metal driver), or it
+exposes them and the driver's answer is the image's top-left corner. `cursor.c` knew
+which one it was - `get_property_value()` returns found/not-found - and threw the
+answer away, so a consumer had only the coordinates to go on, and `hot_x != 0 ||
+hot_y != 0` is the test it then reaches for. That test is wrong in both directions: it
+overrides a real `(0, 0)` measurement with a guess from the bitmap, and on any driver
+without the properties it would trust a hotspot nobody published.
+
+New entry point, so the public struct does not grow and an already-built consumer is
+unaffected:
+
+    int drmtap_cursor_hotspot_valid(const drmtap_cursor_info *cursor, int *valid);
+
+`0` with `*valid` set, `-EINVAL` on a null argument, and `-ENOTSUP` when the sample
+carries no such answer - which is what a cursor read through a `drmtap-helper` older
+than this release produces. `-ENOTSUP` is deliberately not foldable into `*valid`:
+"nobody said" is not "it was a guess". Both Rust layers carry it too, as
+`Cursor::hotspot_from_driver() -> Option<bool>`.
+
+Measured, in all three states: i915 direct capture answers `Some(false)` (no such
+properties - confirmed against `modetest`), virtio-gpu answers valid with a hotspot of
+`(6, 0)`, which is the interesting one because `HOTSPOT_Y` is a **zero that was really
+published** and is reported present, and a July helper binary still installed on the
+development box answers `None`.
+
+A hotspot counts as measured only when BOTH properties were read (`wire_hot_measured()`,
+shared by the library and the helper so the two cannot disagree): a plane exposing one
+of the pair would otherwise contribute one real coordinate beside an invented zero -
+wrong on a single axis, and silent about it.
+
+### Fixed: the helper collapsed the same two cases
+
+`get_prop_val()` in `drmtap-helper.c` returned `0` for an absent property just as it
+does for a property whose value is `0`, so an unprivileged consumer reading the cursor
+through the helper had the identical ambiguity. It now reports found separately, and the
+answer travels in the reply.
+
+### The protocol did NOT get a version bump, and that was a real decision
+
+The first attempt added the field to the cursor reply and bumped
+`HELPER_PROTO_VERSION`. That reply carries no header, so a library expecting the longer
+struct from a helper that sends the shorter one would read the first pixels as metadata;
+the version gate does prevent that, but it gates EVERY command, so an older helper then
+also refuses `CMD_GRAB` and a host with a stale `drmtap-helper` in any of the six search
+paths loses all of its unprivileged capture in exchange for one bit of cursor metadata.
+That is not hypothetical: this box had a July helper in `/usr/local/bin` and the capture
+integration test went red.
+
+So the extension is a new command instead, `CMD_GET_CURSOR2`, whose reply embeds the
+frozen one (`helper_cursor_wire2_t` contains `helper_cursor_wire_t` at offset 0, pinned
+by a test). A helper that does not know the type rejects it at the existing gate and
+closes the channel; the client replaces it, retries the extended command once (see below),
+and only then falls back to `CMD_GET_CURSOR`, keeping capture and losing only the
+provenance.
+
+Both cursor reply layouts now live in `wire.h` and are used by both ends. They used to
+be declared twice - `drmtap_internal.h` and the helper's own `struct cursor_metadata` -
+with a comment asking that the two be kept identical by hand, which is a drift waiting
+for the first added field.
+
+### Fixed before merging: one failed reply is not evidence that a helper is old
+
+`recv_all()` cannot separate an unknown command type from a helper that died, so latching
+on the FIRST failed extended reply treated a compatible helper that crashed before
+answering exactly like a pre-0.5.6 binary. The latch survives a respawn and a context
+outlives a session, so one transient death would have cost the hotspot provenance for
+days. The first version of this release guarded only the case where the command had
+ALREADY succeeded once, which does nothing for a crash during the initial probe. The
+channel is now replaced and `CMD_GET_CURSOR2` retried once; only a second failure on a
+freshly spawned helper latches. Cost in the genuinely-old case is one extra respawn, once
+per context.
+
+Raised independently by a review bot and by rustdesk's maintainer, who proposed exactly
+this shape. Staged rather than reasoned about, since the difference is invisible to the
+unit tests: a wrapper helper that consumes the command frame and then exits, once, before
+exec'ing a real `CMD_GET_CURSOR2`-capable helper - dying BEFORE the frame lands is caught
+by the pre-existing send-failure respawn instead, which is not the case under test. With
+the retry: two spawns, the retry line in the log, an extended reply, and
+`drmtap_cursor_hotspot_valid()` answering 0. With the retry mutated away: latched on the
+first failure, a legacy reply, `-ENOTSUP`. Same helper, same cursor, only the guard
+changed.
+
 ## [0.5.5] - 2026-09-07
 
 ### Added: build without the privileged helper at all
@@ -729,6 +816,7 @@ entry point is additive and would not on its own have justified more than a patc
   fixes.
 
 [0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
+[0.5.6]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.6
 [0.5.5]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.5
 [0.5.4]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.4
 [0.5.3]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.3

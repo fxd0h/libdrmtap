@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 5
+#define DRMTAP_VERSION_PATCH 6
 
 /**
  * @brief Get the library version as a packed integer.
@@ -486,9 +486,11 @@ typedef struct {
      * Hotspot within the cursor image, and `0` unless the driver exposes it:
      * `HOTSPOT_X`/`HOTSPOT_Y` are plane properties only para-virtualized drivers
      * (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`) create, so on bare metal
-     * (i915, amdgpu, nvidia) these are always `0` — indistinguishable from a real
-     * top-left hotspot. See the cursor entry in the README's Known Limitations for
-     * the two ways to recover it, one of which is exact.
+     * (i915, amdgpu, nvidia) these are always `0`. Whether a `(0, 0)` here is a
+     * real hotspot or the absence of the properties is NOT visible in these two
+     * fields — ask `drmtap_cursor_hotspot_valid()`, which is the only way to tell
+     * them apart. See the cursor entry in the README's Known Limitations for the
+     * two ways to recover an absent hotspot, one of which is exact.
      */
     int32_t hot_x, hot_y;
     uint32_t width, height; /**< Cursor image dimensions */
@@ -515,6 +517,31 @@ typedef struct {
  * @return 0 on success (hidden included), negative errno on error
  */
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
+
+/**
+ * @brief Whether this cursor's hotspot was read from the driver, or is just zero.
+ *
+ * `hot_x`/`hot_y` cannot answer this on their own: a plane that does not expose
+ * `HOTSPOT_X`/`HOTSPOT_Y` leaves them at `(0, 0)`, which is also a perfectly
+ * legal hotspot for a driver that does expose them. A consumer that guesses the
+ * hotspot from the cursor bitmap when it reads `(0, 0)` therefore overrides a
+ * real measurement on any driver that reports a top-left hotspot; one that
+ * trusts `(0, 0)` instead puts the pointer at the image corner everywhere else.
+ * This tells the two apart, for the cursor sample in hand rather than by
+ * re-reading the properties (which could race with a shape change).
+ *
+ * BOTH properties must have been read for the hotspot to count as measured: a
+ * plane exposing only one of them is not a source of a hotspot, and a half-read
+ * pair would be a coordinate mixed with a zero.
+ *
+ * @param cursor A cursor filled by `drmtap_get_cursor()` and not yet released.
+ * @param valid  Set to 1 if the hotspot came from the properties, else 0.
+ * @return 0 on success; `-EINVAL` if either pointer is NULL; `-ENOTSUP` if this
+ *         sample carries no provenance at all, which is what a cursor filled by
+ *         a build older than this entry point looks like. `-ENOTSUP` means "no
+ *         answer", never "not measured" — do not fold it into `*valid`.
+ */
+int drmtap_cursor_hotspot_valid(const drmtap_cursor_info *cursor, int *valid);
 
 /**
  * @brief Release cursor resources.
