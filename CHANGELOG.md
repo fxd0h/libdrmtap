@@ -8,9 +8,10 @@ could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
 ## [0.5.7] - 2026-09-20
 
-Mostly the Rust wrapper. No C CODE changed, so the library, the ABI and the helper
-wire behave exactly as 0.5.6 does; one public header comment is corrected, and it was
-wrong in a way worth reading if you have ever hardened an install. The version moves
+Mostly the Rust wrapper. No C code changed: the ABI and the helper wire protocol are
+the same as 0.5.6, and the only behavioural difference in the library is the version
+macros, so `drmtap_version()` now packs 0.5.7. One public header comment is corrected,
+and it was wrong in a way worth reading if you have ever hardened an install. The version moves
 because the four artifacts share one line. The two wrapper reports behind it come from
 `anonymix007`, who is the first person outside the project to build on the split path.
 
