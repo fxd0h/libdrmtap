@@ -66,13 +66,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - **`DrmTap::open()`** — auto-detect GPU and display
 - **`grab()`** — zero-copy DMA-BUF fd (for hardware encoders)
+- **`grab_desc()`** (since 0.5.7) — the same zero-copy grab plus a `DmabufDesc`: the plane layout
+  (`num_planes`/`offsets`/`pitches`) and HDR state that a `Frame` does not carry. Without them a
+  compressed (Intel CCS) or HDR scanout cannot be imported at all, because you hold the fd and no
+  way to know where the planes sit inside it. The descriptor deliberately carries **no file
+  descriptor**: it is metadata only, so it is safe to serialize, and the fd travels out of band over
+  `SCM_RIGHTS` as the C header prescribes
+- **`Frame::dma_buf_borrowed_fd()`** (since 0.5.7) — the fd as a `BorrowedFd` tied to the frame,
+  `None` on the mapped paths where there is none. **`Frame::try_clone_fd()`** returns an `OwnedFd`
+  for the case where it must outlive the frame; it dups, because the frame closes its own on drop.
+  The older `dma_buf_fd() -> i32` is deprecated: it can express neither
 - **`grab_mapped()`** — mmap'd pixel data (for software access)
 - **`get_cursor()`** — cursor plane position (top-left of the image, in the CRTC's physical pixels) + ARGB image. On bare-metal drivers the hotspot reads `0`, and the `Cursor::hot_x` documentation gives the two ways to recover one. **`Cursor::hotspot_from_driver()`** (since 0.5.6) says whether that `0` is the driver's own answer: `Some(true)` means both `HOTSPOT_X` and `HOTSPOT_Y` were read, so `hot_x`/`hot_y` are the driver's coordinates even at `(0, 0)`; `Some(false)` means **at least one** was absent, so they carry no information and a hotspot has to be estimated; `None` means nothing recorded an answer for that sample, which is not the same as `Some(false)`
 - **`list_displays()`** — enumerate connected monitors
 - **`displays_changed()`** — hotplug detection
+- **`Error::io_error()`** (since 0.5.7) — the error as an `io::Error` when it really is an errno.
+  Not every negative return is one: `drmtap_drm_fd()` uses a bare `-1` as a sentinel, so that value
+  answers `None` rather than being rendered as `EPERM`, an error nothing reported. The `code` field
+  is unchanged
+
+## Optional features
+
+- **`drm-fourcc`** — adds `Frame::drm_format()` and `DmabufDesc::drm_format()`, returning
+  `drm_fourcc::DrmFormat`. Off by default on purpose: a third-party type in a public signature ties
+  this crate's semver to that crate's, permanently, and this wrapper sits under a capture library
+  other people pin. `format()` stays a `u32` for everyone, and `Frame`'s `Debug` already prints the
+  readable fourcc (`XR24`) with no dependency at all
 
 ## Requirements
 
+- Rust 1.66 or newer (`std::os::fd`, which the frame's descriptor accessors are built on). Declared
+  as `rust-version`, so an older toolchain says so instead of failing on a type
 - Linux with DRM/KMS (kernel 4.20+ for the tiled/modifier path; linear/VM
   framebuffers work on older kernels)
 - A C compiler and the development packages `libdrmtap-sys` builds against. On

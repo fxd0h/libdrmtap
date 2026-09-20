@@ -12,6 +12,7 @@
  * Requires: libdrmtap installed (meson install -C build)
  */
 
+use std::os::fd::AsRawFd;
 use libdrmtap::{Config, DrmTap};
 use std::env;
 use std::fs::File;
@@ -67,7 +68,16 @@ fn main() {
         frame.format(),
         frame.modifier()
     );
-    println!("  DMA-BUF fd: {}", frame.dma_buf_fd());
+    // The mapped path has no transferable dma-buf, so this is None here; on a grab()/grab_desc()
+    // frame it is the fd, borrowed for exactly as long as the frame is alive.
+    println!(
+        "  DMA-BUF: {}",
+        match frame.dma_buf_borrowed_fd() {
+            Some(fd) => format!("fd {}", fd.as_raw_fd()),
+            None => "none (mapped capture path)".to_string(),
+        }
+    );
+    println!("  Debug:  {frame:?}");
 
     // Check pixel data
     let data = frame.data().expect("No pixel data (mmap failed?)");

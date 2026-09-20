@@ -35,6 +35,9 @@
 //! ```
 
 use std::ffi::{CStr, CString};
+use std::fmt;
+use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::raw::c_int;
 use std::ptr;
 
@@ -54,6 +57,80 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// The error as an [`io::Error`], when it really is an errno.
+    ///
+    /// Most of the C API returns a negative errno (`-EINVAL`, `-ENOTSUP`, `-EIO`, `-ENODEV`,
+    /// `-ENOMEM`, `-EFBIG`, `-EACCES`, `-ENOSPC`, `-EPROTO`), and those convert exactly. But not
+    /// every negative return is one: `drmtap_drm_fd()` returns a bare `-1` as a SENTINEL, and so
+    /// does this wrapper when `drmtap_open` hands back a null context. Converting that blindly
+    /// would render it as `EPERM`, "Operation not permitted", an error nothing ever reported. So
+    /// `-1` answers `None` rather than inventing one, which is safe here because no public entry
+    /// point returns `-EPERM`.
+    ///
+    /// [`Error::code`] stays as it is: it is a public field, so changing its type is a breaking
+    /// release. This accessor is the additive half.
+    pub fn io_error(&self) -> Option<io::Error> {
+        if self.code < -1 {
+            Some(io::Error::from_raw_os_error(-self.code))
+        } else {
+            None
+        }
+    }
+}
+
+/// A DRM fourcc rendered the way it is written down, e.g. `XR24`.
+///
+/// Falls back to the hex value for a code that is not four printable ASCII bytes, so this never
+/// produces something that looks like a format but is not one.
+fn fourcc_str(code: u32) -> String {
+    let bytes = code.to_le_bytes();
+    if bytes
+        .iter()
+        .all(|b| b.is_ascii_graphic() || *b == b' ')
+    {
+        bytes.iter().map(|b| *b as char).collect()
+    } else {
+        format!("{code:#010x}")
+    }
+}
+
+/// Everything the unprivileged side needs to import a captured scanout, MINUS the file descriptor.
+///
+/// The fd is deliberately absent. In C this struct carries one, but the header is explicit that it
+/// "is an integer valid only in THIS (exporter) process — it aliases @p frame's fd", and the frame
+/// owns it: handing that number out inside a plain struct would let it outlive the frame, and the
+/// failure is worse than a dangling number, because the kernel can hand the same integer to an
+/// unrelated `open()` and a later convert would read some other file. Take the fd from the frame
+/// instead ([`Frame::dma_buf_borrowed_fd`], [`Frame::try_clone_fd`]), which is also the documented
+/// flow: the descriptor is serialized and the fd travels out of band over `SCM_RIGHTS`.
+///
+/// `num_planes`/`offsets`/`pitches` are what [`DrmTap::grab`] cannot give you at all, and they are
+/// what a compressed (Intel CCS) or HDR scanout needs to be imported losslessly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmabufDesc {
+    /// Frame width in pixels
+    pub width: u32,
+    /// Frame height in pixels
+    pub height: u32,
+    /// DRM fourcc of the scanout
+    pub format: u32,
+    /// DRM format modifier (tiling/compression)
+    pub modifier: u64,
+    /// KMS framebuffer id, the import-once cache key; 0 disables caching for this frame
+    pub fb_id: u32,
+    /// Used entries in `offsets`/`pitches` (1..4); 0 is treated as 1
+    pub num_planes: u32,
+    /// Per-plane byte offsets into the DMA-BUF
+    pub offsets: [u32; 4],
+    /// Per-plane strides in bytes; `pitches[0]` is the main surface stride
+    pub pitches: [u32; 4],
+    /// EOTF of the scanout; PQ is what triggers the HDR to SDR tone-map on conversion
+    pub hdr_eotf: u32,
+    /// Mastering/content peak luminance in cd/m2, 0 = unknown
+    pub hdr_max_nits: u32,
+}
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -220,6 +297,42 @@ impl DrmTap {
         })
     }
 
+    /// Capture a frame AND the full descriptor the unprivileged converter needs.
+    ///
+    /// The zero-copy counterpart of [`DrmTap::grab`] for a SPLIT consumer: the returned
+    /// [`DmabufDesc`] carries the plane layout and HDR state that [`Frame`] does not have, and
+    /// without them a compressed (Intel CCS) or HDR scanout cannot be imported at all -- you would
+    /// hold the fd and no way to know where the planes sit inside it.
+    ///
+    /// The frame owns the DMA-BUF: send the descriptor over IPC, send the fd out of band with
+    /// `SCM_RIGHTS` (see [`Frame::dma_buf_borrowed_fd`] and [`Frame::try_clone_fd`]), and keep the
+    /// frame alive until it has gone.
+    pub fn grab_desc(&mut self) -> Result<(Frame, DmabufDesc)> {
+        let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_frame_info>() };
+        let mut desc = unsafe { std::mem::zeroed::<ffi::drmtap_dmabuf_desc>() };
+        let ret = unsafe { ffi::drmtap_grab_desc(self.ctx, &mut desc, &mut raw) };
+        check(self.ctx, ret)?;
+        let out = DmabufDesc {
+            width: desc.width,
+            height: desc.height,
+            format: desc.format,
+            modifier: desc.modifier,
+            fb_id: desc.fb_id,
+            num_planes: desc.num_planes,
+            offsets: desc.offsets,
+            pitches: desc.pitches,
+            hdr_eotf: desc.hdr_eotf,
+            hdr_max_nits: desc.hdr_max_nits,
+        };
+        Ok((
+            Frame {
+                ctx: self.ctx,
+                raw,
+            },
+            out,
+        ))
+    }
+
     /// Get the GPU driver name (e.g., "i915", "amdgpu", "virtio_gpu").
     pub fn gpu_driver(&mut self) -> Option<String> {
         let p = unsafe { ffi::drmtap_gpu_driver(self.ctx) };
@@ -295,7 +408,63 @@ impl Frame {
         self.raw.modifier
     }
 
-    /// DMA-BUF file descriptor (for zero-copy)
+    /// DMA-BUF file descriptor, borrowed from this frame.
+    ///
+    /// `None` on the mapped paths, where there is no transferable DMA-BUF and the C field holds
+    /// `-1`; handing out a borrowed `-1` would be a lie. The borrow is tied to `&self` because that
+    /// IS the contract: the frame's `Drop` calls `drmtap_frame_release`, which closes the fd, so
+    /// using it after the frame is gone must not compile. Do not close it -- see
+    /// [`Frame::try_clone_fd`] for an fd that outlives the frame.
+    pub fn dma_buf_borrowed_fd(&self) -> Option<BorrowedFd<'_>> {
+        let fd = self.raw.dma_buf_fd as RawFd;
+        if fd < 0 {
+            None
+        } else {
+            // SAFETY: the fd is owned by this frame and stays open until its Drop releases it, so
+            // it is valid for the lifetime of the borrow.
+            Some(unsafe { BorrowedFd::borrow_raw(fd) })
+        }
+    }
+
+    /// A duplicate of the DMA-BUF fd, owned by the caller.
+    ///
+    /// For the case where the fd has to outlive the frame. It DUPS rather than handing over the
+    /// frame's own descriptor, because that one is closed by `drmtap_frame_release` and giving it
+    /// away would be a double close.
+    ///
+    /// The caveat that the type cannot express: duplicating the descriptor keeps the BUFFER
+    /// mapping alive, but not the frame's claim on the scanout. Once the frame is released the
+    /// compositor is free to recycle that buffer, so what the fd refers to may be a later frame,
+    /// or be written under you. It is the right tool for handing the buffer to another process
+    /// promptly, not for holding a still.
+    ///
+    /// Returns [`io::ErrorKind::InvalidInput`] on a mapped frame, which has no DMA-BUF.
+    pub fn try_clone_fd(&self) -> io::Result<OwnedFd> {
+        let borrowed = self.dma_buf_borrowed_fd().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "this frame has no dma-buf: it came from a mapped capture path",
+            )
+        })?;
+        // `File::try_clone` is F_DUPFD_CLOEXEC without a libc dependency. ManuallyDrop because the
+        // File must NOT close the frame's descriptor when it goes out of scope here.
+        let borrowed_file = std::mem::ManuallyDrop::new(unsafe {
+            <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(borrowed.as_raw_fd())
+        });
+        borrowed_file.try_clone().map(OwnedFd::from)
+    }
+
+    /// DMA-BUF file descriptor as a raw integer.
+    ///
+    /// Kept for compatibility and unchanged in shape, since this is a patch release. It tells you
+    /// nothing about ownership or lifetime, and `-1` means "no DMA-BUF" rather than being an fd:
+    /// prefer [`Frame::dma_buf_borrowed_fd`], or [`Frame::try_clone_fd`] when it must outlive the
+    /// frame.
+    #[deprecated(
+        since = "0.5.7",
+        note = "use dma_buf_borrowed_fd() for a borrow tied to the frame, or try_clone_fd() for an \
+                owned duplicate; this raw form cannot express either"
+    )]
     pub fn dma_buf_fd(&self) -> i32 {
         self.raw.dma_buf_fd as i32
     }
@@ -311,6 +480,55 @@ impl Frame {
             let len = self.raw.stride as usize * self.raw.height as usize;
             Some(unsafe { std::slice::from_raw_parts(self.raw.data as *const u8, len) })
         }
+    }
+}
+
+/// The typed format accessors, behind the optional `drm-fourcc` feature.
+///
+/// They are optional on purpose: putting a third-party type in a public signature ties this
+/// crate's semver to that crate's, permanently, and this wrapper sits under a capture library
+/// other people pin. `format()` stays a `u32` for everyone, the `Debug` output already prints the
+/// readable fourcc with no dependency at all, and whoever wants the enum opts in.
+#[cfg(feature = "drm-fourcc")]
+impl Frame {
+    /// The scanout's format and modifier as `drm_fourcc` types.
+    ///
+    /// `None` when the fourcc is not one this version of `drm_fourcc` knows.
+    pub fn drm_format(&self) -> Option<drm_fourcc::DrmFormat> {
+        drm_format_of(self.raw.format, self.raw.modifier)
+    }
+}
+
+#[cfg(feature = "drm-fourcc")]
+impl DmabufDesc {
+    /// The scanout's format and modifier as `drm_fourcc` types; see [`Frame::drm_format`].
+    pub fn drm_format(&self) -> Option<drm_fourcc::DrmFormat> {
+        drm_format_of(self.format, self.modifier)
+    }
+}
+
+#[cfg(feature = "drm-fourcc")]
+fn drm_format_of(format: u32, modifier: u64) -> Option<drm_fourcc::DrmFormat> {
+    Some(drm_fourcc::DrmFormat {
+        code: drm_fourcc::DrmFourcc::try_from(format).ok()?,
+        modifier: drm_fourcc::DrmModifier::from(modifier),
+    })
+}
+
+impl fmt::Debug for Frame {
+    /// The format is printed as its fourcc (`XR24`), not as the decimal the C struct holds, which
+    /// is the whole reason this exists rather than a derive.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Frame")
+            .field("width", &self.raw.width)
+            .field("height", &self.raw.height)
+            .field("stride", &self.raw.stride)
+            .field("format", &fourcc_str(self.raw.format))
+            .field("modifier", &format_args!("{:#018x}", self.raw.modifier))
+            .field("fb_id", &self.raw.fb_id)
+            .field("dma_buf", &self.dma_buf_borrowed_fd().is_some())
+            .field("mapped", &!self.raw.data.is_null())
+            .finish()
     }
 }
 
@@ -423,4 +641,54 @@ impl Drop for Cursor {
 pub fn version() -> (u8, u8, u8) {
     let v = unsafe { ffi::drmtap_version() } as u32;
     ((v >> 16) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fourcc_prints_the_way_it_is_written_down() {
+        // XR24 is XRGB8888, the format every scanout here comes back as.
+        assert_eq!(fourcc_str(0x3432_5258), "XR24");
+        // AR24 is ARGB8888. Built from the bytes rather than a hand-written hex literal,
+        // because the first version of this line had the nibbles wrong and asserted "AR88".
+        assert_eq!(fourcc_str(u32::from_le_bytes(*b"AR24")), "AR24");
+        // Three letters and a pad byte: the kernel writes them space-padded, not NUL-padded.
+        assert_eq!(fourcc_str(u32::from_le_bytes(*b"C8  ")), "C8  ");
+        // Not four printable bytes: say the number rather than emit something that LOOKS like a
+        // fourcc. A NUL byte is the giveaway that this is not one.
+        assert_eq!(fourcc_str(0), "0x00000000");
+        assert_eq!(fourcc_str(0x0000_3432), "0x00003432");
+    }
+
+    #[test]
+    fn only_a_real_errno_becomes_an_io_error() {
+        // What the public C API actually returns.
+        let e = Error { code: -22, message: "bad argument".into() };
+        assert_eq!(e.io_error().map(|io| io.raw_os_error()), Some(Some(22)));
+        assert_eq!(
+            Error { code: -19, message: String::new() }
+                .io_error()
+                .and_then(|io| io.raw_os_error()),
+            Some(19),
+            "-ENODEV is a real errno and must convert"
+        );
+        // The sentinel. `drmtap_drm_fd()` returns a bare -1, and so does this wrapper when
+        // drmtap_open hands back null; converting it would invent EPERM.
+        assert!(
+            Error { code: -1, message: "failed to open DRM device".into() }.io_error().is_none(),
+            "-1 is a sentinel here, not EPERM"
+        );
+        assert!(Error { code: 0, message: String::new() }.io_error().is_none());
+    }
+
+    #[test]
+    fn the_error_field_is_still_the_raw_code() {
+        // `code` is a public field: this release only ADDS the accessor. Changing the field is a
+        // breaking release, and this is what would notice it being changed anyway.
+        let e = Error { code: -22, message: "x".into() };
+        assert_eq!(e.code, -22);
+        assert!(format!("{e}").starts_with("drmtap error -22:"));
+    }
 }

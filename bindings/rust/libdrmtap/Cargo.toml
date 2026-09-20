@@ -1,7 +1,10 @@
 [package]
 name = "libdrmtap"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
+# std::os::fd (BorrowedFd/OwnedFd), which the frame's fd accessors are built on, is 1.66.
+# Declared so a downstream on an older toolchain gets that sentence instead of a type error.
+rust-version = "1.66"
 authors = ["Mariano Abad <weimaraner@gmail.com>"]
 description = "Safe Rust wrapper for libdrmtap — DRM/KMS screen capture for Linux (login screen, Wayland, headless)"
 license = "MIT"
@@ -13,7 +16,14 @@ keywords = ["drm", "kms", "screen-capture", "wayland", "remote-desktop"]
 categories = ["multimedia::video", "os::linux-apis"]
 
 [dependencies]
-libdrmtap-sys = { version = "0.5.6", path = "../libdrmtap-sys" }
+libdrmtap-sys = { version = "0.5.7", path = "../libdrmtap-sys" }
+# Optional on purpose: a third-party type in a public signature ties our semver to theirs. See the
+# `drm-fourcc` impl block in lib.rs.
+drm-fourcc = { version = "2.2", optional = true }
+
+[features]
+default = []
+drm-fourcc = ["dep:drm-fourcc"]
 
 [[example]]
 name = "capture_test"
