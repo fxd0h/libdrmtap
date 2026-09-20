@@ -203,3 +203,9 @@ jobs:
       # deps needed — just grep/sed/diff.
       - name: Check version + csrc coherence
         run: ./tools/check-version.sh
+
+      # The helper search list is security-relevant (first executable match is
+      # exec'd, with no check of its owner or mode), and the header's copy of it
+      # was wrong from the first commit until 0.5.7 because nothing compared them.
+      - name: Check the documented helper paths against the code
+        run: ./tools/check-helper-paths.sh
