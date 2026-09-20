@@ -37,7 +37,7 @@
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
 use std::os::raw::c_int;
 use std::ptr;
 
@@ -62,12 +62,16 @@ impl Error {
     /// The error as an [`io::Error`], when it really is an errno.
     ///
     /// Most of the C API returns a negative errno (`-EINVAL`, `-ENOTSUP`, `-EIO`, `-ENODEV`,
-    /// `-ENOMEM`, `-EFBIG`, `-EACCES`, `-ENOSPC`, `-EPROTO`), and those convert exactly. But not
-    /// every negative return is one: `drmtap_drm_fd()` returns a bare `-1` as a SENTINEL, and so
-    /// does this wrapper when `drmtap_open` hands back a null context. Converting that blindly
-    /// would render it as `EPERM`, "Operation not permitted", an error nothing ever reported. So
-    /// `-1` answers `None` rather than inventing one, which is safe here because no public entry
-    /// point returns `-EPERM`.
+    /// `-ENOMEM`, `-EFBIG`, `-EACCES`, `-ENOSPC`, `-EPROTO`), and those convert exactly.
+    ///
+    /// `-1` is the one value that cannot be trusted, and it is genuinely ambiguous rather than
+    /// merely a sentinel. `drmtap_drm_fd()` returns a bare `-1`, and so does this wrapper when
+    /// `drmtap_open` hands back a null context. But `-1` is ALSO `-EPERM`, and the capture path
+    /// returns `-errno` straight from the kernel (`drmModeGetFB2`, `drmPrimeHandleToFD`, the
+    /// virtio transfer ioctls), so an unprivileged caller really can produce one. Nothing in the
+    /// integer distinguishes the two, so this refuses to guess and answers `None`. Very little is
+    /// lost by that: [`Error::message`] carries the C library's own text, which names the call and
+    /// the strerror string.
     ///
     /// [`Error::code`] stays as it is: it is a public field, so changing its type is a breaking
     /// release. This accessor is the additive half.
@@ -306,7 +310,14 @@ impl DrmTap {
     ///
     /// The frame owns the DMA-BUF: send the descriptor over IPC, send the fd out of band with
     /// `SCM_RIGHTS` (see [`Frame::dma_buf_borrowed_fd`] and [`Frame::try_clone_fd`]), and keep the
-    /// frame alive until it has gone.
+    /// frame alive until it has gone. On a frame from THIS call the fd is always there --
+    /// `drmtap_grab_desc` fails closed with `-ENOTSUP` rather than hand back a descriptor no
+    /// receiver could convert -- so `dma_buf_borrowed_fd()` is never `None` here, unlike on a
+    /// frame from [`DrmTap::grab`].
+    ///
+    /// The receiving half is not wrapped: `drmtap_open_render`/`drmtap_convert_dmabuf` exist in
+    /// `libdrmtap-sys` and not here, so the consumer that imports this descriptor is expected to
+    /// be using the C API (or the sys crate). This call is the exporter's side of that split.
     pub fn grab_desc(&mut self) -> Result<(Frame, DmabufDesc)> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_frame_info>() };
         let mut desc = unsafe { std::mem::zeroed::<ffi::drmtap_dmabuf_desc>() };
@@ -446,12 +457,8 @@ impl Frame {
                 "this frame has no dma-buf: it came from a mapped capture path",
             )
         })?;
-        // `File::try_clone` is F_DUPFD_CLOEXEC without a libc dependency. ManuallyDrop because the
-        // File must NOT close the frame's descriptor when it goes out of scope here.
-        let borrowed_file = std::mem::ManuallyDrop::new(unsafe {
-            <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(borrowed.as_raw_fd())
-        });
-        borrowed_file.try_clone().map(OwnedFd::from)
+        // F_DUPFD_CLOEXEC, and no unsafe: stable since 1.63, so it is inside the declared floor.
+        borrowed.try_clone_to_owned()
     }
 
     /// DMA-BUF file descriptor as a raw integer.
@@ -674,11 +681,13 @@ mod tests {
             Some(19),
             "-ENODEV is a real errno and must convert"
         );
-        // The sentinel. `drmtap_drm_fd()` returns a bare -1, and so does this wrapper when
-        // drmtap_open hands back null; converting it would invent EPERM.
+        // -1 is ambiguous, not merely a sentinel: it is what drmtap_drm_fd() and a null
+        // drmtap_open report, AND it is -EPERM, which the capture path can return for real
+        // because it passes -errno through from drmModeGetFB2. Nothing in the integer separates
+        // them, so this must not answer either one.
         assert!(
             Error { code: -1, message: "failed to open DRM device".into() }.io_error().is_none(),
-            "-1 is a sentinel here, not EPERM"
+            "-1 cannot be resolved to an errno or to a sentinel; do not guess"
         );
         assert!(Error { code: 0, message: String::new() }.io_error().is_none());
     }

@@ -57,14 +57,18 @@ something that looks like a fourcc and is not one.
 
 ### Added: `Error::io_error()`
 
-An `io::Error` accessor, converting ONLY from a negative errno and never from a
-sentinel. The distinction is load-bearing: the public C API returns clean errnos
-(`-EINVAL` 36 times, `-ENOTSUP` 19, `-EIO` 18, `-ENODEV` 10, plus `-ENOMEM`, `-EFBIG`,
-`-EACCES`, `-ENOSPC`, `-EPROTO`), but `drmtap_drm_fd()` is public and returns a bare
-`-1` as a sentinel, as does this wrapper when `drmtap_open` hands back null.
-`from_raw_os_error(1)` would render those as `EPERM`, "Operation not permitted", an
-error nothing ever reported, so `-1` answers `None`. Safe here because no public entry
-point returns `-EPERM`.
+An `io::Error` accessor. The public C API returns clean errnos (`-EINVAL` 36 times,
+`-ENOTSUP` 19, `-EIO` 18, `-ENODEV` 10, plus `-ENOMEM`, `-EFBIG`, `-EACCES`, `-ENOSPC`,
+`-EPROTO`) and those convert exactly.
+
+`-1` is the one value that does not, and it is ambiguous rather than merely a sentinel.
+`drmtap_drm_fd()` returns a bare `-1`, as does this wrapper when `drmtap_open` hands
+back null - and `-1` is also `-EPERM`, which the capture path can produce for real,
+because it passes `-errno` through from `drmModeGetFB2`, `drmPrimeHandleToFD` and the
+virtio transfer ioctls, and an unprivileged caller is exactly who hits those. Nothing
+in the integer separates the two cases, so the accessor refuses to guess and answers
+`None`. Little is lost: `Error::message` carries the C library's own text, which names
+the call and the strerror string.
 
 The `Error::code` field is untouched. It is `pub`, so changing its type is a breaking
 release; this accessor is the additive half of that request.
