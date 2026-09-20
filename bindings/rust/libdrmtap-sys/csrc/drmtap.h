@@ -57,12 +57,36 @@ typedef struct {
      *  0 = auto-select primary display. */
     uint32_t crtc_id;
 
-    /** Path to privileged helper binary.
-     *  NULL = search default locations:
-     *    1. $DRMTAP_HELPER_PATH (env var)
-     *    2. <exe_dir>/drmtap-helper
-     *    3. /usr/libexec/drmtap-helper
-     *    4. /usr/local/libexec/drmtap-helper */
+    /** Path to the privileged helper binary, used only when the direct DRM
+     *  export is denied (no CAP_SYS_ADMIN and not DRM master).
+     *
+     *  Checked first when set. NULL = search these, in this order, and take the
+     *  first one that is executable:
+     *    1. /usr/lib/rustdesk/drmtap-helper
+     *    2. /usr/libexec/drmtap-helper
+     *    3. /usr/local/libexec/drmtap-helper
+     *    4. /usr/local/bin/drmtap-helper
+     *    5. /usr/bin/drmtap-helper
+     *    6. /usr/lib/drmtap/drmtap-helper
+     *
+     *  The match is tested with access(X_OK) and then exec'd as-is: nothing
+     *  here checks its owner or its mode. So every directory on that list has
+     *  to be one only root can write, or a caller that later runs privileged
+     *  execs whatever was put there.
+     *
+     *  Setting this field does NOT opt out of that list: if the path given is
+     *  not executable, the search runs anyway and the helper still comes from
+     *  one of the six. The only way to not have the list is to build with
+     *  -Dhelper=disabled, which compiles the fork/exec path out of the library
+     *  entirely - no fork, exec or socketpair symbol is left in the .so - and
+     *  is what a consumer that already holds CAP_SYS_ADMIN should do.
+     *
+     *  Note for anyone who read an older header: it listed $DRMTAP_HELPER_PATH
+     *  and <exe_dir>/drmtap-helper. Neither was ever implemented - the
+     *  environment variable is not read anywhere in the library - and it
+     *  omitted four of the paths that ARE searched. Setting that variable
+     *  never did anything, and hardening only the two directories it named
+     *  left four open. */
     const char *helper_path;
 
     /** Enable debug logging to stderr.

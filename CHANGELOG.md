@@ -8,10 +8,11 @@ could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
 ## [0.5.7] - 2026-09-20
 
-Rust wrapper only. No C source changed, so the library, the ABI and the helper wire
-are byte-identical to 0.5.6; the version moves because the four artifacts share one
-line. Both reports behind it come from `anonymix007`, who is the first person outside
-the project to build on the split path.
+Mostly the Rust wrapper. No C CODE changed, so the library, the ABI and the helper
+wire behave exactly as 0.5.6 does; one public header comment is corrected, and it was
+wrong in a way worth reading if you have ever hardened an install. The version moves
+because the four artifacts share one line. The two wrapper reports behind it come from
+`anonymix007`, who is the first person outside the project to build on the split path.
 
 ### Added: `grab_desc()` in the safe wrapper (#60)
 
@@ -88,6 +89,28 @@ floor from the moment those accessors were written; declaring it means a downstr
 an older toolchain gets that sentence instead of a type error. Verified by building the
 crate, its tests and the optional feature on 1.66.0, not only by reading stabilization
 dates.
+
+### Fixed: the header's helper search list was wrong from the first commit
+
+`drmtap_config.helper_path` documented where the library looks for `drmtap-helper`
+when the direct export is denied. It advertised `$DRMTAP_HELPER_PATH`, an environment
+variable no code has ever read - `git log -S` finds exactly one commit touching that
+name, the initial skeleton, and it only ever touched the header - and
+`<exe_dir>/drmtap-helper`, which is not searched either. It then omitted four of the
+six paths that ARE searched: `/usr/lib/rustdesk`, `/usr/local/bin`, `/usr/bin` and
+`/usr/lib/drmtap`.
+
+That list is not decoration. `find_helper()` takes the first path that passes
+`access(X_OK)` and execs it as-is, with no check of its owner or its mode, so someone
+hardening a deployment from the header would have locked down the two directories it
+named and left four open, while believing an environment variable was a control it is
+not. The header now names the six, in the order they are tried, says what the match
+does, and says plainly that setting `helper_path` does NOT opt out of the search: a
+configured path that is not executable falls through to the list anyway. Only
+`-Dhelper=disabled` removes it, and that is a build option, not a runtime one.
+
+Nothing compared the two lists, which is why it survived eleven releases.
+`tools/check-helper-paths.sh` now does, and CI runs it beside the version check.
 
 ### Docs
 
