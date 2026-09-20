@@ -6,6 +6,91 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.7] - 2026-09-20
+
+Rust wrapper only. No C source changed, so the library, the ABI and the helper wire
+are byte-identical to 0.5.6; the version moves because the four artifacts share one
+line. Both reports behind it come from `anonymix007`, who is the first person outside
+the project to build on the split path.
+
+### Added: `grab_desc()` in the safe wrapper (#60)
+
+The wrapper exposed `grab()` and `grab_mapped()` and nothing else, and `grab()` alone
+cannot describe a scanout. `drmtap_frame_info` carries seven fields; `drmtap_dmabuf_desc`
+additionally carries `num_planes`, `offsets[4]`, `pitches[4]` and the two HDR fields. So
+from safe Rust a multi-plane (Intel CCS) or HDR scanout could not be imported at all:
+you held the fd and no way to know where the planes sit inside it.
+
+    pub fn grab_desc(&mut self) -> Result<(Frame, DmabufDesc)>
+
+`DmabufDesc` deliberately carries NO file descriptor, which is a departure from the C
+struct and the point of the type. The header is explicit that `desc.dma_buf_fd` "is an
+integer valid only in THIS (exporter) process - it aliases @p frame's fd", and the
+`Frame` owns it. Handing that integer out inside a plain struct would let it outlive
+the frame, and the failure is worse than a dangling number: once closed, the kernel can
+hand the same integer to an unrelated `open()`, so a later convert would read some other
+file. Metadata only is also what makes the descriptor safe to serialize, which is the
+documented flow - the fd travels out of band over `SCM_RIGHTS`.
+
+### Added: the frame's DMA-BUF as a real file descriptor type (#61)
+
+    pub fn dma_buf_borrowed_fd(&self) -> Option<BorrowedFd<'_>>
+    pub fn try_clone_fd(&self) -> io::Result<OwnedFd>
+
+The borrow is tied to `&self` because that IS the contract: the frame's `Drop` calls
+`drmtap_frame_release`, which closes the fd, so using it afterwards must not compile.
+`None` is the mapped paths, where the C field holds `-1` and a borrowed `-1` would be a
+lie. `try_clone_fd` dups rather than handing over the frame's own descriptor, which
+would be a double close; the caveat a type cannot express is documented instead - the
+dup keeps the buffer mapping alive but not the claim on the scanout, so once the frame
+is released the compositor may recycle that buffer.
+
+`dma_buf_fd() -> i32` is deprecated rather than changed. Changing its signature in a
+patch release would break every caller silently, since Cargo treats 0.5.6 to 0.5.7 as
+compatible. The typed accessor is the one to use; the raw form goes in 0.6.
+
+### Added: `Frame: Debug`, printing the format as a fourcc
+
+`XR24`, not `875713112`. Written by hand rather than derived, for that one field, and
+it falls back to hex for a code that is not four printable bytes so it can never print
+something that looks like a fourcc and is not one.
+
+### Added: `Error::io_error()`
+
+An `io::Error` accessor, converting ONLY from a negative errno and never from a
+sentinel. The distinction is load-bearing: the public C API returns clean errnos
+(`-EINVAL` 36 times, `-ENOTSUP` 19, `-EIO` 18, `-ENODEV` 10, plus `-ENOMEM`, `-EFBIG`,
+`-EACCES`, `-ENOSPC`, `-EPROTO`), but `drmtap_drm_fd()` is public and returns a bare
+`-1` as a sentinel, as does this wrapper when `drmtap_open` hands back null.
+`from_raw_os_error(1)` would render those as `EPERM`, "Operation not permitted", an
+error nothing ever reported, so `-1` answers `None`. Safe here because no public entry
+point returns `-EPERM`.
+
+The `Error::code` field is untouched. It is `pub`, so changing its type is a breaking
+release; this accessor is the additive half of that request.
+
+### Added: optional `drm-fourcc` feature
+
+`Frame::drm_format()` and `DmabufDesc::drm_format()` return `drm_fourcc::DrmFormat`,
+behind a cargo feature that is off by default. A third-party type in a public signature
+ties this crate's semver to that crate's, permanently, and the wrapper sits under a
+capture library other people pin. `format()` stays a `u32` for everyone, and the new
+`Debug` gives the readable fourcc with no dependency at all.
+
+### Changed: the Rust floor is declared
+
+`rust-version = "1.66"`, which is what `std::os::fd` costs. It was already the real
+floor from the moment those accessors were written; declaring it means a downstream on
+an older toolchain gets that sentence instead of a type error. Verified by building the
+crate, its tests and the optional feature on 1.66.0, not only by reading stabilization
+dates.
+
+### Docs
+
+The wrapper README, which is what crates.io serves as the crate's front page, gains the
+new entry points, the feature and the toolchain floor. It is the file that shipped stale
+in 0.5.1 and again in 0.5.5, so it is audited first now rather than last.
+
 ## [0.5.6] - 2026-09-19
 
 ### Added: whether a cursor hotspot came from the driver, or is just zero
@@ -816,6 +901,7 @@ entry point is additive and would not on its own have justified more than a patc
   fixes.
 
 [0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
+[0.5.7]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.7
 [0.5.6]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.6
 [0.5.5]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.5
 [0.5.4]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.4

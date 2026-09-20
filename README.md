@@ -65,6 +65,12 @@ let frame = tap.grab_mapped()?;
 println!("{}x{} pixels captured", frame.width(), frame.height());
 ```
 
+> Since 0.5.7 the split path is reachable from Rust too: `grab_desc()` returns the frame plus a
+> `DmabufDesc` carrying the plane layout and HDR state, and the frame hands out its DMA-BUF as a
+> `BorrowedFd` (or an owned dup via `try_clone_fd()`). The descriptor deliberately carries no file
+> descriptor, so it is safe to serialize and the fd travels out of band, exactly as the C header
+> prescribes. Needs Rust 1.66.
+
 ## Features
 
 | Feature | Status |
