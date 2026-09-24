@@ -610,8 +610,10 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  * cannot tell the two apart; this property can. A consumer turns the frame by
  * (output transform - plane rotation).
  *
- * Read at the time of the call, not from a cached frame: call it right after a grab.
- * Costs one GETPLANE and one OBJ_GETPROPERTIES per call once the property id is known.
+ * Answers for the plane the last grab read its framebuffer from (before any grab: the
+ * plane a grab would use), so the rotation belongs to the same plane as the frame. Read
+ * at the time of the call, not from a cached frame: call it right after the grab. Costs
+ * one OBJ_GETPROPERTIES per call once the property id is known.
  *
  * @param ctx      Capture context from drmtap_open()
  * @param rotation Set to the DRM rotation bitmask: DRM_MODE_ROTATE_0 (0x1),
@@ -621,7 +623,8 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  * @return 0 on success; -ENOTSUP when the plane has no `rotation` property (the
  *         compositor can only have rotated in software, so treat it as ROTATE_0);
  *         -ENOENT when no primary plane is bound to the CRTC (nothing scanning out);
- *         -EINVAL on a null argument; another -errno when the properties cannot be read.
+ *         -EINVAL on a null argument; another -errno when the properties cannot be read
+ *         (a failed read is not cached as "absent": the next call looks again).
  *         Added in 0.5.8.
  */
 int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation);

@@ -369,7 +369,6 @@ impl DrmTap {
         }
     }
 
-    /// Get the cursor state (position, image, visibility).
     /// The DRM `rotation` bitmask the primary plane scans out with, read now.
     ///
     /// `Some(mask)` carries exactly one of `0x1` (0), `0x2` (90), `0x4` (180) or
@@ -391,6 +390,7 @@ impl DrmTap {
         }
     }
 
+    /// Get the cursor state (position, image, visibility).
     pub fn get_cursor(&mut self) -> Result<Cursor> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_cursor_info>() };
         let ret = unsafe { ffi::drmtap_get_cursor(self.ctx, &mut raw) };

@@ -325,6 +325,88 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
     return result;
 }
 
+/* The DRM "rotation" property of the plane the last grab read from. Read now,
+ * so a consumer calls it right after the grab it wants to describe. The plane is
+ * the one do_grab or the fast path recorded (before any grab: the one a grab would
+ * use), never a fresh sweep, so the answer is for the same plane the frame came
+ * from. The property id is looked up by name once per plane and reused. */
+int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation) {
+    if (!ctx || !rotation) {
+        return -EINVAL;
+    }
+    if (ctx->is_render_only) {
+        return -ENOTSUP;
+    }
+    uint32_t plane_id = ctx->grab_plane_id ? ctx->grab_plane_id : find_primary_plane(ctx);
+    if (plane_id == 0) {
+        return -ENOENT;
+    }
+    if (plane_id != ctx->rot_prop_plane_id) {
+        /* A different plane may have a different property set: look it up again. */
+        ctx->rot_prop_plane_id = plane_id;
+        ctx->rot_prop_id = 0;
+        ctx->rot_prop_state = 0;
+    }
+    if (ctx->rot_prop_state < 0) {
+        return -ENOTSUP;
+    }
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(ctx->drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (!props) {
+        int err = errno ? errno : EIO;
+        drmtap_set_error(ctx, "plane %u properties: %s", plane_id, strerror(err));
+        return -err;
+    }
+    int found = 0;
+    int read_failed = 0;
+    uint64_t value = 0;
+    if (ctx->rot_prop_state == 0) {
+        /* First look at this plane: find the property by name and remember its id. */
+        for (uint32_t i = 0; i < props->count_props && !found; i++) {
+            drmModePropertyRes *p = drmModeGetProperty(ctx->drm_fd, props->props[i]);
+            if (!p) {
+                /* Unreadable, so "absent" cannot be concluded: keep the lookup pending. */
+                read_failed = errno ? errno : EIO;
+                continue;
+            }
+            if (strcmp(p->name, "rotation") == 0) {
+                ctx->rot_prop_id = props->props[i];
+                value = props->prop_values[i];
+                found = 1;
+            }
+            drmModeFreeProperty(p);
+        }
+        if (found) {
+            ctx->rot_prop_state = 1;
+        } else if (!read_failed) {
+            ctx->rot_prop_state = -1;
+        }
+    } else {
+        for (uint32_t i = 0; i < props->count_props; i++) {
+            if (props->props[i] == ctx->rot_prop_id) {
+                value = props->prop_values[i];
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            /* The property set changed under us: look it up by name next time. */
+            ctx->rot_prop_state = 0;
+            ctx->rot_prop_id = 0;
+        }
+    }
+    drmModeFreeObjectProperties(props);
+    if (found) {
+        *rotation = (uint32_t)value;
+        return 0;
+    }
+    if (read_failed) {
+        drmtap_set_error(ctx, "plane %u property read: %s", plane_id, strerror(read_failed));
+        return -read_failed;
+    }
+    return -ENOTSUP;
+}
+
 /* The connector HDR metadata for this CRTC, so the conversion path can tone-map.
  * Used to live at the end of find_primary_plane, which made a plane LOOKUP rewrite
  * ctx->cur_hdr_eotf as a side effect. That was invisible until the scanout-width
@@ -830,6 +912,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         drmtap_set_error(ctx, "No active plane found for capture");
         return -ENODEV;
     }
+    ctx->grab_plane_id = plane_id; /* what drmtap_plane_rotation() answers for */
 
     /* Step 2: Refresh plane → get CURRENT fb_id (never cache!) */
     drmModePlane *plane = drmModeGetPlane(ctx->drm_fd, plane_id);
@@ -1889,6 +1972,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         ctx->fast_no_cpu_map = 0;
         ctx->fast_initialized = 1;
         drmtap_debug_log(ctx, "fast2: initialized plane=%u", ctx->fast_plane_id);
+        ctx->grab_plane_id = ctx->fast_plane_id;
     }
 
     /* Step 2: Refresh fb_id (cheap ioctl, ~0.05ms) */
@@ -2538,92 +2622,4 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
         frame->data = NULL;
     }
     return ret;
-}
-
-/* ========================================================================= */
-/* Plane rotation                                                            */
-/* ========================================================================= */
-
-/* The primary plane bound to this CRTC, reusing the id from the last call when
- * GETPLANE says it still scans out this CRTC with a framebuffer; a plane sweep
- * otherwise. Returns 0 when no plane is bound. */
-static uint32_t current_primary_plane(drmtap_ctx *ctx) {
-    if (ctx->rot_plane_id != 0) {
-        drmModePlane *plane = drmModeGetPlane(ctx->drm_fd, ctx->rot_plane_id);
-        int still = plane && plane->crtc_id == ctx->crtc_id && plane->fb_id != 0;
-        if (plane) {
-            drmModeFreePlane(plane);
-        }
-        if (still) {
-            return ctx->rot_plane_id;
-        }
-    }
-    uint32_t plane_id = find_primary_plane(ctx);
-    if (plane_id != ctx->rot_plane_id) {
-        /* A different plane may have a different property set. */
-        ctx->rot_plane_id = plane_id;
-        ctx->rot_prop_id = 0;
-        ctx->rot_prop_state = 0;
-    }
-    return plane_id;
-}
-
-int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation) {
-    if (!ctx || !rotation) {
-        return -EINVAL;
-    }
-    if (ctx->is_render_only) {
-        return -ENOTSUP;
-    }
-    uint32_t plane_id = current_primary_plane(ctx);
-    if (plane_id == 0) {
-        return -ENOENT;
-    }
-    if (ctx->rot_prop_state < 0) {
-        return -ENOTSUP;
-    }
-    drmModeObjectProperties *props =
-        drmModeObjectGetProperties(ctx->drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
-    if (!props) {
-        int err = errno ? errno : EIO;
-        drmtap_set_error(ctx, "plane %u properties: %s", plane_id, strerror(err));
-        return -err;
-    }
-    int found = 0;
-    uint64_t value = 0;
-    if (ctx->rot_prop_state == 0) {
-        /* First look at this plane: find the property by name and remember its id. */
-        for (uint32_t i = 0; i < props->count_props && !found; i++) {
-            drmModePropertyRes *p = drmModeGetProperty(ctx->drm_fd, props->props[i]);
-            if (!p) {
-                continue;
-            }
-            if (strcmp(p->name, "rotation") == 0) {
-                ctx->rot_prop_id = props->props[i];
-                value = props->prop_values[i];
-                found = 1;
-            }
-            drmModeFreeProperty(p);
-        }
-        ctx->rot_prop_state = found ? 1 : -1;
-    } else {
-        for (uint32_t i = 0; i < props->count_props; i++) {
-            if (props->props[i] == ctx->rot_prop_id) {
-                value = props->prop_values[i];
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            /* The property set changed under us: look it up by name next time. */
-            ctx->rot_prop_state = 0;
-            ctx->rot_prop_id = 0;
-        }
-    }
-    drmModeFreeObjectProperties(props);
-    if (!found) {
-        return -ENOTSUP;
-    }
-    *rotation = (uint32_t)value;
-    return 0;
 }
