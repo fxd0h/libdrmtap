@@ -6,7 +6,7 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
-## [Unreleased]
+## [0.5.8] - unreleased
 
 ### Added: `drmtap_plane_rotation()`, the plane's `rotation` property
 
