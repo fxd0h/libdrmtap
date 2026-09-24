@@ -381,13 +381,13 @@ impl DrmTap {
     /// Available since 0.5.8.
     pub fn plane_rotation(&mut self) -> Result<Option<u32>> {
         let mut rotation: u32 = 0;
-        let rc = unsafe { ffi::drmtap_plane_rotation(self.raw, &mut rotation) };
+        let rc = unsafe { ffi::drmtap_plane_rotation(self.ctx, &mut rotation) };
         if rc == 0 {
             Ok(Some(rotation))
         } else if rc == -95 {
             Ok(None)
         } else {
-            check(self.raw, rc).map(|_| None)
+            check(self.ctx, rc).map(|_| None)
         }
     }
 
