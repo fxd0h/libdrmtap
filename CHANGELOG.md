@@ -19,7 +19,7 @@ at 180 and sideways at 90/270 (measured on virtio-gpu with a test pattern). `wl_
 cannot tell the two apart and neither can the frame. This call answers it from the
 kernel: the DRM rotation bitmask, or `-ENOTSUP` when the property does not exist,
 which a consumer treats as 0. Turn the frame by (output transform - plane rotation).
-`Context::plane_rotation()` in the safe wrapper returns `Option<u32>`.
+`DrmTap::plane_rotation()` in the safe wrapper returns `Option<u32>`.
 
 ## [0.5.7] - 2026-09-20
 
