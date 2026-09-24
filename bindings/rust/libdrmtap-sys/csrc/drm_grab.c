@@ -912,7 +912,6 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         drmtap_set_error(ctx, "No active plane found for capture");
         return -ENODEV;
     }
-    ctx->grab_plane_id = plane_id; /* what drmtap_plane_rotation() answers for */
 
     /* Step 2: Refresh plane → get CURRENT fb_id (never cache!) */
     drmModePlane *plane = drmModeGetPlane(ctx->drm_fd, plane_id);
@@ -1183,6 +1182,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                 drmtap_frame_release(ctx, frame);
                 return pret;
             }
+            /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
+            ctx->grab_plane_id = plane_id;
             return 0;
         }
 
@@ -1221,6 +1222,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         }
 
         drmModeFreeFB2(fb2);
+        /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
+        ctx->grab_plane_id = plane_id;
         return 0;
     }
 
@@ -1345,6 +1348,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     }
 
     drmModeFreeFB2(fb2);
+    /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
+    ctx->grab_plane_id = plane_id;
     return 0;
 
 cleanup:
@@ -1972,7 +1977,6 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         ctx->fast_no_cpu_map = 0;
         ctx->fast_initialized = 1;
         drmtap_debug_log(ctx, "fast2: initialized plane=%u", ctx->fast_plane_id);
-        ctx->grab_plane_id = ctx->fast_plane_id;
     }
 
     /* Step 2: Refresh fb_id (cheap ioctl, ~0.05ms) */
@@ -2027,6 +2031,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 if (pr != 0) {
                     return pr;
                 }
+                ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
                 return 0;   /* always return as new frame */
             }
         }
@@ -2084,6 +2089,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         if (pr != 0) {
             return pr;
         }
+
+        ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
 
         return 0;   /* new frame */
     }
@@ -2273,6 +2280,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             if (pr != 0) {
                 return pr;
             }
+            ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
             return 0;
         }
 #endif
@@ -2354,6 +2362,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (mpr != 0) {
         return mpr;
     }
+
+    ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
 
     return 0;   /* new frame */
 }
