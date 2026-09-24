@@ -598,6 +598,35 @@ const char *drmtap_error(drmtap_ctx *ctx);
 const char *drmtap_gpu_driver(drmtap_ctx *ctx);
 
 /**
+ * @brief The `rotation` the primary plane of this context's CRTC is scanning out with.
+ *
+ * Whether a captured frame is already in the orientation the user sees depends on WHO
+ * rotated the output. When the driver's plane can rotate and the compositor uses it
+ * (i915 + mutter at 180, measured), the framebuffer holds the upright logical desktop and
+ * the hardware turns it on the way to the panel: a consumer must not turn that frame.
+ * When the plane cannot (virtio-gpu, vmwgfx: no `rotation` property at all) the
+ * compositor draws the framebuffer already turned, so the capture comes out sideways or
+ * upside down and the consumer has to turn it back by the output transform. `wl_output`
+ * cannot tell the two apart; this property can. A consumer turns the frame by
+ * (output transform - plane rotation).
+ *
+ * Read at the time of the call, not from a cached frame: call it right after a grab.
+ * Costs one GETPLANE and one OBJ_GETPROPERTIES per call once the property id is known.
+ *
+ * @param ctx      Capture context from drmtap_open()
+ * @param rotation Set to the DRM rotation bitmask: DRM_MODE_ROTATE_0 (0x1),
+ *                 DRM_MODE_ROTATE_90 (0x2), DRM_MODE_ROTATE_180 (0x4),
+ *                 DRM_MODE_ROTATE_270 (0x8), optionally with DRM_MODE_REFLECT_X (0x10)
+ *                 or DRM_MODE_REFLECT_Y (0x20). Exactly one ROTATE bit is set.
+ * @return 0 on success; -ENOTSUP when the plane has no `rotation` property (the
+ *         compositor can only have rotated in software, so treat it as ROTATE_0);
+ *         -ENOENT when no primary plane is bound to the CRTC (nothing scanning out);
+ *         -EINVAL on a null argument; another -errno when the properties cannot be read.
+ *         Added in 0.5.8.
+ */
+int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation);
+
+/**
  * @brief Get the underlying DRM file descriptor.
  *
  * Useful for advanced operations like drmWaitVBlank() to synchronize

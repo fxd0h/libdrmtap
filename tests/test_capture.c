@@ -99,6 +99,27 @@ static void test_grab_real_capture(void) {
            frame.width, frame.height, frame.stride,
            (const char *)&frame.format, frame.dma_buf_fd);
 
+    /* The plane rotation is readable right after a grab: either the driver has the
+     * property (exactly one ROTATE bit set) or it does not (-ENOTSUP). Anything
+     * else means the lookup, not the hardware, is broken. */
+    uint32_t rotation = 0;
+    int rrc = drmtap_plane_rotation(ctx, &rotation);
+    if (rrc == 0) {
+        uint32_t rot_bits = rotation & 0xFu;
+        TEST_ASSERT(rot_bits != 0 && (rot_bits & (rot_bits - 1)) == 0);
+        printf("  plane rotation: 0x%x\n", rotation);
+        /* Stable across a second read: the cached property id resolves to the same value. */
+        uint32_t again = 0;
+        TEST_ASSERT(drmtap_plane_rotation(ctx, &again) == 0);
+        TEST_ASSERT(again == rotation);
+    } else {
+        TEST_ASSERT(rrc == -ENOTSUP);
+        printf("  plane rotation: no property on this driver (-ENOTSUP)\n");
+        TEST_ASSERT(drmtap_plane_rotation(ctx, &rotation) == -ENOTSUP);
+    }
+    TEST_ASSERT(drmtap_plane_rotation(NULL, &rotation) == -EINVAL);
+    TEST_ASSERT(drmtap_plane_rotation(ctx, NULL) == -EINVAL);
+
     TEST_ASSERT(frame.width > 0);
     TEST_ASSERT(frame.height > 0);
     TEST_ASSERT(frame.stride > 0);
