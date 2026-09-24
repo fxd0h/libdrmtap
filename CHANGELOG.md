@@ -6,6 +6,21 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [Unreleased]
+
+### Added: `drmtap_plane_rotation()`, the plane's `rotation` property
+
+A captured frame is upright only when the compositor rotated the output in hardware:
+then the framebuffer holds the logical desktop and the plane turns it on scanout
+(i915 + mutter at 180, measured: the plane reports `rotate-180` and the dump is
+upright). When the plane cannot rotate (virtio-gpu, vmwgfx: no `rotation` property) the
+compositor draws the framebuffer already turned, so the capture comes out upside down
+at 180 and sideways at 90/270 (measured on virtio-gpu with a test pattern). `wl_output`
+cannot tell the two apart and neither can the frame. This call answers it from the
+kernel: the DRM rotation bitmask, or `-ENOTSUP` when the property does not exist,
+which a consumer treats as 0. Turn the frame by (output transform - plane rotation).
+`Context::plane_rotation()` in the safe wrapper returns `Option<u32>`.
+
 ## [0.5.7] - 2026-09-20
 
 Mostly the Rust wrapper. No C code changed: the ABI and the helper wire protocol are

@@ -192,6 +192,11 @@ extern "C" {
     // Info
     pub fn drmtap_error(ctx: *const drmtap_ctx) -> *const c_char;
     pub fn drmtap_gpu_driver(ctx: *mut drmtap_ctx) -> *const c_char;
+    /// The DRM `rotation` bitmask the primary plane scans out with (`0x1` = 0,
+    /// `0x2` = 90, `0x4` = 180, `0x8` = 270, plus `0x10`/`0x20` for a reflection).
+    /// `0` on success, `-ENOTSUP` when the plane has no such property, `-ENOENT`
+    /// when no primary plane is bound, `-EINVAL` on a null argument. Added in 0.5.8.
+    pub fn drmtap_plane_rotation(ctx: *mut drmtap_ctx, rotation: *mut u32) -> c_int;
 
     // Pixel conversion
     pub fn drmtap_deswizzle(

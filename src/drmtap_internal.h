@@ -196,6 +196,15 @@ struct drmtap_ctx {
      * connector HDR_OUTPUT_METADATA (helper sends it on the wire; direct mode
      * reads it itself) and consumed by the conversion path to decide whether to
      * tone-map (DRMTAP_EOTF_PQ) or do a plain bit-depth reduction. */
+    /* The primary plane whose "rotation" property drmtap_plane_rotation() reads,
+     * and that property's id, looked up once per plane: the id is stable for the
+     * life of the plane, so each call costs one GETPLANE (to confirm the plane is
+     * still the one scanning out this CRTC) plus one OBJ_GETPROPERTIES, not a
+     * plane sweep and a GETPROPERTY per property. rot_prop_state: 0 = not looked
+     * up for rot_plane_id yet, 1 = found, -1 = the plane has no such property. */
+    uint32_t rot_plane_id;
+    uint32_t rot_prop_id;
+    int      rot_prop_state;
     uint32_t cur_hdr_eotf;     /* DRMTAP_EOTF_* */
     uint32_t cur_hdr_max_nits; /* peak luminance, 0 = unknown */
 };
