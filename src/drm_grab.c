@@ -1763,6 +1763,9 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
     if (!ctx || !desc || !frame) {
         return -EINVAL;
     }
+    /* do_grab names the plane a frame came from; a frame this call refuses
+     * below never reaches the caller, so the name must not move either. */
+    uint32_t plane_before = ctx->grab_plane_id;
     int ret = do_grab(ctx, frame, 0);  /* zero-copy: DMA-BUF fd + metadata */
     if (ret != 0) {
         return ret;
@@ -1777,6 +1780,7 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
             "grab_desc needs a transferable DMA-BUF fd; this capture path "
             "returned pixels only (no exportable dma-buf)");
         drmtap_frame_release(ctx, frame);
+        ctx->grab_plane_id = plane_before;
         return -ENOTSUP;
     }
     /* Snapshot the full descriptor. The plane layout and HDR state are cached
