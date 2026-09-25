@@ -8,7 +8,7 @@ could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
 ## [0.5.8] - 2026-09-25
 
-### Added: `drmtap_plane_rotation()`, the plane's `rotation` property
+### Added: `drmtap_plane_rotation()`, the rotation property of the plane
 
 A captured frame is upright only when the compositor rotated the output in hardware:
 then the framebuffer holds the logical desktop and the plane turns it on scanout
