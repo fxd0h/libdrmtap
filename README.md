@@ -83,6 +83,7 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 | Mapped RGBA output | ✅ Verified |
 | Continuous capture (polling loop) | ✅ Verified |
 | Cursor capture (position + pixels) | ✅ Verified on bare metal (amdgpu, i915) and on a para-virtualized driver (needs 0.5.4 there — see Known Limitations). Hotspot provenance (`drmtap_cursor_hotspot_valid()`, 0.5.6) verified in all three of its states: absent on i915, present on virtio-gpu, unavailable through a pre-0.5.6 helper |
+| Plane rotation (`drmtap_plane_rotation()`, 0.5.8) | ✅ Verified on i915 (mutter rotates 180 in hardware: `rotate-180`), on amdgpu with KWin (software rotation: `rotate-0`, scanout upside down) and on appletbdrm (no property: `-ENOTSUP`) |
 | Privileged helper (setcap, no root) | ✅ Verified |
 | Security hardening (cap drop + seccomp) | ✅ Implemented |
 | EGL/GLES2 GPU-universal detiling | ✅ Implemented (primary, all GPUs) |
