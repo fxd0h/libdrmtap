@@ -374,8 +374,9 @@ impl DrmTap {
     /// `Some(mask)` carries exactly one of `0x1` (0), `0x2` (90), `0x4` (180) or
     /// `0x8` (270), possibly with `0x10`/`0x20` for a reflection. `None` means the
     /// plane has no `rotation` property, so the compositor can only have rotated
-    /// in software: treat it as 0. A frame has to be turned back by the output
-    /// transform MINUS this rotation; see `drmtap_plane_rotation()` in the header.
+    /// in software: treat it as 0. A frame from a plane that rotated or reflected
+    /// (anything but `0x1`) is left alone; one from a plane at `0x1` is turned back by
+    /// the whole output transform. See `drmtap_plane_rotation()` in the header.
     ///
     /// Available since 0.5.8.
     pub fn plane_rotation(&mut self) -> Result<Option<u32>> {

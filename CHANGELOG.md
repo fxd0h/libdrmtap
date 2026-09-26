@@ -18,7 +18,10 @@ compositor draws the framebuffer already turned, so the capture comes out upside
 at 180 and sideways at 90/270 (measured on virtio-gpu with a test pattern). `wl_output`
 cannot tell the two apart and neither can the frame. This call answers it from the
 kernel: the DRM rotation bitmask, or `-ENOTSUP` when the property does not exist,
-which a consumer treats as 0. Turn the frame by (output transform - plane rotation).
+which a consumer treats as rotate-0. A frame from a plane that rotated or reflected is left
+alone; one from a plane at rotate-0 is turned by the whole output transform. The two are not
+subtracted: the compositor programs the plane from the CRTC transform, which also folds in
+the panel orientation that `wl_output` does not carry.
 `DrmTap::plane_rotation()` in the safe wrapper returns `Option<u32>`.
 
 It answers for the plane the last grab produced a frame from (do_grab and the fast path
