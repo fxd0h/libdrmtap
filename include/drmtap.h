@@ -607,8 +607,12 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  * When the plane cannot (virtio-gpu, vmwgfx: no `rotation` property at all) the
  * compositor draws the framebuffer already turned, so the capture comes out sideways or
  * upside down and the consumer has to turn it back by the output transform. `wl_output`
- * cannot tell the two apart; this property can. A consumer turns the frame by
- * (output transform - plane rotation).
+ * cannot tell the two apart; this property can. A consumer leaves the frame alone when the
+ * plane rotated or reflected it (anything but DRM_MODE_ROTATE_0), and turns it by the whole
+ * output transform when the plane is at DRM_MODE_ROTATE_0 or has no such property. The two
+ * are not subtracted: a compositor programs the plane from the CRTC transform, which also
+ * folds in the panel orientation of the connector, and `wl_output` does not carry that
+ * (read from the mutter source, not measured).
  *
  * Answers for the plane the last grab read its framebuffer from (before any grab: the
  * plane a grab would use), so the rotation belongs to the same plane as the frame. Read
