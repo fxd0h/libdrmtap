@@ -296,8 +296,9 @@ A self-contained example of the crate-based backend, which does link
 # Unit tests (no hardware needed)
 meson test -C build --suite unit
 
-# Integration tests (needs DRM device)
-sudo DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
+# Integration tests (need a DRM device; CONTRIBUTING.md has which card they open
+# and when the capture test really grabs)
+meson test -C build --suite integration
 ```
 
 ### Environment variables
@@ -357,7 +358,7 @@ Every existing project is either a complete application, a plugin, or PipeWire-b
 │      (RustDesk, Sunshine, VNC, custom)          │
 ├─────────────────────────────────────────────────┤
 │              libdrmtap.h                        │
-│          Public API — ~20 functions             │
+│          Public API — 27 functions              │
 ├─────────────────────────────────────────────────┤
 │                                                 │
 │  ┌────────────┐  ┌─────────┐  ┌──────────────┐  │
@@ -410,7 +411,7 @@ libdrmtap uses a **dual-path** approach for GPU-tiled framebuffers:
 
   That live position is what makes the hotspot recoverable, and it is why there are two ways out on bare metal rather than one:
 
-  - **Measure it**, if the consumer injects the pointer itself (remote desktop, test automation). It knows where it put the pointer, the plane sits at that point minus the hotspot, so once both settle `hotspot = injected_position - plane_position` — mind the coordinate spaces, the plane is in the CRTC's physical pixels while an injected point is usually in the compositor's logical layout. RustDesk does this in [rustdesk/rustdesk#15897](https://github.com/rustdesk/rustdesk/pull/15897).
+  - **Measure it**, if the consumer injects the pointer itself (remote desktop, test automation). It knows where it put the pointer, the plane sits at that point minus the hotspot, so once both settle `hotspot = injected_position - plane_position` — mind the coordinate spaces, the plane is in the CRTC's physical pixels while an injected point is usually in the compositor's logical layout. RustDesk does this in [rustdesk/rustdesk#16122](https://github.com/rustdesk/rustdesk/pull/16122).
   - **Approximate it from the image** (top-left of an arrow's bounding box, centre of a tall/narrow I-beam) when there is no injected pointer to compare against. Fine for an arrow, and off by roughly half the glyph for a wide centre-hotspot shape: on a horizontal resize arrow the bounding-box guess gave `(4,16)` where the real hotspot was `(26,23)`, i.e. 19 px out horizontally.
 
   Those same hotspot properties are why, since kernel 6.6, a para-virtualized driver (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`) **hides its cursor plane entirely** from a client that has enabled `DRM_CLIENT_CAP_ATOMIC` and has not also enabled `DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT`: the second cap is how a client declares it honors them. libdrmtap needs the atomic cap to read a connector's `CRTC_ID`, so it enables both (since 0.5.4 — before it, the cursor read found no plane on those drivers and reported the cursor hidden forever). The hotspot cap is refused with `EOPNOTSUPP` on bare metal, which is harmless and is also a cheap way to tell the two kinds of driver apart.

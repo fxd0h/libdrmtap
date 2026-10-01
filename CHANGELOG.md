@@ -10,12 +10,13 @@ could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
 ### Added: `drmtap_crtc_refresh()`, the exact refresh of the captured CRTC
 
-`drmtap_display.refresh_hz` is the kernel's `vrefresh`, rounded to whole hertz, so the
-cinema and broadcast rates lose their fraction: 59.94 reads 60, 23.976 reads 24, and
-timings that are not a whole number (1280x1024 at 60.02, a 3840x2160 mode at 29.98)
-read as if they were. A consumer that paces capture to the panel needs the real rate.
+`drmtap_display.refresh_hz` is the whole-hertz `vrefresh` of the mode, so on Linux 5.9
+and later the cinema and broadcast rates lose their fraction: 59.94 reads 60, 23.976
+reads 24, and timings that are not a whole number (1280x1024 at 60.02, a 3840x2160
+mode at 29.98) read as if they were. A consumer that paces capture to the panel needs
+the real rate.
 `drmtap_crtc_refresh(ctx, &num, &den)` returns it as the reduced fraction `num/den`
-hertz, computed from the CRTC's current mode the way the kernel computes vrefresh
+hertz, computed from the current mode of the CRTC the way the kernel computes vrefresh
 (pixel clock over the horizontal and vertical totals, with interlace, doublescan and
 vscan) but not rounded. It is the rate the mode is programmed to: the kernel keeps the
 pixel clock in kHz, so a 1080p "59.94" mode at 148352 kHz reads `148352/2475`
@@ -29,19 +30,19 @@ has no mode (disabled); a CRTC that is only blanked keeps its mode and answers.
 `DrmTap::crtc_refresh()` in the safe wrapper returns `Result<Option<(u64, u64)>>`,
 `None` for a CRTC with no mode.
 
-### Fixed: the wrapper compared errno by its x86 number
-
-`DrmTap::plane_rotation()` (0.5.8) recognised "no rotation property" as `-95`, which is
-`ENOTSUP` on x86 and ARM but not on SPARC, MIPS or PA-RISC, so there a plane without
-the property came back as an `Err` instead of `Ok(None)`. The wrapper now depends on
-`libc` and compares `ENOTSUP` and `ENODATA` by name.
-
 Measured on i915: `60/1` for 1920x1080@60, `6750000/112463` (60.0197 Hz) for
 1280x1024 and `131375/4382` (29.9806 Hz) for 3840x2160@30, matching the mode timings
 in debugfs; `-ENODATA` on a disabled pipe; the auto-selected CRTC on a `crtc_id` 0
 context. The mode-to-fraction step is pure and unit-tested on CEA-861 timings (60,
 59.94, 50, 29.97, 23.976, 119.88, 1080i, doublescan, vscan) and on the widest values
 the mode fields allow.
+
+### Fixed: the wrapper compared errno by its x86 number
+
+`DrmTap::plane_rotation()` (0.5.8) recognised "no rotation property" as `-95`, which is
+`ENOTSUP` on x86 and ARM but not on SPARC, MIPS or PA-RISC, so there a plane without
+the property came back as an `Err` instead of `Ok(None)`. The wrapper now depends on
+`libc` and compares `ENOTSUP` and `ENODATA` by name.
 
 ## [0.5.8] - 2026-09-25
 
@@ -995,7 +996,6 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
-[0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
 [0.5.9]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.9
 [0.5.8]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.8
 [0.5.7]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.7
@@ -1003,6 +1003,7 @@ entry point is additive and would not on its own have justified more than a patc
 [0.5.5]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.5
 [0.5.4]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.4
 [0.5.3]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.3
+[0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
 [0.5.1]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.1
 [0.5.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.0
 [0.4.15]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.15

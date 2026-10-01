@@ -25,10 +25,10 @@ extern "C" {
 /* Version                                                                   */
 /* ========================================================================= */
 
-/* Version of the C library. Kept equal to the libdrmtap-sys crate version
- * (the C sources packaged for Rust are the same code) and to the meson
- * project version; the unit tests cross-check all three. The higher-level
- * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
+/* Version of the C library. Since 0.5.1 the C library, the meson project, the
+ * libdrmtap-sys crate (the same C sources, packaged for Rust) and the libdrmtap
+ * wrapper crate share this one version; tools/check-version.sh verifies every
+ * site. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
 #define DRMTAP_VERSION_PATCH 9
@@ -130,9 +130,9 @@ typedef struct {
     uint32_t y;             /**< Y offset in virtual FB (from CRTC) */
     uint32_t width;         /**< Current mode width in pixels */
     uint32_t height;        /**< Current mode height in pixels */
-    uint32_t refresh_hz;    /**< Vertical refresh, the kernel's whole-hertz vrefresh:
-                                 59.94 reads 60. drmtap_crtc_refresh() has the
-                                 exact rate */
+    uint32_t refresh_hz;    /**< Vertical refresh, the mode's whole-hertz
+                                 vrefresh: on Linux 5.9 and later 59.94 reads
+                                 60. drmtap_crtc_refresh() has the exact rate */
     int active;             /**< 1 = display is on, 0 = disabled */
 } drmtap_display;
 

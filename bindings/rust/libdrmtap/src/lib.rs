@@ -396,8 +396,10 @@ impl DrmTap {
     /// and a 23.976 Hz one `(296704, 12375)`, where [`Display::refresh_hz`] reads
     /// 60 and 24. No connector probe: once the CRTC is known it is one mode read, so
     /// it can be called again to follow a mode change. `None` when the CRTC has no
-    /// mode (disabled); an `Err` when it cannot be read. See `drmtap_crtc_refresh()`
-    /// in the header.
+    /// mode (disabled); an `Err` when it cannot be read. On a context opened with
+    /// `crtc_id` 0 the first call picks the CRTC a grab would pick, and with no CRTC to
+    /// pick that is an `Err` (ENOENT), not `None`. See `drmtap_crtc_refresh()` in the
+    /// header.
     ///
     /// Available since 0.5.9.
     pub fn crtc_refresh(&mut self) -> Result<Option<(u64, u64)>> {
@@ -687,7 +689,7 @@ impl Drop for Cursor {
     }
 }
 
-/// Get the library version as a packed integer: `(major << 16) | (minor << 8) | patch`
+/// The C library's version as `(major, minor, patch)`, unpacked from `drmtap_version()`.
 pub fn version() -> (u8, u8, u8) {
     let v = unsafe { ffi::drmtap_version() } as u32;
     ((v >> 16) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)

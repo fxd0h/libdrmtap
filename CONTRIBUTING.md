@@ -126,6 +126,12 @@ meson test -C build --suite integration
 # DRM_DEVICE the library auto-detects the card driving the MOST active CRTCs,
 # which can be the wrong one on a multi-GPU system:
 DRM_DEVICE=/dev/dri/card0 ./build/test_capture
+
+# test_capture can pass without grabbing a frame, so read its output: it prints
+# SKIP when the card has no connected display, and PASS on -EACCES (no
+# CAP_SYS_ADMIN and no working drmtap-helper) or on -ENODEV (no active plane, e.g.
+# vkms with no compositor). As root, DRM_DEVICE is ignored and the library picks
+# the card driving the most active CRTCs.
 ```
 
 Running the suites under the sanitizer build (`build-asan` above) is the recommended pre-submit check.

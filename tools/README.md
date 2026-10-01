@@ -16,8 +16,9 @@ tools/set-version.sh X.Y.Z   # stamp all version sites at once
 tools/sync-crate.sh          # if any C source changed: refresh the crate's csrc/
 tools/check-version.sh       # verify everything agrees (CI runs this too)
 git commit -am "release: X.Y.Z"
-# publish sys first, then the wrapper if it changed:
+# publish sys first, then the wrapper (same version, every release):
 (cd bindings/rust && cargo publish -p libdrmtap-sys)
+(cd bindings/rust && cargo publish -p libdrmtap)
 ```
 
 `major` in the version is also the `.so` soversion / ABI major — bump it only on

@@ -218,6 +218,8 @@ tests/
 ├── test_deswizzle.c      # Tiling format conversion (unit, no GPU)
 ├── test_connector_names.c # Connector naming
 ├── test_convert.c        # Pixel conversion paths
+├── test_cursor.c         # Cursor helper-fallback classification (unit)
+├── test_refresh.c        # Exact CRTC refresh fraction (unit, no GPU)
 ├── test_hdr.c            # HDR metadata
 ├── test_outbuf.c         # Output buffer growth and caps
 ├── test_scanout.c        # Scanout geometry
@@ -227,20 +229,17 @@ tests/
 ### Running Tests
 
 ```bash
-# Unit tests (no hardware needed): formats, deswizzle, helper
+# Unit tests (no hardware needed)
 meson test -C build --suite unit
 
-# Integration tests (need a DRM device): enumerate, capture
-# vkms gives a synthetic scanout for CI-friendly testing
+# Integration tests (need a DRM device): enumerate, capture. CONTRIBUTING.md has
+# which card they open and when the capture test really grabs.
 sudo modprobe vkms
-DRM_DEVICE=/dev/dri/card1 meson test -C build --suite integration
-
-# Same integration suite against real hardware (Intel/Nvidia/AMD/virtio)
-DRM_DEVICE=/dev/dri/card0 meson test -C build --suite integration
+meson test -C build --suite integration
 ```
 
 There are two suites only: `unit` and `integration`. There is no separate
-`gpu` suite — point the integration suite at a real GPU via `DRM_DEVICE`.
+`gpu` suite.
 
 ### Writing Tests
 
@@ -409,7 +408,7 @@ libdrmtap/
 │   ├── test_formats.c      ← unit suite
 │   ├── test_helper.c       ← unit suite
 │   ├── test_deswizzle.c    ← unit suite
-│   ├── ...                 ← six more unit suites, see the Testing section
+│   ├── ...                 ← eight more unit suites, see the Testing section
 │   └── lsan.supp           ← LeakSanitizer suppressions
 ├── examples/
 │   ├── screenshot.c        ← Capture one frame → PPM on stdout
