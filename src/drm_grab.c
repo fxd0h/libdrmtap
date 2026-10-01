@@ -36,6 +36,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -105,7 +106,7 @@ static void close_auxiliary_gem_handles(drmtap_ctx *ctx, const drmModeFB2 *fb2) 
 static int drmtap_force_mmap_fail(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("DRMTAP_FORCE_MMAP_FAIL");
+        const char *e = secure_getenv("DRMTAP_FORCE_MMAP_FAIL");
         v = (e && e[0] == '1') ? 1 : 0;
     }
     return v;
@@ -1696,8 +1697,17 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                 (unsigned long)modifier);
 #ifdef HAVE_EGL
             /* EGL IS compiled in, so the detile was skipped or it failed at
-             * runtime: no dma-buf fd on this path (helper V2 pixel mode), or no
-             * usable render node. Point at that, not at the build. */
+             * runtime: GL is not loaded in a setuid, setgid or file-capability
+             * process; otherwise no dma-buf fd on this path (helper V2 pixel mode),
+             * or no usable render node. Point at that, not at the build. */
+            if (getauxval(AT_SECURE)) {
+                drmtap_set_error(ctx,
+                    "scanout modifier 0x%lx needs a GPU detile, and GL is not loaded "
+                    "in a setuid, setgid or file-capability process: grab through the "
+                    "helper from an unprivileged process instead",
+                    (unsigned long)modifier);
+                return -ENOTSUP;
+            }
             drmtap_set_error(ctx,
                 "scanout modifier 0x%lx needs a GPU detile, and the EGL detile "
                 "this build carries was unavailable or failed: no dma-buf fd on "

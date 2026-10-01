@@ -46,7 +46,10 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
   the headers are a build requirement and those two shared libraries are a
   RUNTIME requirement on the target (`libegl1` and `libgles2` on Debian/Ubuntu).
   Without them the EGL detile is unavailable and only the CPU paths remain,
-  which do not cover every scanout.
+  which do not cover every scanout. Since 0.5.10 the library
+  never loads them in a setuid, setgid or file-capability process, so there the
+  EGL detile is unavailable too: grab through the helper from an unprivileged
+  process instead.
 
 The build also compiles the privileged `drmtap-helper` binary from the same
 embedded sources, with exploit-mitigation hardening (stack-protector-strong,

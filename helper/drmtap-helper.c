@@ -993,8 +993,9 @@ int main(int argc, char *argv[]) {
 
     /* The device path comes solely from argv[1] -- the value the library selected
      * and passed. A CAP_SYS_ADMIN process must not take device selection from the
-     * environment (the library itself ignores DRM_DEVICE when privileged, since
-     * 0.4.11), so DRM_DEVICE is deliberately NOT honored here. */
+     * environment (the library ignores DRM_DEVICE for root since 0.4.11 and for a
+     * setuid, setgid or file-capability binary since 0.5.10), so DRM_DEVICE is
+     * deliberately NOT honored here. */
 
     /* The device path is attacker-influenceable (argv / DRM_DEVICE) and we run
      * with CAP_SYS_ADMIN, so refuse anything that does not canonicalize under

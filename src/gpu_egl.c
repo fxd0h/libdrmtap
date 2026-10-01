@@ -48,6 +48,7 @@
 #ifdef HAVE_EGL
 
 #include <dlfcn.h>
+#include <sys/auxv.h>
 #include <sys/stat.h>
 
 #include <EGL/egl.h>
@@ -140,6 +141,12 @@ static int g_gl_libs_state; /* 0 = not attempted, 1 = loaded, -1 = failed */
  * but it must stay textually ABOVE them so the pfn_ declarations resolve. */
 static int load_gl_libraries(void) {
     static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    /* -3: not in a setuid, setgid or file-capability process. The GL libraries are
+     * third-party code that reads its own environment variables, and there the
+     * invoking user sets them. */
+    if (getauxval(AT_SECURE)) {
+        return -3;
+    }
     pthread_mutex_lock(&lk);
     if (g_gl_libs_state == 0) {
         /* -1 = the libraries are not here at all (a missing package); -2 = they loaded but a
@@ -662,7 +669,7 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     state->tex_height = 0;
     /* Escape hatch: DRMTAP_NO_IMAGE_CACHE=1 forces a fresh EGLImage import
      * per frame (the pre-0.4.9 behaviour) for debugging driver oddities. */
-    const char *nocache = getenv("DRMTAP_NO_IMAGE_CACHE");
+    const char *nocache = secure_getenv("DRMTAP_NO_IMAGE_CACHE");
     state->cache_disabled = (nocache && nocache[0] == '1');
     state->initialized = 1;
     /* Register the thread-exit backstop so a capture thread that dies without
@@ -1006,7 +1013,7 @@ int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
     /* Escape hatch: DRMTAP_NO_EGL=1 forces the CPU deswizzle/convert path (used
      * to exercise or debug it, and by the convert tests/fuzzer which target the
      * untrusted-descriptor handling that lives on the CPU side). */
-    const char *no_egl = getenv("DRMTAP_NO_EGL");
+    const char *no_egl = secure_getenv("DRMTAP_NO_EGL");
     if (no_egl && no_egl[0] == '1') {
         return 0;
     }

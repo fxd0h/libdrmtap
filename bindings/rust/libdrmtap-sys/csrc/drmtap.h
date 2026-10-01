@@ -31,7 +31,7 @@ extern "C" {
  * site. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 9
+#define DRMTAP_VERSION_PATCH 10
 
 /**
  * @brief Get the library version as a packed integer.
@@ -79,7 +79,9 @@ typedef struct {
      *  one of the six. The only way to not have the list is to build with
      *  -Dhelper=disabled, which compiles the fork/exec path out of the library
      *  entirely - no fork, exec or socketpair symbol is left in the .so - and
-     *  is what a consumer that already holds CAP_SYS_ADMIN should do.
+     *  is what a consumer that already holds CAP_SYS_ADMIN as root should do
+     *  (since 0.5.10 a setuid, setgid or file-capability binary loads no GL, so
+     *  it gets no EGL detile in-process).
      *
      *  Note for anyone who read an older header: it listed $DRMTAP_HELPER_PATH
      *  and <exe_dir>/drmtap-helper. Neither was ever implemented - the
@@ -90,7 +92,8 @@ typedef struct {
     const char *helper_path;
 
     /** Enable debug logging to stderr.
-     *  Can also be enabled with DRMTAP_DEBUG=1 env var. */
+     *  Can also be enabled with DRMTAP_DEBUG=1 env var, except in a setuid,
+     *  setgid or file-capability binary (read with secure_getenv()). */
     int debug;
 } drmtap_config;
 

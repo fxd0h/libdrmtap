@@ -61,4 +61,5 @@ The upstream PR above has the full, current backend.
 - Linux with DRM/KMS (kernel 4.20+ for the tiled/modifier framebuffer path —
   Ubuntu 20.04+; linear/VM framebuffers work on older kernels)
 - `CAP_SYS_ADMIN` or the `drmtap-helper` setcap binary for GPU access (the helper
-  is built automatically by `libdrmtap-sys`)
+  is built automatically by `libdrmtap-sys`). A file capability on the consumer
+  binary itself gets no GPU detile since 0.5.10

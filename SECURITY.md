@@ -77,8 +77,9 @@ At startup, in this order (`main()` in `helper/drmtap-helper.c`):
 2. **Restricts the device path** — the device comes solely from `argv[1]` (the
    path the library selected). The helper does not read `DRM_DEVICE` from the
    environment (0.4.14 hardening), and the library itself ignores `DRM_DEVICE`
-   when privileged (since 0.4.11), so an env var cannot redirect which device the
-   privileged process opens. The still attacker-influenceable `argv[1]` is
+   for root (since 0.4.11) and for a setuid, setgid or file-capability binary
+   (since 0.5.10), but the helper opens the path the unprivileged library picked,
+   which can come from `DRM_DEVICE`. That attacker-influenceable `argv[1]` is
    canonicalized with `realpath()`, and the helper **refuses any path that does
    not resolve under `/dev/dri/`** before opening it.
 3. **`PR_SET_NO_NEW_PRIVS`** — set via `prctl`, before seccomp; hard-fails if it
@@ -246,6 +247,7 @@ Do not read the above as more locked down than it is:
 | Helper runs unconfined if hardening fails | Hard-fails: refuses to serve if cap-drop or seccomp cannot be established |
 | Third party intercepts frames or connects to the helper | Anonymous inherited socketpair, not discoverable, no listening socket |
 | Replacing the helper binary | setcap xattrs are cleared by the kernel on file modification; re-applying needs root |
+| A setuid, setgid or file-capability consumer steered through the environment of whoever runs it | Since 0.5.10 the library reads `DRM_DEVICE` and its `DRMTAP_*` variables with `secure_getenv()` and loads no GL libraries in such a process, so it gets no EGL detile there |
 
 ### NOT protected against
 

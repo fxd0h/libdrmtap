@@ -109,7 +109,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   `libGLESv2.so.2` on first use, so the build needs their headers and **the
   target needs those runtime libraries** (`libegl1` and `libgles2` on
   Debian/Ubuntu). Without them the EGL detile is unavailable and only the CPU
-  paths remain, which do not cover every scanout. The crate
+  paths remain, which do not cover every scanout. Since 0.5.10 the library
+  never loads them in a setuid, setgid or file-capability process, so there the
+  EGL detile is unavailable too: grab through the helper from an unprivileged
+  process instead. The crate
   compiles its embedded C sources statically, so there is no system `libdrmtap`
   install required
 - For unprivileged capture: `drmtap-helper`, which `libdrmtap-sys` always builds

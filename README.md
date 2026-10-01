@@ -305,11 +305,13 @@ meson test -C build --suite integration
 
 | Variable | Effect |
 |---|---|
-| `DRM_DEVICE` | DRM node to open (e.g. `/dev/dri/card0`). **Ignored for privileged (root / `CAP_SYS_ADMIN`) callers** — a privileged capture service uses its configured `device_path` or the KMS auto-scan, so the environment cannot redirect which device it opens. Honored only for unprivileged runs. |
+| `DRM_DEVICE` | DRM node to open (e.g. `/dev/dri/card0`). **Ignored for privileged callers** (root, or a setuid, setgid or file-capability binary) — a privileged capture service uses its configured `device_path` or the KMS auto-scan, so the environment cannot redirect which device it opens. Honored only for unprivileged runs. |
 | `DRMTAP_DEBUG` | Set to `1` for verbose debug logging on stderr. |
 | `DRMTAP_NO_EGL` | Set to `1` to force the CPU deswizzle/convert path (skip EGL/GLES). |
 | `DRMTAP_NO_IMAGE_CACHE` | Set to `1` to re-import the `EGLImage` every frame (disable the import-once cache). |
 | `DRMTAP_FORCE_MMAP_FAIL` | Test hook — set to `1` to force the fast-path CPU mmap to fail so the EGL-detile fallback runs. |
+
+A setuid, setgid or file-capability binary ignores all of these: the library reads them with `secure_getenv()`.
 
 The privilege model is described in [`SECURITY.md`](SECURITY.md).
 

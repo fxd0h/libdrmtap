@@ -6,6 +6,33 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.10] - 2026-10-01
+
+### Security: a setuid, setgid or file-capability binary ignores the environment and loads no GL
+
+When the library picks the card itself (no `device_path` in the config), it read
+`DRM_DEVICE` whenever the process was not root. A program that holds `CAP_SYS_ADMIN`
+through file capabilities, is setuid to a user other than root, or is setgid, runs
+with an environment the invoking user sets, so that user could choose which node it
+opens. The library now reads `DRM_DEVICE` and its own `DRMTAP_*` variables with
+`secure_getenv()`, which returns nothing in a setuid (root or not), setgid or
+file-capability binary. Root was already covered for `DRM_DEVICE` (0.4.11). A program
+can still turn on logging with `drmtap_config.debug`.
+
+In such a binary the library also no longer loads the GL libraries for the EGL detile:
+they are third-party code that reads its own environment variables. Grabs there take
+the paths of a build without EGL: a CPU deswizzle where one exists, a fail-closed error
+where none does (measured on i915: -ENOTSUP, with an error that names the cause), and a
+framebuffer that states no modifier is read as linear. 0.5.9 detiled in that process.
+A consumer that needs the detile runs unprivileged and grabs through the helper, which
+loads no GL. A process that runs as root without a setuid bit is unchanged.
+
+The README said `DRM_DEVICE` is ignored for "root / `CAP_SYS_ADMIN`" callers; it now
+names the cases the code covers. SECURITY.md said the variable cannot redirect which
+device the helper opens; in the helper model it can, because the helper opens the path
+the unprivileged library picked, and the helper still refuses anything outside
+`/dev/dri/`.
+
 ## [0.5.9] - 2026-10-01
 
 ### Added: `drmtap_crtc_refresh()`, the exact refresh of the captured CRTC
@@ -996,6 +1023,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.10]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.10
 [0.5.9]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.9
 [0.5.8]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.8
 [0.5.7]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.7

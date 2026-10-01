@@ -104,11 +104,12 @@ static int open_drm_auto(drmtap_ctx *ctx) {
      * capture service (root / effective-root, e.g. the unattended --service)
      * must not let an attacker-influenceable environment variable redirect which
      * device it opens; it relies on the explicit config device_path or the KMS
-     * auto-scan below instead. DRM_DEVICE stays honored for unprivileged test /
-     * dev runs. */
+     * auto-scan below instead. secure_getenv() also hides it from a setuid, setgid
+     * or file-capability binary, whose environment the invoking user controls.
+     * DRM_DEVICE stays honored for unprivileged test / dev runs. */
     const char *env_dev = NULL;
     if (getuid() != 0 && geteuid() != 0) {
-        env_dev = getenv("DRM_DEVICE");
+        env_dev = secure_getenv("DRM_DEVICE");
     }
     if (env_dev) {
         drmtap_debug_log(ctx, "trying DRM_DEVICE=%s", env_dev);
@@ -292,7 +293,7 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
     }
 
     /* Check DRMTAP_DEBUG env var */
-    const char *dbg_env = getenv("DRMTAP_DEBUG");
+    const char *dbg_env = secure_getenv("DRMTAP_DEBUG");
     if (dbg_env && dbg_env[0] == '1') {
         ctx->debug = 1;
     }
@@ -302,7 +303,7 @@ drmtap_ctx *drmtap_open(const drmtap_config *config) {
                      DRMTAP_VERSION_PATCH, getpid(), getuid());
 
     /* Open DRM device */
-    drmtap_debug_log(ctx, "device_path=[%s] DRM_DEVICE=[%s]", ctx->device_path, getenv("DRM_DEVICE") ? getenv("DRM_DEVICE") : "(null)");
+    drmtap_debug_log(ctx, "device_path=[%s]", ctx->device_path);
     if (ctx->device_path[0]) {
         /* Explicit device path */
         ctx->drm_fd = open(ctx->device_path, O_RDWR | O_CLOEXEC);
@@ -661,7 +662,7 @@ drmtap_ctx *drmtap_open_render(const char *render_node) {
         ctx->fast_slots[i].prime_fd = -1;
     }
 
-    const char *dbg_env = getenv("DRMTAP_DEBUG");
+    const char *dbg_env = secure_getenv("DRMTAP_DEBUG");
     if (dbg_env && dbg_env[0] == '1') {
         ctx->debug = 1;
     }
