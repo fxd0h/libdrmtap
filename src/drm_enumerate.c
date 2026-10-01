@@ -65,6 +65,40 @@ static const char *const connector_type_names[] = {
 #endif
 };
 
+static uint64_t refresh_gcd(uint64_t a, uint64_t b) {
+    while (b != 0) {
+        uint64_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+/* drm_mode_vrefresh() of the kernel as an exact fraction instead of whole hertz: the
+ * same pixel clock over the same totals, with interlace, doublescan and vscan, reduced.
+ * A 59.94 Hz 1080p mode (clock 148352 kHz) reads 148352/2475 and 1280x1024 at
+ * 108000 kHz reads 6750000/112463 (60.02 Hz), where vrefresh reads 60 for both. */
+int drmtap_mode_refresh(const drmModeModeInfo *mode, uint64_t *num, uint64_t *den) {
+    if (!mode || !num || !den || mode->clock == 0 || mode->htotal == 0 || mode->vtotal == 0) {
+        return -EINVAL;
+    }
+    uint64_t n = (uint64_t)mode->clock * 1000u; /* kHz -> Hz */
+    uint64_t d = (uint64_t)mode->htotal * mode->vtotal;
+    if (mode->flags & DRM_MODE_FLAG_INTERLACE) {
+        n *= 2;
+    }
+    if (mode->flags & DRM_MODE_FLAG_DBLSCAN) {
+        d *= 2;
+    }
+    if (mode->vscan > 1) {
+        d *= mode->vscan;
+    }
+    uint64_t g = refresh_gcd(n, d);
+    *num = n / g;
+    *den = d / g;
+    return 0;
+}
+
 const char *drmtap_connector_type_name(uint32_t connector_type) {
     if (connector_type < sizeof(connector_type_names) / sizeof(*connector_type_names)
         && connector_type_names[connector_type]) {

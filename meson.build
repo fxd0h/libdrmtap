@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('libdrmtap', 'c',
-    version: '0.5.8',
+    version: '0.5.9',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -367,6 +367,11 @@ test_connector_names = executable('test_connector_names',
     dependencies: [libdrmtap_test_dep, libdrm_dep],
     include_directories: lib_include,
 )
+test_refresh = executable('test_refresh',
+    'tests/test_refresh.c',
+    dependencies: [libdrmtap_test_dep, libdrm_dep],
+    include_directories: lib_include,
+)
 # Wire-protocol tests are self-contained (socketpair + fake peer, no DRM, no
 # libdrmtap link): they guard the helper IPC's fd-access-mode / CLOEXEC /
 # ancillary-truncation / fixed-frame-reassembly invariants.
@@ -384,6 +389,7 @@ test('hdr', test_hdr, suite: 'unit')
 test('wire', test_wire, suite: 'unit')
 test('convert', test_convert, suite: 'unit')
 test('connector_names', test_connector_names, suite: 'unit')
+test('refresh', test_refresh, suite: 'unit')
 test('cursor', test_cursor, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)

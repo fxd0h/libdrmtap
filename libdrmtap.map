@@ -33,6 +33,7 @@
         drmtap_error;
         drmtap_gpu_driver;
         drmtap_plane_rotation;
+        drmtap_crtc_refresh;
         drmtap_drm_fd;
         drmtap_set_output_buffer;
         drmtap_deswizzle;

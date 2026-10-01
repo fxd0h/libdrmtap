@@ -431,4 +431,10 @@ uint32_t drmtap_scanout_width_of(uint32_t fb_width,
  * Pure, so the whole table is testable without the matching hardware. */
 const char *drmtap_connector_type_name(uint32_t connector_type);
 
+/* Refresh of a mode in hertz as the exact reduced fraction *num / *den, computed like the
+ * kernel's drm_mode_vrefresh() but not rounded to whole hertz. -EINVAL for a mode with no
+ * clock or totals. Pure, so it is unit-tested. */
+struct _drmModeModeInfo; /* drmModeModeInfo, from xf86drmMode.h */
+int drmtap_mode_refresh(const struct _drmModeModeInfo *mode, uint64_t *num, uint64_t *den);
+
 #endif /* DRMTAP_INTERNAL_H */

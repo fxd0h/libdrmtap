@@ -391,6 +391,27 @@ impl DrmTap {
         }
     }
 
+    /// The exact refresh of the captured CRTC, in hertz, as the reduced fraction
+    /// `(num, den)` of its current mode: a 59.94 Hz 1080p mode reads `(148352, 2475)`
+    /// and a 23.976 Hz one `(296704, 12375)`, where [`Display::refresh_hz`] reads
+    /// 60 and 24. No connector probe: once the CRTC is known it is one mode read, so
+    /// it can be called again to follow a mode change. `None` when the CRTC has no
+    /// mode (disabled); an `Err` when it cannot be read. See `drmtap_crtc_refresh()`
+    /// in the header.
+    ///
+    /// Available since 0.5.9.
+    pub fn crtc_refresh(&mut self) -> Result<Option<(u64, u64)>> {
+        let (mut num, mut den) = (0u64, 0u64);
+        let rc = unsafe { ffi::drmtap_crtc_refresh(self.ctx, &mut num, &mut den) };
+        if rc == 0 {
+            Ok(Some((num, den)))
+        } else if rc == -61 {
+            Ok(None)
+        } else {
+            check(self.ctx, rc).map(|_| None)
+        }
+    }
+
     /// Get the cursor state (position, image, visibility).
     pub fn get_cursor(&mut self) -> Result<Cursor> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_cursor_info>() };

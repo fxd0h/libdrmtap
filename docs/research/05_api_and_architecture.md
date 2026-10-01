@@ -185,6 +185,12 @@ void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
  * already turned it on scanout: that frame is left alone. */
 int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation);
 
+/* 0.5.9: the exact refresh of the captured CRTC in hertz, as the reduced fraction
+ * *num / *den of its current mode, so 59.94 and 23.976 keep their value where
+ * drmtap_display.refresh_hz rounds to 60 and 24. No connector probe: once the CRTC
+ * is known it is one GETCRTC. -ENODATA when the CRTC has no mode (disabled). */
+int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den);
+
 // --- Display Hotplug Detection (v1) ---
 // Call after drmtap_grab*() returns -ENODEV or periodically to detect changes.
 // Returns 1 if display configuration changed since last call, 0 if unchanged.

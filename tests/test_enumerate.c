@@ -14,8 +14,11 @@
  * Run with: DRM_DEVICE=/dev/dri/card1 ./test_enumerate
  */
 
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "drmtap.h"
 
@@ -85,6 +88,55 @@ static void test_list_displays(void) {
     printf("  PASS: list_displays\n");
 }
 
+/* The exact refresh, rounded the kernel's way, is the vrefresh the enumeration reports
+ * for an active display: the fraction only adds the precision vrefresh drops. */
+static void test_crtc_refresh(void) {
+    drmtap_ctx *ctx = drmtap_open(NULL);
+    TEST_ASSERT(ctx != NULL);
+    drmtap_display displays[8];
+    int n = drmtap_list_displays(ctx, displays, 8);
+    drmtap_close(ctx);
+
+    uint64_t num = 0, den = 0;
+    TEST_ASSERT(drmtap_crtc_refresh(NULL, &num, &den) == -EINVAL);
+
+    int checked = 0;
+    for (int i = 0; i < n && i < 8; i++) {
+        if (!displays[i].active || displays[i].crtc_id == 0) {
+            continue;
+        }
+        drmtap_config cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.crtc_id = displays[i].crtc_id;
+        drmtap_ctx *c = drmtap_open(&cfg);
+        TEST_ASSERT(c != NULL);
+        TEST_ASSERT(drmtap_crtc_refresh(c, NULL, &den) == -EINVAL);
+        int rc = drmtap_crtc_refresh(c, &num, &den);
+        drmtap_close(c);
+        TEST_ASSERT(rc == 0 && den != 0);
+        /* Since Linux 5.9 GETCRTC's vrefresh is the kernel's rounded value. Before it the
+         * kernel echoed what userspace set: 0 or a truncated rate under Xorg. */
+        uint32_t hz = displays[i].refresh_hz;
+        TEST_ASSERT(hz == 0 || (num + den / 2) / den == hz || num / den == hz);
+        printf("    [%d] %s: %llu/%llu Hz = %.6f (vrefresh %u)\n", i, displays[i].name,
+               (unsigned long long)num, (unsigned long long)den, (double)num / (double)den,
+               displays[i].refresh_hz);
+        checked++;
+    }
+    if (checked == 0) {
+        printf("  SKIP: crtc_refresh (no active display)\n");
+        return;
+    }
+    /* A crtc_id 0 context picks a CRTC on the first call and keeps it on the next. */
+    drmtap_ctx *a = drmtap_open(NULL);
+    TEST_ASSERT(a != NULL);
+    uint64_t n1 = 0, d1 = 0, n2 = 0, d2 = 0;
+    TEST_ASSERT(drmtap_crtc_refresh(a, &n1, &d1) == 0 && d1 != 0);
+    TEST_ASSERT(drmtap_crtc_refresh(a, &n2, &d2) == 0 && n2 == n1 && d2 == d1);
+    drmtap_close(a);
+    printf("  PASS: crtc_refresh on %d display(s)\n", checked);
+}
+
 static void test_close_null(void) {
     drmtap_close(NULL);   /* must not crash */
     printf("  PASS: close(NULL) safe\n");
@@ -105,6 +157,7 @@ int main(void) {
     test_close_null();
     test_error_null();
     test_list_displays();
+    test_crtc_refresh();
     printf("All enumeration tests passed!\n");
     return 0;
 }

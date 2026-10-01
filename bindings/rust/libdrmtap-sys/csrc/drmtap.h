@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 8
+#define DRMTAP_VERSION_PATCH 9
 
 /**
  * @brief Get the library version as a packed integer.
@@ -130,7 +130,9 @@ typedef struct {
     uint32_t y;             /**< Y offset in virtual FB (from CRTC) */
     uint32_t width;         /**< Current mode width in pixels */
     uint32_t height;        /**< Current mode height in pixels */
-    uint32_t refresh_hz;    /**< Vertical refresh rate */
+    uint32_t refresh_hz;    /**< Vertical refresh, the kernel's whole-hertz vrefresh:
+                                 59.94 reads 60. drmtap_crtc_refresh() has the
+                                 exact rate */
     int active;             /**< 1 = display is on, 0 = disabled */
 } drmtap_display;
 
@@ -632,6 +634,37 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  *         Added in 0.5.8.
  */
 int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation);
+
+/**
+ * @brief Exact refresh rate of the CRTC this context captures, as a fraction.
+ *
+ * The refresh in hertz is *num / *den, reduced. It is computed from the CRTC's
+ * current mode the way the kernel computes vrefresh (pixel clock over the
+ * horizontal and vertical totals, with interlace, doublescan and vscan) but is
+ * not rounded to whole hertz, so cinema and broadcast rates keep their value:
+ * a 1080p mode programmed at 148352 kHz reads 148352/2475 (59.94020 Hz) and one
+ * at 74176 kHz with a 2750 total 296704/12375 (23.97608 Hz), where
+ * drmtap_display.refresh_hz reads 60 and 24. This is the rate the mode is
+ * programmed to; the kernel stores the pixel clock in kHz, so it can differ from
+ * the nominal 60000/1001 or 24000/1001 by a few parts per million.
+ *
+ * No connector is probed: once the CRTC is known it is one
+ * DRM_IOCTL_MODE_GETCRTC, so it is cheap to call again to follow a mode change.
+ * On a context opened with crtc_id 0 the first call (unless a grab ran first)
+ * also picks the CRTC a grab would pick, and keeps that choice. With variable
+ * refresh (VRR) it is the mode's nominal rate, the fastest the panel goes. A
+ * CRTC that is only blanked (DPMS off) keeps its mode and still answers.
+ *
+ * @param ctx Capture context (not a drmtap_open_render() context)
+ * @param num Set to the numerator (hertz) on success
+ * @param den Set to the denominator on success, never 0
+ * @return 0 on success; -EINVAL for a NULL argument; -ENOTSUP for a render-only
+ *         context; -ENOENT when there is no CRTC with a mode to pick (or the
+ *         device resources cannot be read); -ENODATA when the CRTC has no mode
+ *         (disabled) or its mode has no timings; another negative errno if the
+ *         CRTC cannot be read. Added in 0.5.9.
+ */
+int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den);
 
 /**
  * @brief Get the underlying DRM file descriptor.

@@ -230,6 +230,32 @@ static void read_hdr_metadata_direct(drmtap_ctx *ctx, uint32_t crtc_id) {
     }
 }
 
+/* A context opened with crtc_id 0 captures the first CRTC that has a mode. It is chosen
+ * once and kept in ctx->crtc_id, so every later call answers for the same CRTC. */
+static uint32_t select_first_active_crtc(drmtap_ctx *ctx) {
+    drmModeRes *res = drmModeGetResources(ctx->drm_fd);
+    if (!res) {
+        return 0;
+    }
+    uint32_t chosen = 0;
+    for (int i = 0; i < res->count_crtcs && chosen == 0; i++) {
+        drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, res->crtcs[i]);
+        if (!crtc) {
+            continue;
+        }
+        if (crtc->mode_valid) {
+            chosen = crtc->crtc_id;
+        }
+        drmModeFreeCrtc(crtc);
+    }
+    drmModeFreeResources(res);
+    if (chosen != 0) {
+        ctx->crtc_id = chosen;
+        drmtap_debug_log(ctx, "auto-selected CRTC %u", chosen);
+    }
+    return chosen;
+}
+
 // Find the primary plane attached to the target CRTC
 // Returns the plane_id or 0 on failure
 static uint32_t find_primary_plane(drmtap_ctx *ctx) {
@@ -245,23 +271,7 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
 
     /* If no CRTC selected, pick the first active one */
     if (target_crtc == 0) {
-        drmModeRes *res = drmModeGetResources(ctx->drm_fd);
-        if (res) {
-            for (int i = 0; i < res->count_crtcs; i++) {
-                drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, res->crtcs[i]);
-                if (crtc) {
-                    if (crtc->mode_valid) {
-                        target_crtc = crtc->crtc_id;
-                        ctx->crtc_id = target_crtc;
-                        drmtap_debug_log(ctx, "auto-selected CRTC %u", target_crtc);
-                        drmModeFreeCrtc(crtc);
-                        break;
-                    }
-                    drmModeFreeCrtc(crtc);
-                }
-            }
-            drmModeFreeResources(res);
-        }
+        target_crtc = select_first_active_crtc(ctx);
     }
 
     if (target_crtc == 0) {
@@ -323,6 +333,37 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
 
     drmModeFreePlaneResources(planes);
     return result;
+}
+
+/* The exact refresh of the captured CRTC, from its current mode. No connector probe:
+ * once the CRTC is known it is one GETCRTC, so a caller can ask again to follow a
+ * mode change. */
+int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den) {
+    if (!ctx || !num || !den) {
+        return -EINVAL;
+    }
+    if (ctx->is_render_only) {
+        drmtap_set_error(ctx, "crtc refresh: a render-only context has no CRTC");
+        return -ENOTSUP;
+    }
+    uint32_t crtc_id = ctx->crtc_id ? ctx->crtc_id : select_first_active_crtc(ctx);
+    if (crtc_id == 0) {
+        drmtap_set_error(ctx, "crtc refresh: no CRTC with a mode to pick");
+        return -ENOENT;
+    }
+    drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, crtc_id);
+    if (!crtc) {
+        int err = errno ? errno : EIO;
+        drmtap_set_error(ctx, "crtc %u: %s", crtc_id, strerror(err));
+        return -err;
+    }
+    int rc = crtc->mode_valid ? drmtap_mode_refresh(&crtc->mode, num, den) : -ENODATA;
+    drmModeFreeCrtc(crtc);
+    if (rc != 0) {
+        drmtap_set_error(ctx, "crtc %u has no mode with timings", crtc_id);
+        return -ENODATA;
+    }
+    return 0;
 }
 
 /* The DRM "rotation" property of the plane the last grab read from. Read now,
