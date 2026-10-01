@@ -17,6 +17,8 @@ categories = ["multimedia::video", "os::linux-apis"]
 
 [dependencies]
 libdrmtap-sys = { version = "0.5.9", path = "../libdrmtap-sys" }
+# errno values differ by architecture (ENOTSUP is 95 on x86, 45 on SPARC): compare by name.
+libc = "0.2"
 # Optional on purpose: a third-party type in a public signature ties our semver to theirs. See the
 # `drm-fourcc` impl block in lib.rs.
 drm-fourcc = { version = "2.2", optional = true }

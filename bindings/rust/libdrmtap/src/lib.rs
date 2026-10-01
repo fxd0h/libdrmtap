@@ -384,7 +384,7 @@ impl DrmTap {
         let rc = unsafe { ffi::drmtap_plane_rotation(self.ctx, &mut rotation) };
         if rc == 0 {
             Ok(Some(rotation))
-        } else if rc == -95 {
+        } else if rc == -libc::ENOTSUP {
             Ok(None)
         } else {
             check(self.ctx, rc).map(|_| None)
@@ -405,7 +405,7 @@ impl DrmTap {
         let rc = unsafe { ffi::drmtap_crtc_refresh(self.ctx, &mut num, &mut den) };
         if rc == 0 {
             Ok(Some((num, den)))
-        } else if rc == -61 {
+        } else if rc == -libc::ENODATA {
             Ok(None)
         } else {
             check(self.ctx, rc).map(|_| None)

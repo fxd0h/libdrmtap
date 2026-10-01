@@ -29,6 +29,13 @@ has no mode (disabled); a CRTC that is only blanked keeps its mode and answers.
 `DrmTap::crtc_refresh()` in the safe wrapper returns `Result<Option<(u64, u64)>>`,
 `None` for a CRTC with no mode.
 
+### Fixed: the wrapper compared errno by its x86 number
+
+`DrmTap::plane_rotation()` (0.5.8) recognised "no rotation property" as `-95`, which is
+`ENOTSUP` on x86 and ARM but not on SPARC, MIPS or PA-RISC, so there a plane without
+the property came back as an `Err` instead of `Ok(None)`. The wrapper now depends on
+`libc` and compares `ENOTSUP` and `ENODATA` by name.
+
 Measured on i915: `60/1` for 1920x1080@60, `6750000/112463` (60.0197 Hz) for
 1280x1024 and `131375/4382` (29.9806 Hz) for 3840x2160@30, matching the mode timings
 in debugfs; `-ENODATA` on a disabled pipe; the auto-selected CRTC on a `crtc_id` 0
