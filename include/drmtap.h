@@ -765,11 +765,16 @@ int drmtap_set_output_buffer(drmtap_ctx *ctx, void *dst, size_t len);
  * a tiled buffer relabelled linear, reported as a valid frame.
  *
  * @param src        Source (tiled) pixel data
- * @param dst        Destination (linear) buffer (must be allocated by caller)
+ * @param dst        Destination (linear) buffer, allocated by the caller. Row y
+ *                   gets width * 4 bytes at y * dst_stride and the rest of the
+ *                   row is left as it was, so dst can be a rectangle inside a
+ *                   wider image
  * @param width      Frame width in pixels
  * @param height     Frame height in pixels
  * @param src_stride Source stride (bytes per row in tiled data)
- * @param dst_stride Destination stride (bytes per row)
+ * @param dst_stride Destination stride (bytes per row). Pixels are 4 bytes: a
+ *                   layout this decodes fails with -EINVAL, before writing
+ *                   anything, on a stride narrower than width * 4
  * @param modifier   DRM format modifier (e.g., I915_FORMAT_MOD_X_TILED)
  * @param src_size   Size of the source buffer in bytes; reads are bounded by it
  *                   (a scanout whose height is not a tile multiple would

@@ -247,6 +247,11 @@ int drmtap_deswizzle(const void *src, void *dst,
     if (!src || !dst || width == 0 || height == 0) {
         return -EINVAL;
     }
+    /* Every layout decoded below copies 4 bytes per pixel, so a row has to fit the
+     * destination stride: on a narrower one (a 2-byte format) the rows would overlap and
+     * the last one would run past the end of dst. Checked per layout, so one this cannot
+     * decode still answers -ENOTSUP. */
+    const int row_fits = (size_t)width * 4 <= dst_stride;
 
     /*
      * DRM format modifiers (from drm_fourcc.h):
@@ -261,6 +266,9 @@ int drmtap_deswizzle(const void *src, void *dst,
     /* Linear — just memcpy row by row (bounded by src_size; a full row always
      * fits since width*4 <= src_stride, but guard the last rows defensively). */
     if (modifier == 0 /* DRM_FORMAT_MOD_LINEAR */) {
+        if (!row_fits) {
+            return -EINVAL;
+        }
         for (uint32_t y = 0; y < height; y++) {
             size_t row_off = (size_t)y * src_stride;
             if (row_off + (size_t)width * 4 > src_size) {
@@ -283,6 +291,9 @@ int drmtap_deswizzle(const void *src, void *dst,
     if (vendor == DRM_FORMAT_MOD_VENDOR_INTEL) {
         if (mod_type == 0x01) {
             /* I915_FORMAT_MOD_X_TILED */
+            if (!row_fits) {
+                return -EINVAL;
+            }
             return deswizzle_intel_x_tiled(src, dst, width, height,
                                            src_stride, dst_stride, src_size);
         } else if (mod_type == 0x02 || mod_type == 0x03) {
@@ -290,6 +301,9 @@ int drmtap_deswizzle(const void *src, void *dst,
              * I915_FORMAT_MOD_Yf_TILED (0x03)
              *
              * Pure Y-tiled without compression — CPU deswizzle works. */
+            if (!row_fits) {
+                return -EINVAL;
+            }
             return deswizzle_intel_y_tiled(src, dst, width, height,
                                            src_stride, dst_stride, src_size);
         }
@@ -343,6 +357,9 @@ int drmtap_deswizzle(const void *src, void *dst,
      * buffer from a simple driver (virtio, embedded), and copying it row by row is
      * the historical contract of this entry point. Keep it. */
     if (modifier == DRM_FORMAT_MOD_INVALID) {
+        if (!row_fits) {
+            return -EINVAL;
+        }
         for (uint32_t y = 0; y < height; y++) {
             size_t row_off = (size_t)y * src_stride;
             if (row_off + (size_t)width * 4 > src_size) {

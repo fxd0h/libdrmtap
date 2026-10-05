@@ -338,6 +338,61 @@ static void test_deswizzle_bounds_non_tile_multiple(void) {
     printf("  PASS: deswizzle bounds (non-tile-multiple height, zero-filled, no OOB)\n");
 }
 
+static void test_deswizzle_leaves_the_row_padding_alone(void) {
+    /* A 60-pixel row (240 bytes) on a wider pitch: the deswizzle writes 240 bytes of each
+     * destination row and leaves bytes [240, pitch) as they were, so dst can be a rectangle
+     * inside a wider image. */
+    const uint64_t mods[4] = {0, 0x0100000000000001ULL, 0x0100000000000002ULL,
+                              DRM_FORMAT_MOD_INVALID}; /* linear, X, Y, no modifier */
+    const uint32_t pitches[4] = {256, 512, 256, 256};
+    const uint32_t heights[4] = {4, 8, 32, 4};
+    for (int m = 0; m < 4; m++) {
+        uint32_t w = 60, h = heights[m], stride = pitches[m];
+        size_t size = (size_t)stride * h;
+        uint8_t *src = malloc(size);
+        uint8_t *dst = malloc(size);
+        TEST_ASSERT(src && dst);
+        memset(src, 0xCD, size);
+        memset(dst, 0xAA, size);
+        TEST_ASSERT(drmtap_deswizzle(src, dst, w, h, stride, stride, mods[m], size) == 0);
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t b = w * 4; b < stride; b++) {
+                TEST_ASSERT(dst[(size_t)y * stride + b] == 0xAA);
+            }
+        }
+        free(src);
+        free(dst);
+    }
+    printf("  PASS: deswizzle leaves the row padding alone\n");
+}
+
+/* The deswizzle copies 4-byte pixels. A destination stride narrower than a row (a 2-byte
+ * format: 60 pixels on 120 bytes) must fail before writing anything, not run past dst, and
+ * a layout it cannot decode must still say so. */
+static void test_deswizzle_refuses_a_stride_narrower_than_a_row(void) {
+    const uint64_t mods[4] = {0, 0x0100000000000001ULL, 0x0100000000000002ULL,
+                              DRM_FORMAT_MOD_INVALID}; /* linear, X, Y, no modifier */
+    const uint32_t w = 60, h = 32, src_stride = 512, dst_stride = 120;
+    const size_t src_size = (size_t)src_stride * h, dst_size = (size_t)dst_stride * h + 4096;
+    uint8_t *src = malloc(src_size);
+    uint8_t *dst = malloc(dst_size);
+    TEST_ASSERT(src && dst);
+    memset(src, 0xCD, src_size);
+    for (int m = 0; m < 4; m++) {
+        memset(dst, 0xAA, dst_size);
+        TEST_ASSERT(drmtap_deswizzle(src, dst, w, h, src_stride, dst_stride, mods[m],
+                                     src_size) == -EINVAL);
+        for (size_t i = 0; i < dst_size; i++) {
+            TEST_ASSERT(dst[i] == 0xAA);
+        }
+    }
+    TEST_ASSERT(drmtap_deswizzle(src, dst, w, h, src_stride, dst_stride,
+                                 0x0100000000000004ULL /* Y_TILED_CCS */, src_size) == -ENOTSUP);
+    free(src);
+    free(dst);
+    printf("  PASS: deswizzle refuses a stride narrower than a row\n");
+}
+
 int main(void) {
     printf("Running deswizzle/conversion tests...\n");
     test_deswizzle_null_safety();
@@ -345,6 +400,8 @@ int main(void) {
     test_deswizzle_intel_x_tiled_roundtrip();
     test_deswizzle_nvidia_x_tiled_roundtrip();
     test_deswizzle_bounds_non_tile_multiple();
+    test_deswizzle_leaves_the_row_padding_alone();
+    test_deswizzle_refuses_a_stride_narrower_than_a_row();
     test_convert_ar30_to_xrgb8888();
     test_convert_abgr_to_argb();
     test_convert_same_format();

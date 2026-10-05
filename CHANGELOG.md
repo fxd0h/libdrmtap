@@ -32,6 +32,14 @@ more resident (8 MB at 1080p, 33 MB at 4K), and one more for each frame it holds
 New in the C API: `drmtap_frame_owns_data()` tells a caller whether `frame->data` is memory
 the frame releases, or memory the next grab on the context may overwrite.
 
+### Fixed: `drmtap_deswizzle()` wrote past `dst` on a stride narrower than its rows
+
+It copies 4 bytes per pixel and never checked that a row fits `dst_stride`: on a 2-byte
+geometry (60 pixels on a 120-byte stride, `dst` sized `dst_stride * height`) the linear,
+X-tiled and Y-tiled paths all wrote past the end of `dst` (heap-buffer-overflow under asan).
+A layout it decodes now fails with `-EINVAL` before writing anything; one it cannot decode
+still answers `-ENOTSUP`.
+
 ### Fixed: the Rust wrapper freed the context while a `Frame` still needed it (#63)
 
 `Frame` and `Cursor` kept a raw copy of the context pointer and no lifetime, so safe code

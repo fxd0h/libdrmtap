@@ -1683,6 +1683,13 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                                    frame->width, frame->height,
                                    frame->stride, frame->stride, modifier,
                                    (size_t)frame->stride * frame->height);
+        if (ret == -EINVAL) {
+            drmtap_set_error(ctx,
+                "CPU deswizzle copies 4-byte pixels, and a %u-pixel row does not fit "
+                "the %u-byte stride of format 0x%08x", frame->width, frame->stride,
+                frame->format);
+            return ret;
+        }
         if (ret == -ENOTSUP) {
             /* CCS-compressed (or otherwise unsupported) modifier -- the CPU
              * deswizzle cannot decode it and no EGL path produced linear pixels
