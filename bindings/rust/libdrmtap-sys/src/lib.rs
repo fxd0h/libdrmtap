@@ -157,6 +157,9 @@ extern "C" {
     pub fn drmtap_grab(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info) -> c_int;
     pub fn drmtap_grab_mapped(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info) -> c_int;
     pub fn drmtap_frame_release(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info);
+    /// 1 when `frame.data` is the frame's own mapping, valid until `drmtap_frame_release`;
+    /// 0 when it is context-owned or caller-owned memory that the next grab may overwrite.
+    pub fn drmtap_frame_owns_data(frame: *const drmtap_frame_info) -> c_int;
 
     /// Point the conversion paths at a caller-owned buffer instead of a
     /// library-owned one, so a consumer that must end up with the pixels in its own

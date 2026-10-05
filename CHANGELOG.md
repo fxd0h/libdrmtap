@@ -8,6 +8,30 @@ could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
 ## [Unreleased]
 
+### Fixed: a mapped frame's pixels could change under it at the next grab
+
+A converted frame (a tiled or compressed scanout, or a 10/16-bit format reduced to 8 bits)
+had its pixels in the context's conversion buffer, and a frame from the privileged helper's
+pixel path had them in the context's receive buffer. `Frame::data()` handed that memory out
+with nothing tying it to the next grab, so the next grab overwrote it, and a larger frame
+freed and reallocated it under the slice (measured on i915: two live frames returned the same
+pointer, and a frame grabbed before a switch to a bigger mode was read from freed memory,
+under asan). The wrapper now points the conversion at a buffer the frame owns, through
+`drmtap_set_output_buffer()`, and copies pixels that are still the context's into one. A
+dropped frame leaves its buffer to the next grab, so a consumer that drops one frame per grab
+does not allocate. A frame mapped straight from the scanout is still a view of it, not a copy.
+
+Measured on i915 (Meteor Lake, a compressed scanout through the EGL detile, as root):
+`grab_mapped` costs what it did in 0.5.10 within 0.1 ms, 4.6-4.8 ms at 1920x1080 and
+12.0-12.2 ms at 3840x2160, whether each frame is dropped before the next grab or held past
+it. The reused buffer keeps it flat where the allocator would not: with glibc forced to map
+every allocation fresh (`MALLOC_MMAP_THRESHOLD_=131072`), a new buffer per grab measured
+7.6 ms at 1080p and 29.4 ms at 4K, the reused one 4.7 and 12.1. The process keeps one frame
+more resident (8 MB at 1080p, 33 MB at 4K), and one more for each frame it holds.
+
+New in the C API: `drmtap_frame_owns_data()` tells a caller whether `frame->data` is memory
+the frame releases, or memory the next grab on the context may overwrite.
+
 ### Fixed: the Rust wrapper freed the context while a `Frame` still needed it (#63)
 
 `Frame` and `Cursor` kept a raw copy of the context pointer and no lifetime, so safe code

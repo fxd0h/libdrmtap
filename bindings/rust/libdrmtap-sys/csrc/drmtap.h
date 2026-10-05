@@ -270,6 +270,22 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame);
  */
 void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame);
 
+/**
+ * @brief Whether frame->data is memory the frame itself releases.
+ *
+ * Returns 1 when frame->data is the frame's own mapping, which stays valid until
+ * drmtap_frame_release() on that frame whatever the context does in between. Returns 0
+ * when it points into memory the frame does not own: the context's conversion buffer or
+ * the privileged helper's receive buffer, which the next grab on the same context
+ * overwrites and may reallocate, or a buffer set with drmtap_set_output_buffer(). A
+ * caller that keeps a frame's pixels past the next grab copies them when this is 0.
+ * Returns 0 for a NULL frame or a frame without data.
+ *
+ * @param frame Frame filled by a grab
+ * @return 1 if the frame owns its pixel data, 0 otherwise
+ */
+int drmtap_frame_owns_data(const drmtap_frame_info *frame);
+
 /* ========================================================================= */
 /* Split capture: privileged export + unprivileged convert                   */
 /* ========================================================================= */

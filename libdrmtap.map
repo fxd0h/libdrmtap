@@ -27,6 +27,7 @@
         drmtap_grab_desc;
         drmtap_convert_dmabuf;
         drmtap_frame_release;
+        drmtap_frame_owns_data;
         drmtap_get_cursor;
         drmtap_cursor_hotspot_valid;
         drmtap_cursor_release;

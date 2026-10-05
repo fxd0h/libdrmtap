@@ -1913,6 +1913,14 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     frame->dma_buf_fd = -1;
 }
 
+int drmtap_frame_owns_data(const drmtap_frame_info *frame) {
+    if (!frame || !frame->data) {
+        return 0;
+    }
+    const frame_priv_t *priv = (const frame_priv_t *)frame->_priv;
+    return priv && priv->mapped && frame->data == priv->mapped;
+}
+
 /* ========================================================================= */
 /* Fast persistent-mmap capture (double-buffer cache)                         */
 /* ========================================================================= */
