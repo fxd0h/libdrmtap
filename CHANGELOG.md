@@ -6,6 +6,20 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [Unreleased]
+
+### Fixed: the Rust wrapper freed the context while a `Frame` still needed it (#63)
+
+`Frame` and `Cursor` kept a raw copy of the context pointer and no lifetime, so safe code
+could drop the `DrmTap` first: `drmtap_close` freed the context, and the frame's release then
+read `drm_fd` from the freed memory to close its GEM handle (a heap-use-after-free under asan,
+measured on i915). The context now lives behind a shared handle that `DrmTap`, `Frame` and
+`Cursor` hold, and `drmtap_close` runs when the last of them is dropped. No signature changes:
+`DrmTap` is still `Send` and not `Sync`, and `Frame` and `Cursor` are still neither. The device
+stays open while a frame or cursor from it is alive, so a cached `Cursor` keeps it open, and
+dropping the last of them runs the close (on the privilege-helper path that stops the helper,
+about 100 ms).
+
 ## [0.5.10] - 2026-10-01
 
 ### Security: a setuid, setgid or file-capability binary ignores the environment and loads no GL

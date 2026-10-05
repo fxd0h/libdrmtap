@@ -34,12 +34,15 @@
 //! }
 //! ```
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io;
+use std::marker::PhantomData;
 use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
 use std::os::raw::c_int;
 use std::ptr;
+use std::sync::Arc;
 
 use libdrmtap_sys as ffi;
 
@@ -194,16 +197,38 @@ impl Default for Config {
 ///
 /// This is the main entry point for the library. Create one with
 /// `DrmTap::open()`, then use `grab()` or `grab_mapped()` to capture frames.
+///
+/// A [`Frame`] or [`Cursor`] keeps the context open, so it may outlive the `DrmTap` that
+/// captured it: the context is closed when the last of them is dropped, and on the
+/// privilege-helper path that drop also stops the helper (about 100 ms).
 pub struct DrmTap {
-    ctx: *mut ffi::drmtap_ctx,
+    ctx: Arc<Ctx>,
+    // `Send` but deliberately NOT `Sync`: the context is not internally synchronized, so it
+    // must not be shared across threads (use one `DrmTap` per thread, or guard a shared one
+    // with your own lock).
+    _not_sync: PhantomData<Cell<()>>,
 }
 
-// SAFETY: `DrmTap` owns its `drmtap_ctx` exclusively and the context has no
-// thread affinity, so moving ownership to another thread is sound. It is
-// deliberately NOT `Sync`: the context is not internally synchronized, so it
-// must not be shared across threads (use one `DrmTap` per thread, or guard a
-// shared one with your own lock).
-unsafe impl Send for DrmTap {}
+// The marker cell is never touched, so a shared `DrmTap` stays as unwind-safe as before.
+impl std::panic::RefUnwindSafe for DrmTap {}
+
+/// The C context, closed when the last `DrmTap`, `Frame` or `Cursor` holding it is dropped.
+struct Ctx(*mut ffi::drmtap_ctx);
+
+// SAFETY: outside `DrmTap` the context is only used by the releases in `Frame::drop` and
+// `Cursor::drop`. `drmtap_frame_release` reads nothing in it but `drm_fd`, which only the open
+// and close functions write, and `drmtap_cursor_release` does not read it at all, so either may
+// run on another thread while the `DrmTap` keeps working. `drmtap_close` runs from `Drop`, once
+// nothing else holds the context, and may run on any thread: the only per-thread part, the EGL
+// detile state, is released for the calling thread and freed by the others when they exit.
+unsafe impl Send for Ctx {}
+unsafe impl Sync for Ctx {}
+
+impl Drop for Ctx {
+    fn drop(&mut self) {
+        unsafe { ffi::drmtap_close(self.0) };
+    }
+}
 
 impl DrmTap {
     /// Open a DRM device for capture.
@@ -240,15 +265,18 @@ impl DrmTap {
                 message: msg,
             })
         } else {
-            Ok(DrmTap { ctx })
+            Ok(DrmTap {
+                ctx: Arc::new(Ctx(ctx)),
+                _not_sync: PhantomData,
+            })
         }
     }
 
     /// List connected displays.
     pub fn list_displays(&mut self) -> Result<Vec<Display>> {
         let mut raw = vec![unsafe { std::mem::zeroed::<ffi::drmtap_display>() }; 16];
-        let n = unsafe { ffi::drmtap_list_displays(self.ctx, raw.as_mut_ptr(), 16) };
-        check(self.ctx, n)?;
+        let n = unsafe { ffi::drmtap_list_displays(self.ctx.0, raw.as_mut_ptr(), 16) };
+        check(self.ctx.0, n)?;
 
         let count = n as usize;
         Ok(raw[..count]
@@ -276,16 +304,16 @@ impl DrmTap {
 
     /// Check if display configuration changed (hotplug).
     pub fn displays_changed(&mut self) -> bool {
-        unsafe { ffi::drmtap_displays_changed(self.ctx) != 0 }
+        unsafe { ffi::drmtap_displays_changed(self.ctx.0) != 0 }
     }
 
     /// Capture a frame (zero-copy — DMA-BUF fd only).
     pub fn grab(&mut self) -> Result<Frame> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_frame_info>() };
-        let ret = unsafe { ffi::drmtap_grab(self.ctx, &mut raw) };
-        check(self.ctx, ret)?;
+        let ret = unsafe { ffi::drmtap_grab(self.ctx.0, &mut raw) };
+        check(self.ctx.0, ret)?;
         Ok(Frame {
-            ctx: self.ctx,
+            ctx: Arc::clone(&self.ctx),
             raw,
         })
     }
@@ -293,10 +321,10 @@ impl DrmTap {
     /// Capture a frame with mapped pixel data.
     pub fn grab_mapped(&mut self) -> Result<Frame> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_frame_info>() };
-        let ret = unsafe { ffi::drmtap_grab_mapped(self.ctx, &mut raw) };
-        check(self.ctx, ret)?;
+        let ret = unsafe { ffi::drmtap_grab_mapped(self.ctx.0, &mut raw) };
+        check(self.ctx.0, ret)?;
         Ok(Frame {
-            ctx: self.ctx,
+            ctx: Arc::clone(&self.ctx),
             raw,
         })
     }
@@ -321,8 +349,8 @@ impl DrmTap {
     pub fn grab_desc(&mut self) -> Result<(Frame, DmabufDesc)> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_frame_info>() };
         let mut desc = unsafe { std::mem::zeroed::<ffi::drmtap_dmabuf_desc>() };
-        let ret = unsafe { ffi::drmtap_grab_desc(self.ctx, &mut desc, &mut raw) };
-        check(self.ctx, ret)?;
+        let ret = unsafe { ffi::drmtap_grab_desc(self.ctx.0, &mut desc, &mut raw) };
+        check(self.ctx.0, ret)?;
         let out = DmabufDesc {
             width: desc.width,
             height: desc.height,
@@ -337,7 +365,7 @@ impl DrmTap {
         };
         Ok((
             Frame {
-                ctx: self.ctx,
+                ctx: Arc::clone(&self.ctx),
                 raw,
             },
             out,
@@ -346,7 +374,7 @@ impl DrmTap {
 
     /// Get the GPU driver name (e.g., "i915", "amdgpu", "virtio_gpu").
     pub fn gpu_driver(&mut self) -> Option<String> {
-        let p = unsafe { ffi::drmtap_gpu_driver(self.ctx) };
+        let p = unsafe { ffi::drmtap_gpu_driver(self.ctx.0) };
         if p.is_null() {
             None
         } else {
@@ -356,7 +384,7 @@ impl DrmTap {
 
     /// Get the last error message.
     pub fn error(&self) -> Option<String> {
-        let p = unsafe { ffi::drmtap_error(self.ctx) };
+        let p = unsafe { ffi::drmtap_error(self.ctx.0) };
         if p.is_null() {
             None
         } else {
@@ -381,13 +409,13 @@ impl DrmTap {
     /// Available since 0.5.8.
     pub fn plane_rotation(&mut self) -> Result<Option<u32>> {
         let mut rotation: u32 = 0;
-        let rc = unsafe { ffi::drmtap_plane_rotation(self.ctx, &mut rotation) };
+        let rc = unsafe { ffi::drmtap_plane_rotation(self.ctx.0, &mut rotation) };
         if rc == 0 {
             Ok(Some(rotation))
         } else if rc == -libc::ENOTSUP {
             Ok(None)
         } else {
-            check(self.ctx, rc).map(|_| None)
+            check(self.ctx.0, rc).map(|_| None)
         }
     }
 
@@ -404,37 +432,31 @@ impl DrmTap {
     /// Available since 0.5.9.
     pub fn crtc_refresh(&mut self) -> Result<Option<(u64, u64)>> {
         let (mut num, mut den) = (0u64, 0u64);
-        let rc = unsafe { ffi::drmtap_crtc_refresh(self.ctx, &mut num, &mut den) };
+        let rc = unsafe { ffi::drmtap_crtc_refresh(self.ctx.0, &mut num, &mut den) };
         if rc == 0 {
             Ok(Some((num, den)))
         } else if rc == -libc::ENODATA {
             Ok(None)
         } else {
-            check(self.ctx, rc).map(|_| None)
+            check(self.ctx.0, rc).map(|_| None)
         }
     }
 
     /// Get the cursor state (position, image, visibility).
     pub fn get_cursor(&mut self) -> Result<Cursor> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_cursor_info>() };
-        let ret = unsafe { ffi::drmtap_get_cursor(self.ctx, &mut raw) };
-        check(self.ctx, ret)?;
+        let ret = unsafe { ffi::drmtap_get_cursor(self.ctx.0, &mut raw) };
+        check(self.ctx.0, ret)?;
         Ok(Cursor {
-            ctx: self.ctx,
+            ctx: Arc::clone(&self.ctx),
             raw,
         })
     }
 }
 
-impl Drop for DrmTap {
-    fn drop(&mut self) {
-        unsafe { ffi::drmtap_close(self.ctx) };
-    }
-}
-
 /// A captured frame. Automatically released on drop.
 pub struct Frame {
-    ctx: *mut ffi::drmtap_ctx,
+    ctx: Arc<Ctx>,
     raw: ffi::drmtap_frame_info,
 }
 
@@ -586,13 +608,15 @@ impl fmt::Debug for Frame {
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        unsafe { ffi::drmtap_frame_release(self.ctx, &mut self.raw) };
+        unsafe { ffi::drmtap_frame_release(self.ctx.0, &mut self.raw) };
     }
 }
 
 /// Cursor state. Automatically released on drop.
+///
+/// It keeps the context open, so a cached `Cursor` keeps the device open.
 pub struct Cursor {
-    ctx: *mut ffi::drmtap_ctx,
+    ctx: Arc<Ctx>,
     raw: ffi::drmtap_cursor_info,
 }
 
@@ -685,7 +709,7 @@ impl Cursor {
 
 impl Drop for Cursor {
     fn drop(&mut self) {
-        unsafe { ffi::drmtap_cursor_release(self.ctx, &mut self.raw) };
+        unsafe { ffi::drmtap_cursor_release(self.ctx.0, &mut self.raw) };
     }
 }
 
@@ -698,6 +722,20 @@ pub fn version() -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Needs a DRM device and CAP_SYS_ADMIN, so `--ignored`: only the direct path makes the
+    // release read the context (through the helper it never does, so the test cannot tell).
+    // Under asan (the C that libdrmtap-sys builds with -fsanitize=address, libasan preloaded) it
+    // is the gate for #63: a frame used to release against a context `drmtap_close` had freed.
+    #[test]
+    #[ignore]
+    fn a_frame_released_after_its_tap_is_gone_still_has_its_context() {
+        let mut tap = DrmTap::open(None).expect("open a DRM device");
+        let frame = tap.grab_mapped().expect("grab a frame");
+        drop(tap);
+        assert!(frame.width() > 0 && frame.height() > 0);
+        drop(frame);
+    }
 
     #[test]
     fn a_fourcc_prints_the_way_it_is_written_down() {
