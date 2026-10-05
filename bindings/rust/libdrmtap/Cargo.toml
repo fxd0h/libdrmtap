@@ -1,6 +1,6 @@
 [package]
 name = "libdrmtap"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2021"
 # std::os::fd (BorrowedFd/OwnedFd), which the frame's fd accessors are built on, is 1.66.
 # Declared so a downstream on an older toolchain gets that sentence instead of a type error.
@@ -16,7 +16,7 @@ keywords = ["drm", "kms", "screen-capture", "wayland", "remote-desktop"]
 categories = ["multimedia::video", "os::linux-apis"]
 
 [dependencies]
-libdrmtap-sys = { version = "0.5.10", path = "../libdrmtap-sys" }
+libdrmtap-sys = { version = "0.5.11", path = "../libdrmtap-sys" }
 # errno values differ by architecture (ENOTSUP is 95 on x86, 45 on SPARC): compare by name.
 libc = "0.2"
 # Optional on purpose: a third-party type in a public signature ties our semver to theirs. See the

@@ -6,7 +6,7 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
-## [Unreleased]
+## [0.5.11] - 2026-10-05
 
 ### Fixed: a mapped frame's pixels could change under it at the next grab
 
@@ -1069,6 +1069,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.11
 [0.5.10]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.10
 [0.5.9]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.9
 [0.5.8]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.8

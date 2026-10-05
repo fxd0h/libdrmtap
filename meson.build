@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('libdrmtap', 'c',
-    version: '0.5.10',
+    version: '0.5.11',
     license: 'MIT',
     default_options: [
         'c_std=c11',
