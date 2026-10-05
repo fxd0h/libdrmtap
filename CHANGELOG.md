@@ -8,16 +8,16 @@ could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
 ## [0.5.11] - 2026-10-05
 
-### Fixed: a mapped frame's pixels could change under it at the next grab
+### Fixed: the pixels of a mapped frame could change under it at the next grab
 
 A converted frame (a tiled or compressed scanout, or a 10/16-bit format reduced to 8 bits)
-had its pixels in the context's conversion buffer, and a frame from the privileged helper's
-pixel path had them in the context's receive buffer. `Frame::data()` handed that memory out
-with nothing tying it to the next grab, so the next grab overwrote it, and a larger frame
-freed and reallocated it under the slice (measured on i915: two live frames returned the same
-pointer, and a frame grabbed before a switch to a bigger mode was read from freed memory,
-under asan). The wrapper now points the conversion at a buffer the frame owns, through
-`drmtap_set_output_buffer()`, and copies pixels that are still the context's into one. A
+had its pixels in the conversion buffer of the context, and a frame from the pixel path of
+the privileged helper had them in the receive buffer of the context. `Frame::data()` handed
+that memory out with nothing tying it to the next grab, so the next grab overwrote it, and a
+larger frame freed and reallocated it under the slice (measured on i915: two live frames
+returned the same pointer, and a frame grabbed before a switch to a bigger mode was read from
+freed memory, under asan). The wrapper now points the conversion at a buffer the frame owns,
+through `drmtap_set_output_buffer()`, and copies pixels the context still owns into one. A
 dropped frame leaves its buffer to the next grab, so a consumer that drops one frame per grab
 does not allocate. A frame mapped straight from the scanout is still a view of it, not a copy.
 
@@ -43,8 +43,8 @@ still answers `-ENOTSUP`.
 ### Fixed: the Rust wrapper freed the context while a `Frame` still needed it (#63)
 
 `Frame` and `Cursor` kept a raw copy of the context pointer and no lifetime, so safe code
-could drop the `DrmTap` first: `drmtap_close` freed the context, and the frame's release then
-read `drm_fd` from the freed memory to close its GEM handle (a heap-use-after-free under asan,
+could drop the `DrmTap` first: `drmtap_close` freed the context, and the release of the frame
+then read `drm_fd` from the freed memory to close its GEM handle (a heap-use-after-free under asan,
 measured on i915). The context now lives behind a shared handle that `DrmTap`, `Frame` and
 `Cursor` hold, and `drmtap_close` runs when the last of them is dropped. No signature changes:
 `DrmTap` is still `Send` and not `Sync`, and `Frame` and `Cursor` are still neither. The device
