@@ -173,7 +173,7 @@ typedef struct {
      *  a zero-copy grab -- that it happens to work on one GPU and returns NULL on
      *  another is exactly how issue #36 was mistaken for a driver bug. */
     void *data;
-    int dma_buf_fd;         /**< DMA-BUF fd (zero-copy) or -1 (mapped) */
+    int dma_buf_fd;         /**< DMA-BUF fd (zero-copy), or -1 when the frame carries pixels */
     uint32_t width;         /**< Frame width in pixels */
     uint32_t height;        /**< Frame height in pixels */
     uint32_t stride;        /**< Bytes per row (may include padding) */
@@ -189,7 +189,13 @@ typedef struct {
  * Returns a DMA-BUF file descriptor in frame->dma_buf_fd that can be
  * passed directly to VAAPI/V4L2 encoders without copying pixel data.
  *
- * THERE ARE NO USABLE CPU PIXELS HERE. This call does no conversion and no detiling.
+ * One exception: through the privileged helper, a linear scanout on a GPU other
+ * than virtio-gpu is not exported. The helper copies its pixels, and the frame
+ * comes back with dma_buf_fd = -1 and frame->data pointing at those raw,
+ * unconverted pixels, valid until the next grab on the same context or
+ * drmtap_close().
+ *
+ * Otherwise THERE ARE NO USABLE CPU PIXELS HERE. This call does no conversion and no detiling.
  * `frame->data` is whatever the raw scanout mapping happened to give: still tiled where
  * the scanout is tiled, and NULL on a GPU whose scanout cannot be CPU-mapped at all
  * (amdgpu GFX9+, discrete VRAM, nvidia) -- and the call still returns 0 in both cases.
@@ -211,8 +217,14 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
 /**
  * @brief Capture a frame — mapped path.
  *
- * Returns a pointer to linear RGBA pixel data in frame->data.
- * Handles GPU tiling → linear conversion automatically.
+ * Returns linear 8-bit pixels in frame->data, 4 bytes each, laid out as
+ * frame->format: XRGB8888 once converted (detiling, 10/16-bit and FP16
+ * reduction), or the scanout's own order for a linear 8-bit scanout (e.g.
+ * XBGR8888). Handles GPU tiling → linear conversion automatically.
+ *
+ * frame->data stays valid until drmtap_frame_release() when
+ * drmtap_frame_owns_data() returns 1. When it returns 0 the pixels are in
+ * memory the context reuses: the next grab on the same context overwrites them.
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)

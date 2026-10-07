@@ -350,7 +350,10 @@ impl DrmTap {
         unsafe { ffi::drmtap_displays_changed(self.ctx.0) != 0 }
     }
 
-    /// Capture a frame (zero-copy — DMA-BUF fd only).
+    /// Capture a frame (zero-copy — a DMA-BUF fd, no conversion).
+    ///
+    /// Through the privileged helper, a linear scanout on a GPU other than virtio-gpu is not
+    /// exported: the frame has no fd and `data()` holds a copy of its raw, unconverted pixels.
     pub fn grab(&mut self) -> Result<Frame> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_frame_info>() };
         let ret = unsafe { ffi::drmtap_grab(self.ctx.0, &mut raw) };
@@ -634,8 +637,9 @@ impl Frame {
 
     /// Access mapped pixel data as a byte slice.
     ///
-    /// Returns `None` if the frame was captured with `grab()` (zero-copy)
-    /// or if mmap failed.
+    /// After `grab_mapped()`, linear 8-bit pixels laid out as `format()`. After `grab()` this is
+    /// not converted pixel data: `None` where the scanout cannot be CPU-mapped, the raw (possibly
+    /// still tiled) mapping where it can, or the helper's copy of a linear scanout.
     pub fn data(&self) -> Option<&[u8]> {
         let len = self.raw.stride as usize * self.raw.height as usize;
         if let Some(owned) = &self.owned {
