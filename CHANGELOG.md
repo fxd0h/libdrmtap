@@ -6,6 +6,38 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.12] - 2026-10-07
+
+Documentation only, no code change. The READMEs of both crates and of the repo, the public
+header and the docs of the Rust wrapper said things the code does not do.
+
+### Fixed: the tiled path needs Linux 5.7, not 4.20
+
+The tiled and compressed path reads the framebuffer with `GETFB2`, which mainline added in
+5.7 (455e00f1412f). Ubuntu 20.04 runs it as a backport in its 5.4 (LP: #1863874, since
+5.4.0-16.19), which is why 20.04 works.
+
+### Fixed: the layout of the pixels of a frame
+
+`drmtap_grab_mapped()` returns `XRGB8888` once it converts a frame, but a linear 8-bit
+scanout keeps its own order (an `XBGR8888` scanout is R, G, B in memory) and
+`frame->format` names it. `drmtap_grab()` converts nothing. The docs said every frame was
+BGRA.
+
+### Fixed: the helper does not always hand over a DMA-BUF
+
+Through the privileged helper a linear scanout on a GPU other than virtio-gpu is copied, not
+exported, so `drmtap_grab()` returns its pixels with `dma_buf_fd` set to -1. The header, the
+README of `libdrmtap-sys` and the docs of `grab()` and `data()` in the wrapper said it always
+returned a DMA-BUF and no pixels.
+
+### Added: how long `frame->data` lives
+
+The doc of `drmtap_grab_mapped()` says that `frame->data` stays valid until the release when
+`drmtap_frame_owns_data()` returns 1, and that the next grab on the context overwrites it when
+it returns 0. The FP16 note of the README describes only the linear case, the one
+`reduce_linear_to_xrgb8888` covers.
+
 ## [0.5.11] - 2026-10-05
 
 ### Fixed: the pixels of a mapped frame could change under it at the next grab
@@ -1069,6 +1101,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.12
 [0.5.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.11
 [0.5.10]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.10
 [0.5.9]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.9
