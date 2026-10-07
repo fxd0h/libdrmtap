@@ -31,7 +31,7 @@ extern "C" {
  * site. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 11
+#define DRMTAP_VERSION_PATCH 12
 
 /**
  * @brief Get the library version as a packed integer.

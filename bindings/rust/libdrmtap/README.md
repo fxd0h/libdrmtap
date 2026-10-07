@@ -4,11 +4,12 @@ Safe Rust wrapper for [libdrmtap](https://github.com/fxd0h/libdrmtap) — DRM/KM
 
 Capture the screen at the kernel level: login screens, Wayland, headless — no user prompts.
 
-Frames come back as 8-bit, 4 bytes per pixel: BGRA (`XRGB8888`) once converted, or
-a linear 8-bit scanout in its own order (`Frame::format()` says which, e.g.
-`XBGR8888` is R, G, B in memory). Tiled/compressed framebuffers are GPU-detiled,
+`grab_mapped()` returns 8-bit frames, 4 bytes per pixel: BGRA (`XRGB8888`) once
+converted, or a linear 8-bit scanout in its own order (`Frame::format()` says which,
+e.g. `XBGR8888` is R, G, B in memory). Tiled/compressed framebuffers are GPU-detiled,
 and **HDR10** scanouts (PQ/BT.2020) are tone-mapped to SDR when the connector
-reports HDR (`P010` overlay-video and HLG excepted).
+reports HDR (`P010` overlay-video and HLG excepted). `grab()` converts nothing: its
+frame is the scanout as it is, in the format `Frame::format()` names.
 
 ## ⚠️ Testing Status
 

@@ -63,8 +63,10 @@ DMA-BUF fd via `SCM_RIGHTS`, and copies the pixels of a linear one.
 
 ## Pixel output
 
-Converted frames are 8-bit `XRGB8888` (BGRA in memory); a linear 8-bit scanout is
-returned in its own order, which `format` names (e.g. `XBGR8888`). Tiled and compressed
+This is what `drmtap_grab_mapped()` returns; `drmtap_grab()` converts nothing and hands
+the scanout over as it is. Converted frames are 8-bit `XRGB8888` (BGRA in memory); a
+linear 8-bit scanout is returned in its own order, which `format` names (e.g.
+`XBGR8888`). Tiled and compressed
 framebuffers (Intel X/Y-tiled + CCS, AMD, Nvidia block-linear, virtio/virgl) are
 GPU-detiled through an EGL/GLES2 backend, and **HDR10** scanouts (PQ / BT.2020 —
 `AR30`/`XR30` and 16-bit `XR48`/`AR48`/`XB48`/`AB48`) are tone-mapped to SDR when
