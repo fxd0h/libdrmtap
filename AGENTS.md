@@ -107,7 +107,7 @@ int drmtap_list_displays(drmtap_ctx *ctx, ...) { ... }
 /**
  * @brief Capture a frame with mapped pixel data.
  *
- * Returns a pointer to linear RGBA pixel data in frame->data.
+ * Returns linear 8-bit pixels in frame->data, laid out as frame->format.
  * Handles GPU tiling → linear conversion automatically.
  *
  * @param ctx   Capture context from drmtap_open()

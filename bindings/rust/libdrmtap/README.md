@@ -4,7 +4,9 @@ Safe Rust wrapper for [libdrmtap](https://github.com/fxd0h/libdrmtap) — DRM/KM
 
 Capture the screen at the kernel level: login screens, Wayland, headless — no user prompts.
 
-Frames come back as 8-bit BGRA. Tiled/compressed framebuffers are GPU-detiled,
+Frames come back as 8-bit, 4 bytes per pixel: BGRA (`XRGB8888`) once converted, or
+a linear 8-bit scanout in its own order (`Frame::format()` says which, e.g.
+`XBGR8888` is R, G, B in memory). Tiled/compressed framebuffers are GPU-detiled,
 and **HDR10** scanouts (PQ/BT.2020) are tone-mapped to SDR when the connector
 reports HDR (`P010` overlay-video and HLG excepted).
 
@@ -65,7 +67,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Features
 
 - **`DrmTap::open()`** — auto-detect GPU and display
-- **`grab()`** — zero-copy DMA-BUF fd (for hardware encoders)
+- **`grab()`** — zero-copy DMA-BUF fd (for hardware encoders). Through the helper, a
+  linear scanout on a GPU other than virtio-gpu comes back as copied pixels instead, with no
+  fd: `data()` has them, raw and unconverted
 - **`grab_desc()`** (since 0.5.7) — the same zero-copy grab plus a `DmabufDesc`: the plane layout
   (`num_planes`/`offsets`/`pitches`) and HDR state that a `Frame` does not carry. Without them a
   compressed (Intel CCS) or HDR scanout cannot be imported at all, because you hold the fd and no
@@ -103,8 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - Rust 1.66 or newer (`std::os::fd`, which the frame's descriptor accessors are built on). Declared
   as `rust-version`, so an older toolchain says so instead of failing on a type
-- Linux with DRM/KMS (kernel 4.20+ for the tiled/modifier path; linear/VM
-  framebuffers work on older kernels)
+- Linux with DRM/KMS (kernel 5.7+ for the tiled/modifier path, which needs
+  `GETFB2`; Ubuntu 20.04 has it backported to its 5.4; linear/VM framebuffers
+  work on older kernels)
 - A C compiler and the development packages `libdrmtap-sys` builds against. On
   Debian/Ubuntu: `libdrm-dev libegl-dev libgles2-mesa-dev libseccomp-dev
   libcap-dev`. libdrm, libseccomp and libcap are linked.

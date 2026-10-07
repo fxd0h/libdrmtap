@@ -34,8 +34,9 @@ libdrmtap captures screen contents at the kernel level using DRM/KMS APIs. Unlik
 
 ## Requirements
 
-- Linux with DRM/KMS support (kernel 4.20+ for the tiled/modifier framebuffer
-  path, i.e. Ubuntu 20.04+; linear/VM framebuffers work on older kernels)
+- Linux with DRM/KMS support (kernel 5.7+ for the tiled/modifier framebuffer
+  path, which needs `GETFB2`; Ubuntu 20.04 has it backported to its 5.4;
+  linear/VM framebuffers work on older kernels)
 - A C compiler — the embedded C sources are compiled statically at build time.
   There is **no** system `libdrmtap` install, `meson install`, or `pkg-config`
   lookup of a shared library.
@@ -57,11 +58,13 @@ FORTIFY, PIE, full RELRO). Its path is exported to downstream build scripts as
 `DEP_DRMTAP_HELPER_BIN` so a consumer (e.g. RustDesk) can copy and `setcap` it.
 The library captures directly when it already has DRM master / `CAP_SYS_ADMIN`;
 otherwise it spawns the helper over a socketpair to read other clients'
-framebuffers, returning the scanout as a zero-copy DMA-BUF fd via `SCM_RIGHTS`.
+framebuffers. The helper returns a tiled or virtio-gpu scanout as a zero-copy
+DMA-BUF fd via `SCM_RIGHTS`, and copies the pixels of a linear one.
 
 ## Pixel output
 
-Frames are returned as 8-bit `XRGB8888` (BGRA in memory). Tiled and compressed
+Converted frames are 8-bit `XRGB8888` (BGRA in memory); a linear 8-bit scanout is
+returned in its own order, which `format` names (e.g. `XBGR8888`). Tiled and compressed
 framebuffers (Intel X/Y-tiled + CCS, AMD, Nvidia block-linear, virtio/virgl) are
 GPU-detiled through an EGL/GLES2 backend, and **HDR10** scanouts (PQ / BT.2020 —
 `AR30`/`XR30` and 16-bit `XR48`/`AR48`/`XB48`/`AB48`) are tone-mapped to SDR when

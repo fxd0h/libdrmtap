@@ -36,9 +36,10 @@ int main() {
     drmtap_ctx *ctx = drmtap_open(NULL);  // auto-detect GPU
     
     drmtap_frame_info frame;
-    drmtap_grab_mapped(ctx, &frame);      // capture screen → RGBA
+    drmtap_grab_mapped(ctx, &frame);      // capture screen → linear 8-bit pixels
     
-    // frame.data = linear RGBA pixels
+    // frame.data = linear pixels, 4 bytes each, laid out as frame.format
+    // (XRGB8888 once converted; a linear 8-bit scanout keeps its own order)
     // frame.width, frame.height, frame.stride
     
     drmtap_frame_release(ctx, &frame);
@@ -168,17 +169,17 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > primary desktop scanout) is not handled.
 >
 > **FP16 half-float scanouts** (`XRGB16161616F` and its BGR/alpha siblings) are
-> reduced to 8-bit sRGB on the CPU fallback — linear-light decode through the sRGB
-> OETF, not HDR tone-mapped (values above 1.0 clip to white).
+> reduced to 8-bit sRGB when the scanout is linear — linear-light decode through
+> the sRGB OETF, not HDR tone-mapped (values above 1.0 clip to white).
 
 ## Quick Start
 
 ### Requirements
 
 The tiled/compressed framebuffer path (Intel/AMD/Nvidia modifiers) uses the DRM
-`GETFB2` ioctl, which needs **Linux 4.20+** — i.e. Ubuntu 20.04 (5.4), 22.04
-(5.15), 24.04 (6.8) or newer. Linear framebuffers (virtio-gpu and similar VMs)
-work on older kernels.
+`GETFB2` ioctl, which mainline added in **Linux 5.7**. Ubuntu 20.04 (5.4) has it
+backported; 22.04 (5.15), 24.04 (6.8) and newer have it. Linear framebuffers
+(virtio-gpu and similar VMs) work on older kernels.
 
 ### Build
 
