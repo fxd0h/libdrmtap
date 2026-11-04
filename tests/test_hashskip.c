@@ -60,7 +60,13 @@ int main(void) {
         return 0;
     }
     check(same_rgb(f.data, want), "first frame is the image");
-    const void *first = f.data;
+    uint32_t *first = f.data;
+    /* The skip is observable: an untouched image is not converted again, so a
+     * mark left in the returned buffer survives (it is gone with the feature off). */
+    first[0] = 0xdeadbeefu;
+    check(drmtap_convert_dmabuf(ctx, &d, &f) == 0 && f.data == first &&
+          first[0] == 0xdeadbeefu, "untouched image: the convert is skipped");
+    first[0] = want[0];
     for (int i = 0; i < 3; i++) {
         check(drmtap_convert_dmabuf(ctx, &d, &f) == 0 && f.data == first &&
               same_rgb(f.data, want), "untouched image: same buffer, same pixels");

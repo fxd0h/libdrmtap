@@ -565,6 +565,7 @@ int drmtap_ensure_out(drmtap_ctx *ctx, size_t size, void **out) {
     if (size == 0) {
         return -EINVAL;
     }
+    ctx->out_gen++;
     /* Cap the frame itself even when the destination is the caller's: a caller
      * that happens to own a huge mapping must not be able to unlock a frame
      * larger than this library is willing to handle, and keeping the cap on both
