@@ -310,6 +310,7 @@ meson test -C build --suite integration
 | `DRMTAP_DEBUG` | Set to `1` for verbose debug logging on stderr. |
 | `DRMTAP_NO_EGL` | Set to `1` to force the CPU deswizzle/convert path (skip EGL/GLES). |
 | `DRMTAP_NO_IMAGE_CACHE` | Set to `1` to re-import the `EGLImage` every frame (disable the import-once cache). |
+| `DRMTAP_SKIP_UNCHANGED` | Set to `1` to skip the GPU readback when the screen has not changed: a hash pass over 32x32 blocks runs first, and when no block moved the conversion returns the previous output buffer as it was (same pointer, same pixels). Needs OpenGL ES 3, otherwise ignored. Do not edit the output buffer between grabs while it is on. Off by default. |
 | `DRMTAP_FORCE_MMAP_FAIL` | Test hook — set to `1` to force the fast-path CPU mmap to fail so the EGL-detile fallback runs. |
 
 A setuid, setgid or file-capability binary ignores all of these: the library reads them with `secure_getenv()`.

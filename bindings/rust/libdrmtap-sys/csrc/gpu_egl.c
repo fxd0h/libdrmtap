@@ -93,6 +93,7 @@
     X(glBindAttribLocation) \
     X(glBindFramebuffer) \
     X(glBindTexture) \
+    X(glCheckFramebufferStatus) \
     X(glCompileShader) \
     X(glCreateProgram) \
     X(glCreateShader) \
@@ -110,6 +111,7 @@
     X(glGetError) \
     X(glGetProgramiv) \
     X(glGetShaderiv) \
+    X(glGetString) \
     X(glGetUniformLocation) \
     X(glLinkProgram) \
     X(glReadPixels) \
@@ -118,6 +120,7 @@
     X(glTexParameteri) \
     X(glUniform1f) \
     X(glUniform1i) \
+    X(glUniform2i) \
     X(glUseProgram) \
     X(glVertexAttribPointer) \
     X(glViewport)
@@ -205,6 +208,7 @@ static int load_gl_libraries(void) {
 #define glBindAttribLocation pfn_glBindAttribLocation
 #define glBindFramebuffer pfn_glBindFramebuffer
 #define glBindTexture pfn_glBindTexture
+#define glCheckFramebufferStatus pfn_glCheckFramebufferStatus
 #define glCompileShader pfn_glCompileShader
 #define glCreateProgram pfn_glCreateProgram
 #define glCreateShader pfn_glCreateShader
@@ -222,6 +226,7 @@ static int load_gl_libraries(void) {
 #define glGetError pfn_glGetError
 #define glGetProgramiv pfn_glGetProgramiv
 #define glGetShaderiv pfn_glGetShaderiv
+#define glGetString pfn_glGetString
 #define glGetUniformLocation pfn_glGetUniformLocation
 #define glLinkProgram pfn_glLinkProgram
 #define glReadPixels pfn_glReadPixels
@@ -230,6 +235,7 @@ static int load_gl_libraries(void) {
 #define glTexParameteri pfn_glTexParameteri
 #define glUniform1f pfn_glUniform1f
 #define glUniform1i pfn_glUniform1i
+#define glUniform2i pfn_glUniform2i
 #define glUseProgram pfn_glUseProgram
 #define glVertexAttribPointer pfn_glVertexAttribPointer
 #define glViewport pfn_glViewport
@@ -281,6 +287,32 @@ typedef struct {
     GLuint texture;             /* GL_TEXTURE_EXTERNAL_OES bound to image */
 } egl_image_slot_t;
 
+/* DRMTAP_SKIP_UNCHANGED=1: a GPU pass hashes every 32x32 block of the imported
+ * image; when no hash moved since the last full convert the readback is skipped
+ * and the previous output is returned. ES 3 only (integer render target,
+ * texelFetch on the external image). Grids grow once and are capped. */
+#define HASH_BS 32
+#define HASH_MAX_BYTES (1u << 20)   /* 65536 blocks of 16 bytes; 8K needs 518 KB */
+#ifndef GL_RGBA32UI
+#define GL_RGBA32UI 0x8D70
+#define GL_RGBA_INTEGER 0x8D99
+#endif
+#ifndef EGL_OPENGL_ES3_BIT
+#define EGL_OPENGL_ES3_BIT 0x40
+#endif
+typedef struct {
+    int on;                     /* set up and still trusted */
+    GLuint prog, tex, fbo;
+    uint32_t gw, gh;            /* hash texture size = block grid */
+    uint32_t *cur, *prev;       /* gw*gh RGBA32UI; swapped on commit */
+    size_t cap;                 /* bytes of each grid */
+    int valid;                  /* prev + key describe the last full convert */
+    const drmtap_ctx *owner;
+    uint32_t w, h, fourcc;
+    uint64_t modifier;
+    void *out;
+    unsigned long n_full, n_skipped;
+} egl_hash_t;
 /* Per-thread EGL context and GL resources */
 typedef struct {
     EGLDisplay display;        /* the display of `device_path`'s device */
@@ -295,6 +327,7 @@ typedef struct {
     egl_image_slot_t image_slots[DRMTAP_EGL_IMAGE_SLOTS];
     unsigned next_evict;  /* round-robin eviction cursor for image_slots */
     int cache_disabled;   /* DRMTAP_NO_IMAGE_CACHE=1 */
+    egl_hash_t hash;
 } egl_state_t;
 
 /* The per-thread EGL context + GL resources.
@@ -457,9 +490,9 @@ static GLuint compile_shader(GLenum type, const char *source) {
     return shader;
 }
 
-static GLuint create_program(void) {
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, vertex_shader_src);
-    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src);
+static GLuint create_program(const char *vsrc, const char *fsrc) {
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, vsrc);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fsrc);
     if (vs == 0 || fs == 0) {
         if (vs) glDeleteShader(vs);
         if (fs) glDeleteShader(fs);
@@ -484,6 +517,154 @@ static GLuint create_program(void) {
     return program;
 }
 
+/* ========================================================================= */
+/* Unchanged-frame detection (DRMTAP_SKIP_UNCHANGED=1)                       */
+/* ========================================================================= */
+static const char *hash_vs_src =
+    "#version 300 es\n"
+    "void main() {\n"
+    "    gl_Position = vec4(float((gl_VertexID & 1) * 2 - 1),\n"
+    "                       float(((gl_VertexID >> 1) & 1) * 2 - 1), 0.0, 1.0);\n"
+    "}\n";
+/* One invocation per block: murmur3-style mixing over the 8-bit texels. Each h1
+ * step is bijective in the texel, so a change of any single texel changes h1. */
+static const char *hash_fs_src =
+    "#version 300 es\n"
+    "#extension GL_OES_EGL_image_external_essl3 : require\n"
+    "precision highp float; precision highp int;\n"
+    "uniform samplerExternalOES img; uniform ivec2 size; out uvec4 o;\n"
+    "uint rotl(uint x, int r) { return (x << uint(r)) | (x >> uint(32 - r)); }\n"
+    "void main() {\n"
+    "    ivec2 b = ivec2(gl_FragCoord.xy) * 32;\n"
+    "    uint h1 = 0x9747b28cu, h2 = 0x2545F491u, cnt = 0u;\n"
+    "    for (int y = 0; y < 32; y++) {\n"
+    "        int py = b.y + y; if (py >= size.y) break;\n"
+    "        for (int x = 0; x < 32; x++) {\n"
+    "            int px = b.x + x; if (px >= size.x) break;\n"
+    "            uvec4 q = uvec4(round(texelFetch(img, ivec2(px, py), 0) * 255.0));\n"
+    "            uint v = q.r | (q.g << 8) | (q.b << 16) | (q.a << 24);\n"
+    "            uint k = v * 0xcc9e2d51u; k = rotl(k, 15); k *= 0x1b873593u;\n"
+    "            h1 ^= k; h1 = rotl(h1, 13); h1 = h1 * 5u + 0xe6546b64u;\n"
+    "            uint w = v ^ (uint(px) * 0x9E3779B1u) ^ (uint(py) * 0x85EBCA6Bu);\n"
+    "            h2 = (h2 ^ w) * 0x01000193u; h2 ^= h2 >> 15;\n"
+    "            cnt++;\n"
+    "        }\n"
+    "    }\n"
+    "    h1 ^= cnt; h1 ^= h1 >> 16; h1 *= 0x85ebca6bu; h1 ^= h1 >> 13;\n"
+    "    o = uvec4(h1, h2, uint(b.x), uint(b.y));\n"
+    "}\n";
+/* Needs the ES 3 context egl_init asked for plus the essl3 external extension;
+ * otherwise (or on any failure) the hash stays off and every frame converts. */
+static void hash_setup(drmtap_ctx *ctx, egl_state_t *st) {
+    const char *ver = (const char *)glGetString(GL_VERSION);
+    const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+    if (!ver || strncmp(ver, "OpenGL ES 3", 11) != 0 || !ext ||
+        !strstr(ext, "GL_OES_EGL_image_external_essl3")) {
+        drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (no ES 3 + external_essl3)");
+        return;
+    }
+    st->hash.prog = create_program(hash_vs_src, hash_fs_src);
+    if (st->hash.prog == 0) {
+        drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (hash shader failed)");
+        return;
+    }
+    glGenFramebuffers(1, &st->hash.fbo);
+    st->hash.on = 1;
+    drmtap_debug_log(ctx, "egl: skip-unchanged on (%dx%d blocks)", HASH_BS, HASH_BS);
+}
+static void hash_release(egl_hash_t *h) {
+    if (h->tex) glDeleteTextures(1, &h->tex);
+    if (h->fbo) glDeleteFramebuffers(1, &h->fbo);
+    if (h->prog) glDeleteProgram(h->prog);
+    free(h->cur);
+    free(h->prev);
+    memset(h, 0, sizeof(*h));
+}
+/* A GL step failed: stop trying for this thread (the normal path carries on). */
+static int hash_fail(drmtap_ctx *ctx, egl_hash_t *h, const char *what) {
+    drmtap_debug_log(ctx, "egl: skip-unchanged off, %s failed (gl 0x%x)", what, glGetError());
+    h->on = 0;
+    h->valid = 0;
+    return 0;
+}
+/* Hash the bound external texture. Returns 1 when every block equals the last
+ * full convert's and nothing else that shapes the output moved, so `out` still
+ * holds the right pixels. The caller clears h->valid on entry to a convert; it is
+ * set again only here (a skip) or in hash_commit() (a full convert that
+ * succeeded), so any error in between leaves the cache invalid. */
+static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, uint32_t w,
+                      uint32_t h_px, uint32_t fourcc, uint64_t modifier, int hdr_on,
+                      void *out) {
+    if (!h->on || hdr_on) {      /* the HDR tone-map is not a function of the 8-bit samples */
+        return 0;
+    }
+    uint32_t gw = (w + HASH_BS - 1) / HASH_BS, gh = (h_px + HASH_BS - 1) / HASH_BS;
+    size_t bytes = (size_t)gw * gh * 16;
+    if (bytes > HASH_MAX_BYTES) {
+        return 0;
+    }
+    if (bytes > h->cap) {        /* grow once, never per frame */
+        free(h->cur);
+        free(h->prev);
+        h->cur = malloc(bytes);
+        h->prev = malloc(bytes);
+        h->cap = bytes;
+        if (!h->cur || !h->prev) {
+            free(h->cur); free(h->prev);
+            h->cur = h->prev = NULL; h->cap = 0;
+            return hash_fail(ctx, h, "grid alloc");
+        }
+    }
+    if (h->gw != gw || h->gh != gh) {
+        if (!h->tex) glGenTextures(1, &h->tex);
+        glBindTexture(GL_TEXTURE_2D, h->tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, gw, gh, 0, GL_RGBA_INTEGER,
+                     GL_UNSIGNED_INT, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, h->fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                               h->tex, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return hash_fail(ctx, h, "RGBA32UI target");
+        }
+        h->gw = gw;
+        h->gh = gh;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, h->fbo);
+    glViewport(0, 0, gw, gh);
+    glUseProgram(h->prog);
+    glUniform1i(glGetUniformLocation(h->prog, "img"), 0);
+    glUniform2i(glGetUniformLocation(h->prog, "size"), (int)w, (int)h_px);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glReadPixels(0, 0, gw, gh, GL_RGBA_INTEGER, GL_UNSIGNED_INT, h->cur);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (glGetError() != GL_NO_ERROR) {
+        return hash_fail(ctx, h, "hash pass");
+    }
+    if (was_valid && h->owner == ctx && h->w == w && h->h == h_px &&
+        h->fourcc == fourcc && h->modifier == modifier && h->out == out &&
+        memcmp(h->cur, h->prev, bytes) == 0) {
+        h->valid = 1;
+        h->n_skipped++;
+        drmtap_debug_log(ctx, "egl: unchanged, skipped (full=%lu skipped=%lu)",
+                         h->n_full, h->n_skipped);
+        return 1;
+    }
+    return 0;
+}
+/* The full convert into `out` succeeded: its hash becomes the reference. */
+static void hash_commit(drmtap_ctx *ctx, egl_hash_t *h, uint32_t w, uint32_t h_px,
+                        uint32_t fourcc, uint64_t modifier, void *out) {
+    uint32_t *t = h->prev; h->prev = h->cur; h->cur = t;
+    h->owner = ctx; h->w = w; h->h = h_px; h->fourcc = fourcc;
+    h->modifier = modifier; h->out = out; h->valid = 1;
+    h->n_full++;
+    drmtap_debug_log(ctx, "egl: full convert (full=%lu skipped=%lu)",
+                     h->n_full, h->n_skipped);
+}
 /* ========================================================================= */
 /* EGL display from DRM card path                                            */
 /* ========================================================================= */
@@ -639,9 +820,32 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         EGL_CONTEXT_CLIENT_VERSION, 2,
         EGL_NONE
     };
-    drmtap_debug_log(ctx, "EGL: eglCreateContext(config=%p)...", (void*)config);
-    state->context = eglCreateContext(state->display, config,
-                                      EGL_NO_CONTEXT, context_attribs);
+    /* Opt-in skip-unchanged wants an ES 3 context; anything short of that falls
+     * through to the ES 2 context below, i.e. today's path. */
+    const char *skip_env = secure_getenv("DRMTAP_SKIP_UNCHANGED");
+    int want_hash = (skip_env && skip_env[0] == '1');
+    state->context = EGL_NO_CONTEXT;
+    if (want_hash) {
+        EGLint attribs3[sizeof(config_attribs) / sizeof(config_attribs[0])];
+        memcpy(attribs3, config_attribs, sizeof(attribs3));
+        attribs3[1] = EGL_OPENGL_ES3_BIT;   /* the value of EGL_RENDERABLE_TYPE */
+        EGLint ctx3[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+        EGLConfig config3;
+        EGLint n3 = 0;
+        if (eglChooseConfig(state->display, attribs3, &config3, 1, &n3) && n3 > 0) {
+            state->context = eglCreateContext(state->display, config3,
+                                              EGL_NO_CONTEXT, ctx3);
+        }
+        if (state->context == EGL_NO_CONTEXT) {
+            want_hash = 0;
+            drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (no ES 3 context)");
+        }
+    }
+    if (state->context == EGL_NO_CONTEXT) {
+        drmtap_debug_log(ctx, "EGL: eglCreateContext(config=%p)...", (void*)config);
+        state->context = eglCreateContext(state->display, config,
+                                          EGL_NO_CONTEXT, context_attribs);
+    }
     if (state->context == EGL_NO_CONTEXT) {
         drmtap_debug_log(ctx, "EGL: eglCreateContext FAILED err=0x%x", eglGetError());
         drmtap_debug_log(ctx, "egl: eglCreateContext failed: 0x%x",
@@ -653,7 +857,7 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
                    state->context);
 
     /* Create shader program */
-    state->program = create_program();
+    state->program = create_program(vertex_shader_src, fragment_shader_src);
     if (state->program == 0) {
         drmtap_debug_log(ctx, "EGL: shader compilation FAILED");
         drmtap_debug_log(ctx, "egl: shader compilation failed");
@@ -661,6 +865,9 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         return -EIO;
     }
 
+    if (want_hash) {
+        hash_setup(ctx, state);
+    }
     /* Create FBO for offscreen rendering */
     glGenFramebuffers(1, &state->fbo);
 
@@ -712,6 +919,7 @@ static void egl_cleanup(egl_state_t *st) {
         egl_image_slot_release(st, &st->image_slots[i]);
     }
     st->next_evict = 0;
+    hash_release(&st->hash);
     if (st->linear_texture) {
         glDeleteTextures(1, &st->linear_texture);
     }
@@ -1102,6 +1310,8 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     if (!ctx || !out_data || !out_size) {
         return -EINVAL;
     }
+    int hash_was_valid = state.hash.valid;
+    state.hash.valid = 0;   /* valid again only after a skip or a committed convert */
     /* Bound the dimensions before anything multiplies them. The readback below is
      * sized width*height*4, and width does not go through validate_fb_size (which
      * bounds stride*height only), so an out-of-range width from a wire/IPC peer
@@ -1271,6 +1481,20 @@ static int egl_convert_impl(drmtap_ctx *ctx,
         }
     }
 
+    int hdr_on = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
+    if (state.hash.on) {
+        /* Unchanged since the last full convert: hand back the same buffer. */
+        void *same = NULL;
+        size_t same_size = (size_t)width * height * 4;
+        if (drmtap_ensure_out(ctx, same_size, &same) == 0 &&
+            hash_check(ctx, &state.hash, hash_was_valid, width, height, fourcc,
+                       modifier, hdr_on, same)) {
+            *out_data = same;
+            *out_size = same_size;
+            ret = 0;
+            goto cleanup;
+        }
+    }
     /* Ensure output texture */
     ensure_linear_texture(&state, width, height);
 
@@ -1287,7 +1511,6 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     /* HDR10 scanout: tone-map PQ/BT.2020 -> SDR in the shader. eotf/peak come
      * from the connector HDR_OUTPUT_METADATA (carried on ctx). ctx is
      * non-NULL here — the function returns -EINVAL up top otherwise. */
-    int hdr_on = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
     glUniform1i(glGetUniformLocation(state.program, "u_hdr"), hdr_on);
     {
         uint32_t mn = (ctx->cur_hdr_max_nits > 0)
@@ -1365,6 +1588,9 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     *out_data = dst;
     *out_size = rgba_size;
     ret = 0;
+    if (state.hash.on) {
+        hash_commit(ctx, &state.hash, width, height, fourcc, modifier, dst);
+    }
 
     drmtap_debug_log(ctx, "egl: converted %ux%u tiled→linear (%zu bytes)",
                      width, height, rgba_size);

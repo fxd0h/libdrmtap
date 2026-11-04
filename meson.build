@@ -362,6 +362,11 @@ test_convert = executable('test_convert',
     dependencies: [libdrmtap_test_dep],
     include_directories: lib_include,
 )
+test_hashskip = executable('test_hashskip',
+    'tests/test_hashskip.c',
+    dependencies: [libdrmtap_test_dep],
+    include_directories: lib_include,
+)
 test_connector_names = executable('test_connector_names',
     'tests/test_connector_names.c',
     dependencies: [libdrmtap_test_dep, libdrm_dep],
@@ -388,6 +393,11 @@ test('helper', test_helper, suite: 'unit')
 test('hdr', test_hdr, suite: 'unit')
 test('wire', test_wire, suite: 'unit')
 test('convert', test_convert, suite: 'unit')
+# The only unit test that builds a real EGL context: it needs the same LSan
+# suppression as the integration tests (the Mesa display is never terminated).
+test('hashskip', test_hashskip, suite: 'unit',
+    env: ['LSAN_OPTIONS=suppressions=' + meson.project_source_root() / 'tests' / 'lsan.supp'],
+)
 test('connector_names', test_connector_names, suite: 'unit')
 test('refresh', test_refresh, suite: 'unit')
 test('cursor', test_cursor, suite: 'unit')
