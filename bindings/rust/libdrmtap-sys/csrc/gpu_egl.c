@@ -1467,7 +1467,10 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     }
 
     int hdr_on = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
-    int hashing = state.hash.on && !hdr_on && !ctx->user_out;
+    /* Below 1080p the convert is already cheap; the hash pass costs more than it saves
+     * (measured: 1024x600 on Jetson Orin, 0.9 -> 1.5 ms CPU per frame). */
+    int hashing = state.hash.on && !hdr_on && !ctx->user_out &&
+                  (uint64_t)width * height >= 1920u * 1080u;
     if (hashing) {
         /* Unchanged since the last full convert: hand back the same buffer. */
         void *same = NULL;

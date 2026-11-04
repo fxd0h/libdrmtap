@@ -22,8 +22,8 @@
 #include <unistd.h>
 #include "drmtap.h"
 #include "udmabuf_util.h"
-#define W 256u
-#define H 128u
+#define W 1920u /* the hash only runs from 1080p up */
+#define H 1080u
 #define XR24 0x34325258u
 static int failures = 0;
 static void check(int cond, const char *what) {
