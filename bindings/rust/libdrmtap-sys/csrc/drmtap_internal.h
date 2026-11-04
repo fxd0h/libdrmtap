@@ -180,6 +180,7 @@ struct drmtap_ctx {
      * freed in drmtap_close(). */
     void *deswizzle_buf;
     size_t deswizzle_buf_size;
+    unsigned out_gen;          /* bumped by every drmtap_ensure_out() */
 
     /* Helper-mode (V2) pixel receive buffer. Same model as deswizzle_buf:
      * ctx-owned, grow-once, reused across grabs, capped, freed in

@@ -297,9 +297,6 @@ typedef struct {
 #define GL_RGBA32UI 0x8D70
 #define GL_RGBA_INTEGER 0x8D99
 #endif
-#ifndef EGL_OPENGL_ES3_BIT
-#define EGL_OPENGL_ES3_BIT 0x40
-#endif
 typedef struct {
     int on;                     /* set up and still trusted */
     GLuint prog, tex, fbo;
@@ -311,7 +308,7 @@ typedef struct {
     uint32_t w, h, fourcc;
     uint64_t modifier;
     void *out;
-    unsigned long n_full, n_skipped;
+    unsigned gen;               /* ctx->out_gen after our last write */
 } egl_hash_t;
 /* Per-thread EGL context and GL resources */
 typedef struct {
@@ -526,7 +523,8 @@ static const char *hash_vs_src =
     "    gl_Position = vec4(float((gl_VertexID & 1) * 2 - 1),\n"
     "                       float(((gl_VertexID >> 1) & 1) * 2 - 1), 0.0, 1.0);\n"
     "}\n";
-/* One invocation per block: murmur3-style mixing over the 8-bit texels. Each h1
+/* One invocation per block: murmur3-style mixing over the texels as the sampler
+ * returns them (two packHalf2x16, lossless for unorm up to 10 bit). Each h1
  * step is bijective in the texel, so a change of any single texel changes h1. */
 static const char *hash_fs_src =
     "#version 300 es\n"
@@ -541,11 +539,13 @@ static const char *hash_fs_src =
     "        int py = b.y + y; if (py >= size.y) break;\n"
     "        for (int x = 0; x < 32; x++) {\n"
     "            int px = b.x + x; if (px >= size.x) break;\n"
-    "            uvec4 q = uvec4(round(texelFetch(img, ivec2(px, py), 0) * 255.0));\n"
-    "            uint v = q.r | (q.g << 8) | (q.b << 16) | (q.a << 24);\n"
+    "            vec4 c = texelFetch(img, ivec2(px, py), 0);\n"
+    "            uint v = packHalf2x16(c.rg), v2 = packHalf2x16(c.ba);\n"
     "            uint k = v * 0xcc9e2d51u; k = rotl(k, 15); k *= 0x1b873593u;\n"
     "            h1 ^= k; h1 = rotl(h1, 13); h1 = h1 * 5u + 0xe6546b64u;\n"
-    "            uint w = v ^ (uint(px) * 0x9E3779B1u) ^ (uint(py) * 0x85EBCA6Bu);\n"
+    "            k = v2 * 0xcc9e2d51u; k = rotl(k, 15); k *= 0x1b873593u;\n"
+    "            h1 ^= k; h1 = rotl(h1, 13); h1 = h1 * 5u + 0xe6546b64u;\n"
+    "            uint w = v ^ rotl(v2, 16) ^ (uint(px) * 0x9E3779B1u) ^ (uint(py) * 0x85EBCA6Bu);\n"
     "            h2 = (h2 ^ w) * 0x01000193u; h2 ^= h2 >> 15;\n"
     "            cnt++;\n"
     "        }\n"
@@ -556,11 +556,9 @@ static const char *hash_fs_src =
 /* Needs the ES 3 context egl_init asked for plus the essl3 external extension;
  * otherwise (or on any failure) the hash stays off and every frame converts. */
 static void hash_setup(drmtap_ctx *ctx, egl_state_t *st) {
-    const char *ver = (const char *)glGetString(GL_VERSION);
     const char *ext = (const char *)glGetString(GL_EXTENSIONS);
-    if (!ver || strncmp(ver, "OpenGL ES 3", 11) != 0 || !ext ||
-        !strstr(ext, "GL_OES_EGL_image_external_essl3")) {
-        drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (no ES 3 + external_essl3)");
+    if (!ext || !strstr(ext, "GL_OES_EGL_image_external_essl3")) {
+        drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (no external_essl3)");
         return;
     }
     st->hash.prog = create_program(hash_vs_src, hash_fs_src);
@@ -593,9 +591,8 @@ static int hash_fail(drmtap_ctx *ctx, egl_hash_t *h, const char *what) {
  * set again only here (a skip) or in hash_commit() (a full convert that
  * succeeded), so any error in between leaves the cache invalid. */
 static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, uint32_t w,
-                      uint32_t h_px, uint32_t fourcc, uint64_t modifier, int hdr_on,
-                      void *out) {
-    if (!h->on || hdr_on) {      /* the HDR tone-map is not a function of the 8-bit samples */
+                      uint32_t h_px, uint32_t fourcc, uint64_t modifier, void *out) {
+    if (!h->on) {
         return 0;
     }
     uint32_t gw = (w + HASH_BS - 1) / HASH_BS, gh = (h_px + HASH_BS - 1) / HASH_BS;
@@ -648,9 +645,7 @@ static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, uint32_t w,
         h->fourcc == fourcc && h->modifier == modifier && h->out == out &&
         memcmp(h->cur, h->prev, bytes) == 0) {
         h->valid = 1;
-        h->n_skipped++;
-        drmtap_debug_log(ctx, "egl: unchanged, skipped (full=%lu skipped=%lu)",
-                         h->n_full, h->n_skipped);
+        drmtap_debug_log(ctx, "egl: unchanged, skipped");
         return 1;
     }
     return 0;
@@ -661,9 +656,7 @@ static void hash_commit(drmtap_ctx *ctx, egl_hash_t *h, uint32_t w, uint32_t h_p
     uint32_t *t = h->prev; h->prev = h->cur; h->cur = t;
     h->owner = ctx; h->w = w; h->h = h_px; h->fourcc = fourcc;
     h->modifier = modifier; h->out = out; h->valid = 1;
-    h->n_full++;
-    drmtap_debug_log(ctx, "egl: full convert (full=%lu skipped=%lu)",
-                     h->n_full, h->n_skipped);
+    drmtap_debug_log(ctx, "egl: full convert");
 }
 /* ========================================================================= */
 /* EGL display from DRM card path                                            */
@@ -826,16 +819,8 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
     int want_hash = (skip_env && skip_env[0] == '1');
     state->context = EGL_NO_CONTEXT;
     if (want_hash) {
-        EGLint attribs3[sizeof(config_attribs) / sizeof(config_attribs[0])];
-        memcpy(attribs3, config_attribs, sizeof(attribs3));
-        attribs3[1] = EGL_OPENGL_ES3_BIT;   /* the value of EGL_RENDERABLE_TYPE */
         EGLint ctx3[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-        EGLConfig config3;
-        EGLint n3 = 0;
-        if (eglChooseConfig(state->display, attribs3, &config3, 1, &n3) && n3 > 0) {
-            state->context = eglCreateContext(state->display, config3,
-                                              EGL_NO_CONTEXT, ctx3);
-        }
+        state->context = eglCreateContext(state->display, config, EGL_NO_CONTEXT, ctx3);
         if (state->context == EGL_NO_CONTEXT) {
             want_hash = 0;
             drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (no ES 3 context)");
@@ -1482,13 +1467,16 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     }
 
     int hdr_on = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
-    if (state.hash.on) {
+    int hashing = state.hash.on && !hdr_on && !ctx->user_out;
+    if (hashing) {
         /* Unchanged since the last full convert: hand back the same buffer. */
         void *same = NULL;
         size_t same_size = (size_t)width * height * 4;
+        int untouched = (ctx->out_gen == state.hash.gen);
         if (drmtap_ensure_out(ctx, same_size, &same) == 0 &&
-            hash_check(ctx, &state.hash, hash_was_valid, width, height, fourcc,
-                       modifier, hdr_on, same)) {
+            hash_check(ctx, &state.hash, hash_was_valid && untouched, width, height,
+                       fourcc, modifier, same)) {
+            state.hash.gen = ctx->out_gen;
             *out_data = same;
             *out_size = same_size;
             ret = 0;
@@ -1588,8 +1576,9 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     *out_data = dst;
     *out_size = rgba_size;
     ret = 0;
-    if (state.hash.on) {
+    if (hashing && state.hash.on) {
         hash_commit(ctx, &state.hash, width, height, fourcc, modifier, dst);
+        state.hash.gen = ctx->out_gen;
     }
 
     drmtap_debug_log(ctx, "egl: converted %ux%u tiled→linear (%zu bytes)",
