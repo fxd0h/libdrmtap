@@ -45,6 +45,8 @@ int main(void) {
     int fd = drmtap_udmabuf_make(src, sizeof(src));
     drmtap_ctx *ctx = fd >= 0 ? drmtap_open_render(NULL) : NULL;
     if (fd < 0 || !ctx) {
+        if (ctx) drmtap_close(ctx);
+        if (fd >= 0) close(fd);
         printf("  SKIP: no udmabuf / render node\n");
         return 0;
     }
@@ -54,8 +56,12 @@ int main(void) {
     d.num_planes = 1; d.pitches[0] = W * 4; /* fb_id 0: a fresh import per call, as CPU writes
                               * to a udmabuf are not seen through a cached one */
     drmtap_frame_info f;
+    memset(&f, 0, sizeof(f));
     memcpy(want, src, sizeof(src));
     if (drmtap_convert_dmabuf(ctx, &d, &f) != 0 || drmtap_frame_owns_data(&f)) {
+        if (f.data && drmtap_frame_owns_data(&f)) drmtap_frame_release(ctx, &f);
+        drmtap_close(ctx);
+        close(fd);
         printf("  SKIP: the GPU path is not in use here\n");
         return 0;
     }
@@ -87,6 +93,7 @@ int main(void) {
               "and stays after an unchanged frame");
     }
     drmtap_close(ctx);
+    close(fd);
     printf("test_hashskip: %d failures\n", failures);
     return failures ? 1 : 0;
 }
