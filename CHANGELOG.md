@@ -11,16 +11,21 @@ An opt-in way to skip the GPU readback of a frame that did not change. Off by de
 or ABI change, and nothing changes in the privileged helper.
 ### Added: `DRMTAP_SKIP_UNCHANGED`
 With `DRMTAP_SKIP_UNCHANGED=1` the EGL convert of `drmtap_grab_mapped()` and
-`drmtap_convert_dmabuf()` first runs a shader that hashes the frame in 32x32 blocks and reads
-back only the hashes. When no block changed since the last full convert, it skips the convert
-and the readback and returns the previous output buffer: same pointer, same pixels. On Intel
-Meteor Lake a still 3840x2160 frame went from about 5.9 ms to 1.7 ms of CPU.
+`drmtap_convert_dmabuf()` renders the frame on the GPU as before, then runs a second shader
+that hashes that 8 bit result in 32x32 blocks and reads back only the hashes. When no block
+changed since the last full convert, it skips the big readback and returns the previous output
+buffer: same pointer, same pixels. On Intel Meteor Lake a still 3840x2160 frame went from about
+4.8 ms to 1.3 ms of CPU, and a 1920x1080 one from 2.2 ms to 1.0 ms.
 - Only for frames of 1920x1080 or more. On a 1024x600 Jetson Orin the hash cost more than the
   readback it saves (0.9 to 1.5 ms of CPU per frame).
-- Not used for HDR (PQ) frames, for a buffer set with `drmtap_set_output_buffer()`, or when
-  OpenGL ES 3 is missing. Those take the normal path.
-- The hash reads the raw bits of every texel and its position, so a change of one bit in a
-  10 bit or 16 bit format is not lost.
+- Not used for a buffer set with `drmtap_set_output_buffer()`, or when OpenGL ES 3 is missing.
+  Those take the normal path.
+- The hash is taken from the converted image, the same one the readback returns, so it cannot
+  describe a different frame than the pixels it guards (a compositor that draws into the
+  scanout while it is read, as X11 front buffer rendering does). It covers every bit of every
+  output texel and its position. This also covers HDR (PQ) frames, which are hashed after the
+  tone map, and 10 bit or 16 bit formats: a source change that does not change the 8 bit
+  output is skipped, which is correct because the output is the same.
 - Any write to the output buffer by another path (the CPU convert, the helper copy) invalidates
   the hash, so the next frame is a full convert.
 - While it is on, treat `frame->data` as read-only: an unchanged frame hands back the buffer as
