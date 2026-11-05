@@ -260,6 +260,8 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * The returned frame->data pointer is valid until the NEXT call to this
  * function OR until drmtap_close(). Do NOT call drmtap_frame_release()
  * on frames from this function — cleanup is automatic.
+ * With DRMTAP_SKIP_UNCHANGED=1 an unchanged frame returns the same pointer with
+ * the previous pixels, so treat frame->data as read-only (see README).
  *
  * REQUIRES CAP_SYS_ADMIN IN THE CALLING PROCESS. Unlike `drmtap_grab_mapped()`, this
  * entry point has NO helper fallback: caching a persistent CPU mapping per framebuffer
