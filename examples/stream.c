@@ -14,6 +14,7 @@
  *   ./stream [device] [fps]
  *   ./stream /dev/dri/card0 30
  *   ./stream                    # auto-detect, 60fps
+ *   DRMTAP_SKIP_UNCHANGED=1 ./stream   # skip the readback of unchanged frames
  *
  * Captures frames continuously and prints timing/format statistics.
  * This demonstrates how to use libdrmtap for real-time screen streaming
