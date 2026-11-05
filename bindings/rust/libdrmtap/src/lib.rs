@@ -371,6 +371,8 @@ impl DrmTap {
     /// buffer the frame owns, and pixels still in the context's memory are copied into one. A
     /// frame mapped straight from the scanout (a linear framebuffer) is a view of that buffer,
     /// not a copy. The context keeps the last released frame's buffer for the next grab.
+    /// `DRMTAP_SKIP_UNCHANGED` has no effect on this call: the skip only applies to the
+    /// context buffer of the C API, and every frame here converts into its own.
     pub fn grab_mapped(&mut self) -> Result<Frame> {
         let ctx = self.ctx.0;
         // The first grab has no size to go on, so it converts into the context's own buffer.

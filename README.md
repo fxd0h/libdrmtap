@@ -310,7 +310,7 @@ meson test -C build --suite integration
 | `DRMTAP_DEBUG` | Set to `1` for verbose debug logging on stderr. |
 | `DRMTAP_NO_EGL` | Set to `1` to force the CPU deswizzle/convert path (skip EGL/GLES). |
 | `DRMTAP_NO_IMAGE_CACHE` | Set to `1` to re-import the `EGLImage` every frame (disable the import-once cache). |
-| `DRMTAP_SKIP_UNCHANGED` | Set to `1` to skip the GPU readback when the screen has not changed: a hash pass over 32x32 blocks runs first, and when no block moved the conversion returns the previous output buffer as it was (same pointer, same pixels). Needs OpenGL ES 3, otherwise ignored. While it is on, treat `frame->data` as read-only: the next unchanged frame returns the buffer as it is. A buffer set with `drmtap_set_output_buffer()` is never skipped. Off by default. |
+| `DRMTAP_SKIP_UNCHANGED` | Set to `1` to skip the GPU readback when the screen has not changed. Before the EGL convert, a shader hashes the frame in 32x32 blocks; when no block changed, the convert returns the previous output buffer as it was (same pointer, same pixels). Applies to the EGL path of `drmtap_grab_mapped()` and `drmtap_convert_dmabuf()`, for frames of 1920x1080 or more (below that the readback is already cheaper than the hash). Needs OpenGL ES 3; without it, and for HDR (PQ) frames, the normal path runs. While it is on, treat `frame->data` as read-only: the next unchanged frame returns the buffer as it is. A buffer set with `drmtap_set_output_buffer()` is never skipped. Off by default. |
 | `DRMTAP_FORCE_MMAP_FAIL` | Test hook — set to `1` to force the fast-path CPU mmap to fail so the EGL-detile fallback runs. |
 
 A setuid, setgid or file-capability binary ignores all of these: the library reads them with `secure_getenv()`.
@@ -331,6 +331,8 @@ process; the helper figure is the privileged `drmtap-helper` process.
 
 > Plain virtio dropped from **~14%** on the old V2 copy path to **~1.2%** once V3
 > stopped copying full frames across the socket.
+
+> With `DRMTAP_SKIP_UNCHANGED=1` a still screen costs less: on Intel Meteor Lake a 3840x2160 frame went from about 5.9 ms to 1.7 ms of CPU, 1920x1080 from 3.1 ms to 1.2 ms. A screen that changes every frame pays the hash on top of the convert (about 2.5 ms more wall time per 1080p frame on the same machine).
 
 **How it works:**
 - **V3 zero-copy (default)** — the privileged helper exports the active scanout as a DMA-BUF and passes the fd back over a `socketpair` via `SCM_RIGHTS`. No full-frame copy crosses the socket.

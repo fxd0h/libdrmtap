@@ -31,7 +31,7 @@ extern "C" {
  * site. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 12
+#define DRMTAP_VERSION_PATCH 13
 
 /**
  * @brief Get the library version as a packed integer.
@@ -225,6 +225,9 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * frame->data stays valid until drmtap_frame_release() when
  * drmtap_frame_owns_data() returns 1. When it returns 0 the pixels are in
  * memory the context reuses: the next grab on the same context overwrites them.
+ *
+ * With DRMTAP_SKIP_UNCHANGED=1 an unchanged frame returns the same pointer with
+ * the previous pixels, so treat frame->data as read-only (see README).
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)
@@ -478,6 +481,8 @@ const char *drmtap_render_node(drmtap_ctx *ctx);
  * On success frame->data points to context-owned pixels valid until the next
  * convert on this context or drmtap_close(). Do NOT free it and do NOT call
  * drmtap_frame_release() on it — there is nothing per-frame to release.
+ * With DRMTAP_SKIP_UNCHANGED=1 an unchanged frame returns the same pointer with
+ * the previous pixels, so treat frame->data as read-only (see README).
  * ALWAYS read the returned frame->format, ->stride and ->modifier to describe
  * the buffer:
  *   - the GPU (EGL) path normalizes every input to XRGB8888, stride width*4,
