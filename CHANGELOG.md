@@ -7,15 +7,20 @@ did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range t
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
 ## [0.5.13] - 2026-11-05
+
 An opt-in way to skip the GPU readback of a frame that did not change. Off by default; no API
 or ABI change, and nothing changes in the privileged helper.
+
 ### Added: `DRMTAP_SKIP_UNCHANGED`
+
 With `DRMTAP_SKIP_UNCHANGED=1` the EGL convert of `drmtap_grab_mapped()`,
-`drmtap_grab_mapped_fast()` and `drmtap_convert_dmabuf()` renders the frame on the GPU as before, then runs a second shader
-that hashes that 8 bit result in 32x32 blocks and reads back only the hashes. When no block
-changed since the last full convert, it skips the big readback and returns the previous output
-buffer: same pointer, same pixels. On Intel Meteor Lake a still 3840x2160 frame went from about
-4.8 ms to 1.3 ms of CPU, and a 1920x1080 one from 2.2 ms to 1.0 ms.
+`drmtap_grab_mapped_fast()` and `drmtap_convert_dmabuf()` renders the frame on the GPU as
+before, then runs a second shader that hashes that 8 bit result in 32x32 blocks and reads back
+only the hashes. When no block changed since the last full convert, it skips the big readback
+and returns the previous output buffer: same pointer, same pixels. On Intel Meteor Lake a still
+3840x2160 frame went from about 4.8 ms to 1.3 ms of CPU, and a 1920x1080 one from 2.2 ms to 1.0
+ms.
+
 - Only for frames of 1920x1080 or more. On a 1024x600 Jetson Orin the hash cost more than the
   readback it saves (0.9 to 1.5 ms of CPU per frame).
 - Not used for a buffer set with `drmtap_set_output_buffer()`, or when OpenGL ES 3 is missing.
@@ -32,9 +37,12 @@ buffer: same pointer, same pixels. On Intel Meteor Lake a still 3840x2160 frame 
   it is.
 - The Rust wrapper does not use it: its `grab_mapped()` converts every frame into a buffer the
   frame owns, and a buffer set by the caller is never skipped.
+
 ### Changed
+
 - With the variable set, the EGL context is created as OpenGL ES 3 instead of ES 2. Without it
   the code path is the one of 0.5.12.
+
 ## [0.5.12] - 2026-10-07
 
 Documentation only, no code change. The READMEs of both crates and of the repo, the public

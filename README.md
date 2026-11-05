@@ -318,10 +318,12 @@ A setuid, setgid or file-capability binary ignores all of these: the library rea
 The privilege model is described in [`SECURITY.md`](SECURITY.md).
 
 ### Skipping unchanged frames
+
 A capture loop on a still screen reads back the same image over and over. With
 `DRMTAP_SKIP_UNCHANGED=1` the library hashes each converted frame on the GPU and skips
 the readback when nothing changed (details in the table above). Set the variable before
 the first grab; nothing else in the loop changes:
+
 ```c
 setenv("DRMTAP_SKIP_UNCHANGED", "1", 1);   /* before the first grab on this thread */
 drmtap_ctx *ctx = drmtap_open(NULL);
@@ -333,8 +335,10 @@ for (;;) {
     }
 }
 ```
+
 From the shell, `DRMTAP_SKIP_UNCHANGED=1 DRMTAP_DEBUG=1 ./build/stream` prints
 `egl: unchanged, skipped` for each skipped frame.
+
 ## Performance
 
 CPU cost of the capture loop, measured as a share of one core (approximate; on
