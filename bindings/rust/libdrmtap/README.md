@@ -86,6 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   or free a frame's pixels: a conversion writes into a buffer the frame owns, pixels still in the
   context's memory are copied into one, and a dropped frame leaves its buffer to the next grab. A
   frame mapped straight from the scanout (a linear framebuffer) is a view of that buffer, not a copy
+  `DRMTAP_SKIP_UNCHANGED=1` (0.5.13) has no effect here: each frame converts into its own buffer, and the
+  skip only applies to the context buffer of the C API
 - **`get_cursor()`** — cursor plane position (top-left of the image, in the CRTC's physical pixels) + ARGB image. On bare-metal drivers the hotspot reads `0`, and the `Cursor::hot_x` documentation gives the two ways to recover one. **`Cursor::hotspot_from_driver()`** (since 0.5.6) says whether that `0` is the driver's own answer: `Some(true)` means both `HOTSPOT_X` and `HOTSPOT_Y` were read, so `hot_x`/`hot_y` are the driver's coordinates even at `(0, 0)`; `Some(false)` means **at least one** was absent, so they carry no information and a hotspot has to be estimated; `None` means nothing recorded an answer for that sample, which is not the same as `Some(false)`
 - **`list_displays()`** — enumerate connected monitors
 - **`displays_changed()`** — hotplug detection

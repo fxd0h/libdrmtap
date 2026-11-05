@@ -6,6 +6,30 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.13] - 2026-11-05
+An opt-in way to skip the GPU readback of a frame that did not change. Off by default; no API
+or ABI change, and nothing changes in the privileged helper.
+### Added: `DRMTAP_SKIP_UNCHANGED`
+With `DRMTAP_SKIP_UNCHANGED=1` the EGL convert of `drmtap_grab_mapped()` and
+`drmtap_convert_dmabuf()` first runs a shader that hashes the frame in 32x32 blocks and reads
+back only the hashes. When no block changed since the last full convert, it skips the convert
+and the readback and returns the previous output buffer: same pointer, same pixels. On Intel
+Meteor Lake a still 3840x2160 frame went from about 5.9 ms to 1.7 ms of CPU.
+- Only for frames of 1920x1080 or more. On a 1024x600 Jetson Orin the hash cost more than the
+  readback it saves (0.9 to 1.5 ms of CPU per frame).
+- Not used for HDR (PQ) frames, for a buffer set with `drmtap_set_output_buffer()`, or when
+  OpenGL ES 3 is missing. Those take the normal path.
+- The hash reads the raw bits of every texel and its position, so a change of one bit in a
+  10 bit or 16 bit format is not lost.
+- Any write to the output buffer by another path (the CPU convert, the helper copy) invalidates
+  the hash, so the next frame is a full convert.
+- While it is on, treat `frame->data` as read-only: an unchanged frame hands back the buffer as
+  it is.
+- The Rust wrapper does not use it: its `grab_mapped()` converts every frame into a buffer the
+  frame owns, and a buffer set by the caller is never skipped.
+### Changed
+- With the variable set, the EGL context is created as OpenGL ES 3 instead of ES 2. Without it
+  the code path is the one of 0.5.12.
 ## [0.5.12] - 2026-10-07
 
 Documentation only, no code change. The READMEs of both crates and of the repo, the public
@@ -1101,6 +1125,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.13
 [0.5.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.12
 [0.5.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.11
 [0.5.10]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.10
