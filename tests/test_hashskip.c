@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include "drmtap.h"
+#include "drmtap_internal.h"
 #include "udmabuf_util.h"
 #define W 1920u /* the hash only runs from 1080p up */
 #define H 1080u
@@ -63,6 +64,16 @@ int main(void) {
         drmtap_close(ctx);
         close(fd);
         printf("  SKIP: the GPU path is not in use here\n");
+        return 0;
+    }
+    /* Asked for (the default here) but not working on this GL: nothing to test.
+     * With the variable forced off by the caller this is the negative control,
+     * and the marker check below is meant to fail. */
+    const char *env = getenv("DRMTAP_SKIP_UNCHANGED");
+    if (env && env[0] == '1' && !drmtap_gpu_egl_skip_active()) {
+        drmtap_close(ctx);
+        close(fd);
+        printf("  SKIP: skip-unchanged is not available here (no ES 3)\n");
         return 0;
     }
     check(same_rgb(f.data, want), "first frame is the image");

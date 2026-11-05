@@ -111,7 +111,6 @@
     X(glGetError) \
     X(glGetProgramiv) \
     X(glGetShaderiv) \
-    X(glGetString) \
     X(glGetUniformLocation) \
     X(glLinkProgram) \
     X(glReadPixels) \
@@ -226,7 +225,6 @@ static int load_gl_libraries(void) {
 #define glGetError pfn_glGetError
 #define glGetProgramiv pfn_glGetProgramiv
 #define glGetShaderiv pfn_glGetShaderiv
-#define glGetString pfn_glGetString
 #define glGetUniformLocation pfn_glGetUniformLocation
 #define glLinkProgram pfn_glLinkProgram
 #define glReadPixels pfn_glReadPixels
@@ -287,10 +285,12 @@ typedef struct {
     GLuint texture;             /* GL_TEXTURE_EXTERNAL_OES bound to image */
 } egl_image_slot_t;
 
-/* DRMTAP_SKIP_UNCHANGED=1: a GPU pass hashes every 32x32 block of the imported
- * image; when no hash moved since the last full convert the readback is skipped
- * and the previous output is returned. ES 3 only (integer render target,
- * texelFetch on the external image). Grids grow once and are capped. */
+/* DRMTAP_SKIP_UNCHANGED=1: after the convert pass has rendered the linear RGBA8
+ * output on the GPU, a second pass hashes every 32x32 block of THAT image; when
+ * no hash moved since the last full convert the readback is skipped and the
+ * previous output is returned. The hash and the pixels come from the same image
+ * by construction. ES 3 only (integer render target, texelFetch). Grids grow
+ * once and are capped. */
 #define HASH_BS 32
 #define HASH_MAX_BYTES (1u << 20)   /* 65536 blocks of 16 bytes; 8K needs 518 KB */
 #ifndef GL_RGBA32UI
@@ -524,14 +524,13 @@ static const char *hash_vs_src =
     "    gl_Position = vec4(float((gl_VertexID & 1) * 2 - 1),\n"
     "                       float(((gl_VertexID >> 1) & 1) * 2 - 1), 0.0, 1.0);\n"
     "}\n";
-/* One invocation per block: murmur3-style mixing over the texels as the sampler
- * returns them (two packHalf2x16, lossless for unorm up to 10 bit). Each h1
- * step is bijective in the texel, so a change of any single texel changes h1. */
+/* One invocation per block: murmur3-style mixing over the 8-bit output texels
+ * (the float texel times 255 is exact for them). Each h1 step is bijective in the texel, so a
+ * change of any single texel changes h1; h2 also mixes in the position. */
 static const char *hash_fs_src =
     "#version 300 es\n"
-    "#extension GL_OES_EGL_image_external_essl3 : require\n"
     "precision highp float; precision highp int;\n"
-    "uniform samplerExternalOES img; uniform ivec2 size; out uvec4 o;\n"
+    "uniform sampler2D img; uniform ivec2 size; out uvec4 o;\n"
     "uint rotl(uint x, int r) { return (x << uint(r)) | (x >> uint(32 - r)); }\n"
     "void main() {\n"
     "    ivec2 b = ivec2(gl_FragCoord.xy) * 32;\n"
@@ -540,28 +539,22 @@ static const char *hash_fs_src =
     "        int py = b.y + y; if (py >= size.y) break;\n"
     "        for (int x = 0; x < 32; x++) {\n"
     "            int px = b.x + x; if (px >= size.x) break;\n"
-    "            uvec4 u = floatBitsToUint(texelFetch(img, ivec2(px, py), 0));\n"
-    "            for (int i = 0; i < 4; i++) {\n"
-    "                uint k = u[i] * 0xcc9e2d51u; k = rotl(k, 15); k *= 0x1b873593u;\n"
-    "                h1 ^= k; h1 = rotl(h1, 13); h1 = h1 * 5u + 0xe6546b64u;\n"
-    "            }\n"
-    "            uint w = u.x ^ rotl(u.y, 8) ^ rotl(u.z, 16) ^ rotl(u.w, 24) ^\n"
-    "                     (uint(px) * 0x9E3779B1u) ^ (uint(py) * 0x85EBCA6Bu);\n"
-    "            h2 = (h2 ^ w) * 0x01000193u; h2 ^= h2 >> 15;\n"
+    "            uvec4 c = uvec4(texelFetch(img, ivec2(px, py), 0) * 255.0 + 0.5);\n"
+    "            uint u = c.x | (c.y << 8) | (c.z << 16) | (c.w << 24);\n"
+    "            uint k = u * 0xcc9e2d51u; k = rotl(k, 15); k *= 0x1b873593u;\n"
+    "            h1 ^= k; h1 = rotl(h1, 13); h1 = h1 * 5u + 0xe6546b64u;\n"
+    "            h2 = (h2 ^ u ^ (uint(px) * 0x9E3779B1u) ^ (uint(py) * 0x85EBCA6Bu)) * 0x01000193u;\n"
+    "            h2 ^= h2 >> 15;\n"
     "            cnt++;\n"
     "        }\n"
     "    }\n"
     "    h1 ^= cnt; h1 ^= h1 >> 16; h1 *= 0x85ebca6bu; h1 ^= h1 >> 13;\n"
     "    o = uvec4(h1, h2, uint(b.x), uint(b.y));\n"
     "}\n";
-/* Needs the ES 3 context egl_init asked for plus the essl3 external extension;
- * otherwise (or on any failure) the hash stays off and every frame converts. */
+
+/* Needs the ES 3 context egl_init asked for; otherwise (or on any failure) the
+ * hash stays off and every frame converts. */
 static void hash_setup(drmtap_ctx *ctx, egl_state_t *st) {
-    const char *ext = (const char *)glGetString(GL_EXTENSIONS);
-    if (!ext || !strstr(ext, "GL_OES_EGL_image_external_essl3")) {
-        drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (no external_essl3)");
-        return;
-    }
     st->hash.prog = create_program(hash_vs_src, hash_fs_src);
     if (st->hash.prog == 0) {
         drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (hash shader failed)");
@@ -586,13 +579,13 @@ static int hash_fail(drmtap_ctx *ctx, egl_hash_t *h, const char *what) {
     h->valid = 0;
     return 0;
 }
-/* Hash the bound external texture. Returns 1 when every block equals the last
+/* Hash the linear output texture `tex`. Returns 1 when every block equals the last
  * full convert's and nothing else that shapes the output moved, so `out` still
  * holds the right pixels. The caller clears h->valid on entry to a convert; it is
  * set again only here (a skip) or in hash_commit() (a full convert that
  * succeeded), so any error in between leaves the cache invalid. */
-static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, uint32_t w,
-                      uint32_t h_px, uint32_t fourcc, uint64_t modifier, void *out) {
+static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, GLuint tex,
+                      uint32_t w, uint32_t h_px, uint32_t fourcc, uint64_t modifier, void *out) {
     h->fresh = 0;
     if (!h->on) {
         return 0;
@@ -635,10 +628,13 @@ static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, uint32_t w,
     glBindFramebuffer(GL_FRAMEBUFFER, h->fbo);
     glViewport(0, 0, gw, gh);
     glUseProgram(h->prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(glGetUniformLocation(h->prog, "img"), 0);
     glUniform2i(glGetUniformLocation(h->prog, "size"), (int)w, (int)h_px);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glReadPixels(0, 0, gw, gh, GL_RGBA_INTEGER, GL_UNSIGNED_INT, h->cur);
+    glBindTexture(GL_TEXTURE_2D, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (glGetError() != GL_NO_ERROR) {
         return hash_fail(ctx, h, "hash pass");
@@ -939,6 +935,9 @@ static void egl_cleanup(egl_state_t *st) {
  * by the TSD backstop at thread exit); idempotent. */
 void drmtap_gpu_egl_thread_cleanup(void) {
     egl_cleanup(&state);
+}
+int drmtap_gpu_egl_skip_active(void) {
+    return state.hash.on;
 }
 
 /* Ensure the linear output texture matches the capture dimensions */
@@ -1471,25 +1470,7 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     }
 
     int hdr_on = (ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ) ? 1 : 0;
-    /* Below 1080p the convert is already cheap; the hash pass costs more than it saves
-     * (measured: 1024x600 on Jetson Orin, 0.9 -> 1.5 ms CPU per frame). */
-    int hashing = state.hash.on && !hdr_on && !ctx->user_out &&
-                  (uint64_t)width * height >= 1920u * 1080u;
-    if (hashing) {
-        /* Unchanged since the last full convert: hand back the same buffer. */
-        void *same = NULL;
-        size_t same_size = (size_t)width * height * 4;
-        int untouched = (ctx->out_gen == state.hash.gen);
-        if (drmtap_ensure_out(ctx, same_size, &same) == 0 &&
-            hash_check(ctx, &state.hash, hash_was_valid && untouched, width, height,
-                       fourcc, modifier, same)) {
-            state.hash.gen = ctx->out_gen;
-            *out_data = same;
-            *out_size = same_size;
-            ret = 0;
-            goto cleanup;
-        }
-    }
+
     /* Ensure output texture */
     ensure_linear_texture(&state, width, height);
 
@@ -1542,6 +1523,21 @@ static int egl_convert_impl(drmtap_ctx *ctx,
 
     /* Ensure GPU rendering is complete before reading back */
     glFinish();
+    /* Below 1080p the convert is already cheap; the hash pass costs more than it saves
+     * (measured: 1024x600 on Jetson Orin, 0.9 -> 1.5 ms CPU per frame). */
+    int hashing = state.hash.on && !ctx->user_out &&
+                  (uint64_t)width * height >= 1920u * 1080u;
+    int untouched = (ctx->out_gen == state.hash.gen);
+    if (hashing) {
+        /* The hash pass below drains glGetError; take the render pass error first,
+         * or a lost context would pass as an unchanged frame. */
+        GLenum render_err = glGetError();
+        if (render_err != GL_NO_ERROR) {
+            drmtap_debug_log(ctx, "EGL: GL error 0x%x across convert, failing", render_err);
+            ret = -EIO;
+            goto cleanup;
+        }
+    }
 
     /* Read the linear pixels straight into the destination, which is the CALLER's
      * buffer when it set one (drmtap_set_output_buffer) and otherwise the ctx-owned
@@ -1563,6 +1559,16 @@ static int egl_convert_impl(drmtap_ctx *ctx,
         }
         goto cleanup;
     }
+    if (hashing && hash_check(ctx, &state.hash, hash_was_valid && untouched,
+                              state.linear_texture, width, height, fourcc, modifier, dst)) {
+        /* The image just rendered equals the last one read back: same buffer. */
+        state.hash.gen = ctx->out_gen;
+        *out_data = dst;
+        *out_size = rgba_size;
+        ret = 0;
+        goto cleanup;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, state.fbo);   /* the hash pass rebound it */
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, dst);
     /* A GL error across the render + readback (notably GL_CONTEXT_LOST after a GPU
      * reset/TDR) means the destination holds stale or undefined pixels. Fail closed
@@ -1632,6 +1638,9 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
 
 void drmtap_gpu_egl_thread_cleanup(void) {
     /* No EGL backend compiled in — nothing to release. */
+}
+int drmtap_gpu_egl_skip_active(void) {
+    return 0;
 }
 
 #endif /* HAVE_EGL */
