@@ -379,8 +379,9 @@ int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
  * leaks a whole EGL context + linear texture. No-op if this thread never detiled
  * or the library was built without EGL. Never terminates the shared display. */
 void drmtap_gpu_egl_thread_cleanup(void);
-/* 1 when this thread's EGL convert has DRMTAP_SKIP_UNCHANGED working (ES 3 and the
- * hash shader built); only meaningful after a convert on this thread. For tests. */
+/* 1 when this thread's EGL convert asked for DRMTAP_SKIP_UNCHANGED and got an ES 3
+ * context, so a broken hash shader or pass shows as a test failure, not a skip.
+ * Only meaningful after a convert on this thread. For tests. */
 int drmtap_gpu_egl_skip_active(void);
 
 /* Convert a 16-bit/channel scanout (XR48/AR48/XB48/AB48) to XRGB8888.

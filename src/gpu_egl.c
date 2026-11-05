@@ -299,6 +299,7 @@ typedef struct {
 #endif
 typedef struct {
     int on;                     /* set up and still trusted */
+    int es3;                    /* the ES 3 context was created */
     int fresh;                  /* cur holds the hash of THIS call */
     GLuint prog, tex, fbo;
     uint32_t gw, gh;            /* hash texture size = block grid */
@@ -573,8 +574,8 @@ static void hash_release(egl_hash_t *h) {
     memset(h, 0, sizeof(*h));
 }
 /* A GL step failed: stop trying for this thread (the normal path carries on). */
-static int hash_fail(drmtap_ctx *ctx, egl_hash_t *h, const char *what) {
-    drmtap_debug_log(ctx, "egl: skip-unchanged off, %s failed (gl 0x%x)", what, glGetError());
+static int hash_fail(drmtap_ctx *ctx, egl_hash_t *h, const char *what, GLenum err) {
+    drmtap_debug_log(ctx, "egl: skip-unchanged off, %s failed (gl 0x%x)", what, err);
     h->on = 0;
     h->valid = 0;
     return 0;
@@ -604,7 +605,7 @@ static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, GLuint tex,
         if (!h->cur || !h->prev) {
             free(h->cur); free(h->prev);
             h->cur = h->prev = NULL; h->cap = 0;
-            return hash_fail(ctx, h, "grid alloc");
+            return hash_fail(ctx, h, "grid alloc", glGetError());
         }
     }
     if (h->gw != gw || h->gh != gh) {
@@ -620,7 +621,7 @@ static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, GLuint tex,
         glBindTexture(GL_TEXTURE_2D, 0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            return hash_fail(ctx, h, "RGBA32UI target");
+            return hash_fail(ctx, h, "RGBA32UI target", glGetError());
         }
         h->gw = gw;
         h->gh = gh;
@@ -636,8 +637,9 @@ static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, GLuint tex,
     glReadPixels(0, 0, gw, gh, GL_RGBA_INTEGER, GL_UNSIGNED_INT, h->cur);
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (glGetError() != GL_NO_ERROR) {
-        return hash_fail(ctx, h, "hash pass");
+    GLenum pass_err = glGetError();
+    if (pass_err != GL_NO_ERROR) {
+        return hash_fail(ctx, h, "hash pass", pass_err);
     }
     h->fresh = 1;
     if (was_valid && h->owner == ctx && h->w == w && h->h == h_px &&
@@ -824,6 +826,7 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
             want_hash = 0;
             drmtap_debug_log(ctx, "egl: skip-unchanged unavailable (no ES 3 context)");
         }
+        state->hash.es3 = want_hash;
     }
     if (state->context == EGL_NO_CONTEXT) {
         drmtap_debug_log(ctx, "EGL: eglCreateContext(config=%p)...", (void*)config);
@@ -937,7 +940,7 @@ void drmtap_gpu_egl_thread_cleanup(void) {
     egl_cleanup(&state);
 }
 int drmtap_gpu_egl_skip_active(void) {
-    return state.hash.on;
+    return state.hash.es3;
 }
 
 /* Ensure the linear output texture matches the capture dimensions */
