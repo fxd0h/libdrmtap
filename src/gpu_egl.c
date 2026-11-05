@@ -299,6 +299,7 @@ typedef struct {
 #endif
 typedef struct {
     int on;                     /* set up and still trusted */
+    int fresh;                  /* cur holds the hash of THIS call */
     GLuint prog, tex, fbo;
     uint32_t gw, gh;            /* hash texture size = block grid */
     uint32_t *cur, *prev;       /* gw*gh RGBA32UI; swapped on commit */
@@ -592,6 +593,7 @@ static int hash_fail(drmtap_ctx *ctx, egl_hash_t *h, const char *what) {
  * succeeded), so any error in between leaves the cache invalid. */
 static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, uint32_t w,
                       uint32_t h_px, uint32_t fourcc, uint64_t modifier, void *out) {
+    h->fresh = 0;
     if (!h->on) {
         return 0;
     }
@@ -641,6 +643,7 @@ static int hash_check(drmtap_ctx *ctx, egl_hash_t *h, int was_valid, uint32_t w,
     if (glGetError() != GL_NO_ERROR) {
         return hash_fail(ctx, h, "hash pass");
     }
+    h->fresh = 1;
     if (was_valid && h->owner == ctx && h->w == w && h->h == h_px &&
         h->fourcc == fourcc && h->modifier == modifier && h->out == out &&
         memcmp(h->cur, h->prev, bytes) == 0) {
@@ -1297,6 +1300,7 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     }
     int hash_was_valid = state.hash.valid;
     state.hash.valid = 0;   /* valid again only after a skip or a committed convert */
+    state.hash.fresh = 0;
     /* Bound the dimensions before anything multiplies them. The readback below is
      * sized width*height*4, and width does not go through validate_fb_size (which
      * bounds stride*height only), so an out-of-range width from a wire/IPC peer
@@ -1579,7 +1583,7 @@ static int egl_convert_impl(drmtap_ctx *ctx,
     *out_data = dst;
     *out_size = rgba_size;
     ret = 0;
-    if (hashing && state.hash.on) {
+    if (hashing && state.hash.on && state.hash.fresh) {
         hash_commit(ctx, &state.hash, width, height, fourcc, modifier, dst);
         state.hash.gen = ctx->out_gen;
     }
