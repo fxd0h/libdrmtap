@@ -137,11 +137,48 @@ static void test_hotspot_provenance(void) {
     TEST_ASSERT(drmtap_cursor_hotspot_valid(&c, &valid) == -ENOTSUP);
 }
 
+static void test_cursor_copy_rows(void) {
+    _Alignas(16) uint8_t src[4096];
+    uint8_t dst[4096];
+    const size_t widths[] = {1, 3, 4, 12, 16, 17, 63, 64, 65, 256};
+    for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+        size_t row_bytes = widths[i] * 4;
+        for (size_t offset = 0; offset < 16; offset++) {
+            for (size_t padding = 0; padding <= 16; padding += 4) {
+                size_t stride = row_bytes + padding;
+                for (size_t x = 0; x < sizeof(src); x++) {
+                    src[x] = (uint8_t)(x * 37 + offset);
+                }
+                memset(dst, 0xa5, sizeof(dst));
+                drmtap_copy_cursor_pixels(dst + 1, src + offset, row_bytes, stride, 3);
+                for (size_t y = 0; y < 3; y++) {
+                    TEST_ASSERT(memcmp(dst + 1 + y * row_bytes,
+                                       src + offset + y * stride, row_bytes) == 0);
+                }
+                TEST_ASSERT(dst[0] == 0xa5);
+                TEST_ASSERT(dst[1 + 3 * row_bytes] == 0xa5);
+            }
+        }
+    }
+}
+
+static void test_cursor_copy_observes_in_place_changes(void) {
+    _Alignas(16) uint8_t src[256] = {0};
+    uint8_t dst[256];
+    drmtap_copy_cursor_pixels(dst, src, 64, 64, 4);
+    TEST_ASSERT(memcmp(src, dst, sizeof(src)) == 0);
+    src[sizeof(src) - 1] = 0xff;
+    drmtap_copy_cursor_pixels(dst, src, 64, 64, 4);
+    TEST_ASSERT(memcmp(src, dst, sizeof(src)) == 0);
+}
+
 int main(void) {
     test_getfb2_null_privilege_vs_race();
     test_getfb2_ok_handle_decides();
     test_hotspot_pair_must_be_complete();
     test_hotspot_provenance();
+    test_cursor_copy_rows();
+    test_cursor_copy_observes_in_place_changes();
     printf("test_cursor: all passed\n");
     return 0;
 }
