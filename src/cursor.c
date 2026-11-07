@@ -48,7 +48,7 @@
 #ifdef DRMTAP_CURSOR_SSE41
 /* Ordinary cached loads are costly on WC cursor mappings. Keep this function
  * separate so the rest of the library retains its baseline CPU requirement. */
-__attribute__((target("sse4.1,no-avx")))
+__attribute__((target("sse4.1")))
 static void copy_cursor_streaming(uint8_t *dst, const uint8_t *src,
                                 size_t row_bytes, size_t stride, uint32_t height) {
     _mm_mfence();
