@@ -34,6 +34,7 @@
 
 #include "drmtap.h"
 #include "drmtap_internal.h"
+#include "cursor_copy.h"
 #include "wire.h"
 
 #define TEST_ASSERT(cond) do { \

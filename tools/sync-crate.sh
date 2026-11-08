@@ -25,6 +25,7 @@ src/drm_grab.c:drm_grab.c
 src/privilege_helper.c:privilege_helper.c
 src/pixel_convert.c:pixel_convert.c
 src/cursor.c:cursor.c
+src/cursor_copy.h:cursor_copy.h
 src/gpu_egl.c:gpu_egl.c
 src/gpu_intel.c:gpu_intel.c
 src/gpu_amd.c:gpu_amd.c
@@ -44,8 +45,8 @@ for pair in $pairs; do
     srcrel="${pair%%:*}"
     dst="${pair##*:}"
     [ -f "$root/$srcrel" ] || { echo "error: missing source $srcrel" >&2; exit 1; }
-    # Apply the one packaging fixup: in csrc/ wire.h is a sibling, not at ../src/.
-    sed 's#include "../src/wire.h"#include "wire.h"#' "$root/$srcrel" > "$tmp/$dst"
+    # Internal headers included by the helper are siblings in csrc/.
+    sed 's@^#include "\.\./src/@#include "@' "$root/$srcrel" > "$tmp/$dst"
 
     if [ "$check" = 1 ]; then
         if ! diff -q "$csrc/$dst" "$tmp/$dst" >/dev/null 2>&1; then

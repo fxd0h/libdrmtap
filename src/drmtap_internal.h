@@ -22,10 +22,6 @@
 #include <pthread.h>
 #include "drmtap.h"
 
-/* Repack validated mapped cursor rows into caller-owned, tightly packed pixels. */
-void drmtap_copy_cursor_pixels(void *dst, const void *src,
-                              size_t row_bytes, size_t stride, uint32_t height);
-
 /* ========================================================================= */
 /* Context structure (shared across modules)                                 */
 /* ========================================================================= */

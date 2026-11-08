@@ -46,6 +46,7 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/un.h>
+#include "../src/cursor_copy.h"
 #include "../src/wire.h"
 #include <sys/prctl.h>
 #include <limits.h>
@@ -492,11 +493,7 @@ static int cursor_and_send(int sock, int drm_fd, uint32_t target_crtc,
                 "drmtap-helper: cursor DMA_BUF_SYNC_START failed: %s\n",
                 strerror(errno));
     }
-    for (uint32_t y = 0; y < ch; y++) {
-        memcpy(packed + (size_t)y * cw * 4,
-               (const uint8_t *)mapped + (size_t)y * cstride,
-               (size_t)cw * 4);
-    }
+    drmtap_copy_cursor_pixels(packed, mapped, (size_t)cw * 4, cstride, ch);
     if (csync_started) {
         csync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
         if (drmIoctl(prime_fd, DMA_BUF_IOCTL_SYNC, &csync) != 0) {

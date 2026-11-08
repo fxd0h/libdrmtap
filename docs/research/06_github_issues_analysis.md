@@ -245,15 +245,16 @@ Solution: #ifdef guards + fallback paths
 ### 8. Cursor readback from write-combining mappings (investigated 2026-11-07)
 
 Repeated ordinary `memcpy` reads of a GPU cursor mapping can dominate capture CPU,
-even when the desktop is idle. On Pasadena, a separate 30 Hz cursor-only A/B/A
-benchmark with a visible 256×256 cursor measured 4.57 / 1.25 / 4.52 ms of CPU per
-`drmtap_get_cursor()` call for baseline / streaming loads / baseline. These are
-cursor API measurements, not whole RustDesk service measurements.
+even when the desktop is idle. On AMD Navi23, a separate 30 Hz cursor-only
+A/B/A benchmark with a visible 256×256 cursor measured 4.57 / 1.25 / 4.52 ms
+of CPU per `drmtap_get_cursor()` call for baseline / streaming loads / baseline.
+The benchmark measured the cursor API in isolation.
 
-On x86 with SSE4.1, aligned direct cursor reads use `MOVNTDQA` streaming loads,
-with fences and the existing DMA-BUF synchronization. Other CPUs and unaligned
-geometry retain the ordinary copy. This does not cache pixels: cursor storage can
-change in place without a new framebuffer ID. The helper IPC path is unchanged.
+On x86 with SSE4.1, aligned cursor reads in both the library and helper use
+`MOVNTDQA` streaming loads with fences and the existing DMA-BUF synchronization.
+Other CPUs and unaligned geometry retain the ordinary copy. Each call reads
+fresh pixels because cursor storage can change in place without a new framebuffer
+ID. The helper sends the same packed pixels over its existing protocol.
 
 Source: Linux DRM's [`drm_memcpy_from_wc()`](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/drm_cache.c)
 uses aligned streaming loads for write-combining mappings with a CPU-feature guard
