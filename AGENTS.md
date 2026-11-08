@@ -218,7 +218,7 @@ tests/
 ├── test_deswizzle.c      # Tiling format conversion (unit, no GPU)
 ├── test_connector_names.c # Connector naming
 ├── test_convert.c        # Pixel conversion paths
-├── test_cursor.c         # Cursor helper-fallback classification (unit)
+├── test_cursor.c         # Cursor helper-fallback classification and pixel copy (unit)
 ├── test_refresh.c        # Exact CRTC refresh fraction (unit, no GPU)
 ├── test_hdr.c            # HDR metadata
 ├── test_outbuf.c         # Output buffer growth and caps
