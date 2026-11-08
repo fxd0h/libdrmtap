@@ -6,6 +6,31 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.14] - 2026-11-08
+
+Faster cursor reads on GPUs with their own video memory, and the helper builds with clang
+again. No API or ABI change.
+
+### Changed: cursor readback
+
+On x86 with SSE4.1, `drmtap_get_cursor()` now copies the cursor image with streaming loads
+(`MOVNTDQA`) when the mapping and its rows are aligned to 16 bytes, the same technique as the
+kernel `drm_memcpy_from_wc()`. Ordinary loads from a write-combining mapping of video memory
+are slow. Other CPUs and unaligned geometry keep the plain copy. The privileged helper uses
+the same copy, so a caller without `CAP_SYS_ADMIN` gets it too. The pixels are still read on
+every call inside the same DMA-BUF sync, so a cursor updated in place is still seen.
+Contributed by Jens von Bulow (#72).
+
+- AMD RX560 (amdgpu), 128x128 cursor: 3.30 to 1.88 ms of CPU per call, same pixels. On an AMD
+  Navi23 with a 256x256 cursor Jens measured 4.54 to 1.25 ms.
+- Intel Meteor Lake (i915), 64x64 cursor in system memory: no change.
+- aarch64 (Jetson Orin): the streaming copy is not compiled in.
+
+### Fixed
+
+- The helper did not build with clang 21: `-Wmissing-field-initializers` on the seccomp rule
+  for `DMA_BUF_IOCTL_SYNC` (#73). The filter it installs is the same.
+
 ## [0.5.13] - 2026-11-05
 
 An opt-in way to skip the GPU readback of a frame that did not change. Off by default; no API
@@ -1138,6 +1163,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.5.14]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.14
 [0.5.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.13
 [0.5.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.12
 [0.5.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.11
