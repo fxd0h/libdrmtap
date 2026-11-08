@@ -250,7 +250,8 @@ static int install_seccomp(void) {
     {
         int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(ioctl), 1,
                                   SCMP_A1(SCMP_CMP_EQ,
-                                          (scmp_datum_t)DMA_BUF_IOCTL_SYNC));
+                                          (scmp_datum_t)DMA_BUF_IOCTL_SYNC,
+                                          0));
         if (rc != 0) {
             seccomp_release(ctx);
             fprintf(stderr,
