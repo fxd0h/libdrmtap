@@ -87,6 +87,22 @@ linear RGBA. EGL is the **primary** detile path; a CPU deswizzle exists as a
 fallback for some formats. Plain linear framebuffers (virtio-gpu, simple VMs)
 are mapped directly with no detile.
 
+**Multi-plane scanout (0.6.0).** The screen is not always one framebuffer: a
+compositor can scan a window out of its own plane, over the desktop or under a
+desktop with a transparent hole (KWin 6.8 on Intel, rustdesk/rustdesk#17187).
+A frame is therefore a list of layers, every lit non-cursor plane of the CRTC
+with its rectangles, zpos, alpha, blend mode and rotation (`src/layers.h`, read
+by `src/layers_kms.h` with the property ids looked up once per device). One
+layer takes the single-buffer path above unchanged. Several are composed by
+`drmtap_gpu_egl_compose()`: a CRTC-sized target cleared to black, every layer
+drawn bottom to top with the kernel's blend formula, then the same hash and
+readback as the single-buffer convert. Across a process boundary a layer list
+travels as a libdrmtap packet: versioned bytes plus the fds
+(`drmtap_grab_packet()` / `drmtap_convert_packet()`), and the helper answers
+`CMD_GRAB_LAYERS` with the same packet. `drmtap_grab_desc()` keeps describing
+one buffer and returns `-EAGAIN` when that buffer is not the screen (an
+underlay).
+
 ### Proposed API (headers)
 
 ```c

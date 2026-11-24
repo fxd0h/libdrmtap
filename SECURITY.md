@@ -124,11 +124,11 @@ why).
 
 ### Request protocol / attack surface
 
-The wire protocol is tiny: three commands (`CMD_GRAB`, `CMD_GET_CURSOR`,
-`CMD_QUIT`) in a fixed 16-byte command frame (`helper_cmd_grab_t` in
+The wire protocol is tiny: five commands (`CMD_GRAB`, `CMD_GET_CURSOR`,
+`CMD_GET_CURSOR2`, `CMD_GRAB_LAYERS`, `CMD_QUIT`) in a fixed 16-byte command frame (`helper_cmd_grab_t` in
 `src/wire.h`). The frame carries a `magic` + protocol `version` + `type` +
 `length` header, and the helper rejects any frame whose magic, version or length
-do not match its own build, or whose type is not one of the three commands, and
+do not match its own build, or whose type is not one of the five commands, and
 stops serving — so a stale helper or library binary fails closed rather than
 misparsing a frame while holding `CAP_SYS_ADMIN`. Every field of the frame
 originates from the peer and is validated before use (the magic/version/length/

@@ -221,6 +221,7 @@ tests/
 ├── test_cursor.c         # Cursor helper-fallback classification and pixel copy (unit)
 ├── test_refresh.c        # Exact CRTC refresh fraction (unit, no GPU)
 ├── test_hdr.c            # HDR metadata
+├── test_layers.c         # Multi-plane: layer math, packet codec vs hostile input, CPU and GPU compose
 ├── test_outbuf.c         # Output buffer growth and caps
 ├── test_scanout.c        # Scanout geometry
 └── test_wire.c           # Helper wire protocol
@@ -394,8 +395,12 @@ libdrmtap/
 │   ├── gpu_nvidia.c       ← Nvidia: linear passthrough, block-linear -> -ENOTSUP (no CPU decoder)
 │   ├── gpu_generic.c      ← Generic/VM linear backend (virtio-gpu, simple VMs)
 │   ├── privilege_helper.c ← Helper spawn + SCM_RIGHTS / DMA-BUF passing
-│   └── privilege_helper_stub.c ← The same four entry points. Spawn, grab and
-│                              get_cursor return -EACCES; stop is a void no-op,
+│   ├── layers.h           ← A frame as a list of KMS planes + the packet codec (pure, header-only,
+│   │                        shared with the helper)
+│   ├── layers_kms.h       ← Read the lit planes of a CRTC and export them (header-only, shared)
+│   ├── wire.h             ← Helper protocol framing (header-only, shared)
+│   └── privilege_helper_stub.c ← The same five entry points. Spawn, grab,
+│                              grab_layers and get_cursor return -EACCES; stop is a void no-op,
 │                              because drmtap_close calls it unconditionally.
 │                              Selected by -Dhelper=disabled, which leaves no
 │                              fork, exec or search path in the .so. Keep its
@@ -408,11 +413,13 @@ libdrmtap/
 │   ├── test_formats.c      ← unit suite
 │   ├── test_helper.c       ← unit suite
 │   ├── test_deswizzle.c    ← unit suite
-│   ├── ...                 ← eight more unit suites, see the Testing section
+│   ├── ...                 ← nine more unit suites, see the Testing section
 │   └── lsan.supp           ← LeakSanitizer suppressions
 ├── examples/
 │   ├── screenshot.c        ← Capture one frame → PPM on stdout
 │   ├── stream.c            ← Continuous capture
+│   ├── split_capture.c     ← Split capture of one buffer (grab_desc + convert_dmabuf)
+│   ├── packet_capture.c    ← Split capture of a multi-plane frame (grab_packet + convert_packet)
 │   └── vnc_server.c        ← VNC demo (optional libvncserver)
 ├── bindings/
 │   └── rust/               ← libdrmtap-sys (FFI, embeds C sources + helper) + libdrmtap (safe)
