@@ -21,6 +21,7 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include "drmtap.h"
+#include "layers.h"
 
 /* ========================================================================= */
 /* Context structure (shared across modules)                                 */
@@ -211,6 +212,22 @@ struct drmtap_ctx {
     int      rot_prop_state;
     uint32_t cur_hdr_eotf;     /* DRMTAP_EOTF_* */
     uint32_t cur_hdr_max_nits; /* peak luminance, 0 = unknown */
+
+    /* ── Multi-plane scanout (0.6.0) ── */
+    /* Plane property ids of this device, looked up once (layers_kms.h). */
+    drmtap_kms_cache layer_cache;
+    /* Lit non-cursor planes of the CRTC at the last grab (diagnostics). */
+    uint32_t last_layer_count;
+    /* Said once per context, not per frame: more lit planes than a frame carries,
+     * and a composed frame that had to fall back to the primary plane alone. */
+    int      logged_layer_overflow;
+    int      logged_layer_fallback;
+    /* The CMD_GRAB_LAYERS latches, with the same meaning as the cursor2 ones above:
+     * a helper that does not know the command (older than 0.6.0), a helper that has
+     * answered it, and the one retry on a fresh helper before concluding it is old. */
+    int      helper_no_layers;
+    int      helper_layers_ok;
+    int      helper_layers_retried;
 };
 
 /* ========================================================================= */
@@ -268,6 +285,14 @@ void drmtap_fast_cleanup(drmtap_ctx *ctx);
 
 int drmtap_helper_grab(drmtap_ctx *ctx, helper_grab_result_t *result,
                         void *pixel_buf, size_t buf_size);
+
+/* Ask the helper for every lit layer of ctx->crtc_id (CMD_GRAB_LAYERS): the reply
+ * is a libdrmtap packet (layers.h) in buf plus its fds. Returns 0, -ENOTSUP when
+ * the helper predates the command (latched in ctx->helper_no_layers; the caller
+ * then captures the primary plane through CMD_GRAB), or another -errno. On error
+ * no fd is left open. */
+int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t *len,
+                              int *fds, uint32_t max_fds, uint32_t *nfds);
 
 /* The cursor reply struct (helper_cursor_wire_t) lives in wire.h, defined once
  * for both ends of the protocol. It used to be duplicated here with a comment
@@ -366,6 +391,10 @@ int drmtap_validate_fb_dims(uint32_t width, uint32_t height);
  * The caller must NOT free it. fb_id keys the import-once EGLImage cache (0 = no caching); for an
  * fb_id already cached with matching geometry dma_buf_fd may be -1. */
 int drmtap_gpu_egl_available(drmtap_ctx *ctx);
+/* Compose the layers of `set` (fds in set->fds) into one CRTC-sized XRGB8888
+ * frame at the resolved conversion destination (see drmtap_gpu_egl_convert). */
+int drmtap_gpu_egl_compose(drmtap_ctx *ctx, const drmtap_layer_set *set,
+                           void **out_data, size_t *out_size);
 int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
                             int dma_buf_fd,
                             uint32_t width, uint32_t height,
@@ -400,6 +429,19 @@ int drmtap_convert_rgb16(const void *src, void *dst,
 int drmtap_convert_rgb16f(const void *src, void *dst,
                           uint32_t width, uint32_t height,
                           uint32_t src_stride, uint32_t dst_stride, int bgr);
+
+/* CPU composition of linear 8-bit RGB layers (pixel_convert.c), for a build or a
+ * host without the EGL backend. drmtap_compose_cpu_supported() says whether one
+ * layer can take it: XRGB8888/ARGB8888/XBGR8888/ABGR8888, one plane, a linear (or,
+ * when `invalid_is_linear`, an unknown) modifier, no rotation or reflection.
+ * drmtap_compose_cpu() draws layers[0..n) bottom to top into a black out_w x
+ * out_h XRGB8888 image, sampling each with nearest-neighbour from its SRC rect;
+ * bases[i] points at plane 0 of layer i and spans pitches[0] * fb_height bytes.
+ * Pure, so it is unit-tested. Returns 0 or -EINVAL. */
+int drmtap_compose_cpu_supported(const drmtap_layer *l, int invalid_is_linear);
+int drmtap_compose_cpu(const drmtap_layer *layers, uint32_t n,
+                       const uint8_t *const *bases,
+                       uint32_t out_w, uint32_t out_h, uint8_t *out, uint32_t out_stride);
 
 /* Which branch drmtap_scanout_width_of() took, so the caller can log the reason
  * once and a test can assert the branch and not just the number. */

@@ -116,6 +116,23 @@ pub struct drmtap_dmabuf_desc {
     pub hdr_max_nits: u32,
 }
 
+/// Largest libdrmtap packet in bytes (multi-plane split capture, 0.6.0).
+pub const DRMTAP_PACKET_MAX_BYTES: usize = 1024;
+/// Most DMA-BUF fds a packet carries.
+pub const DRMTAP_PACKET_MAX_FDS: usize = 16;
+
+/// A packet as `drmtap_grab_packet()` fills it: opaque bytes plus the DMA-BUF
+/// fds they refer to. Layout FROZEN, like `drmtap_dmabuf_desc`. Send
+/// `bytes[..len]` and `fds[..nfds]` unchanged; `drmtap_packet_release()` closes
+/// the fds.
+#[repr(C)]
+pub struct drmtap_packet {
+    pub bytes: [u8; DRMTAP_PACKET_MAX_BYTES],
+    pub len: u32,
+    pub nfds: u32,
+    pub fds: [c_int; DRMTAP_PACKET_MAX_FDS],
+}
+
 extern "C" {
     // Version
     pub fn drmtap_version() -> c_int;
@@ -142,6 +159,17 @@ extern "C" {
     pub fn drmtap_convert_dmabuf(
         ctx: *mut drmtap_ctx,
         desc: *const drmtap_dmabuf_desc,
+        frame: *mut drmtap_frame_info,
+    ) -> c_int;
+    // Split capture of a multi-plane scanout (0.6.0)
+    pub fn drmtap_grab_packet(ctx: *mut drmtap_ctx, pkt: *mut drmtap_packet) -> c_int;
+    pub fn drmtap_packet_release(pkt: *mut drmtap_packet);
+    pub fn drmtap_convert_packet(
+        ctx: *mut drmtap_ctx,
+        bytes: *const c_void,
+        len: usize,
+        fds: *const c_int,
+        nfds: usize,
         frame: *mut drmtap_frame_info,
     ) -> c_int;
 
@@ -266,5 +294,7 @@ mod tests {
         assert!(std::mem::size_of::<drmtap_display>() > 0);
         assert!(std::mem::size_of::<drmtap_frame_info>() > 0);
         assert!(std::mem::size_of::<drmtap_cursor_info>() > 0);
+        // drmtap_packet is frozen: 1024 bytes + len + nfds + 16 fds.
+        assert_eq!(std::mem::size_of::<drmtap_packet>(), 1024 + 4 + 4 + 16 * 4);
     }
 }

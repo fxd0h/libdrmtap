@@ -38,6 +38,9 @@
 #include "drmtap_internal.h"
 #include "wire.h"
 
+_Static_assert(WIRE_MAX_FDS == DRMTAP_LAYERS_MAX_FDS,
+               "a CMD_GRAB_LAYERS reply carries the fds of one layer set");
+
 /* Must match values in drmtap-helper.c */
 #define HELPER_SOCKET_FD 3
 /* CMD_GRAB / CMD_GET_CURSOR / CMD_QUIT and the command frame (helper_cmd_grab_t,
@@ -435,5 +438,96 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
         }
     }
 
+    return 0;
+}
+
+/* Every lit layer of the CRTC through the helper (CMD_GRAB_LAYERS). The reply
+ * header carries the fds; the packet bytes follow. An old helper does not know the
+ * command and closes the connection, which reads exactly like a helper that died
+ * before answering, so the same rule as the cursor2 path applies: one retry on a
+ * fresh helper, and only a second silence latches "old helper". */
+int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t *len,
+                              int *fds, uint32_t max_fds, uint32_t *nfds) {
+    *len = 0;
+    *nfds = 0;
+    if (ctx->helper_no_layers) {
+        return -ENOTSUP;
+    }
+    if (ctx->helper_fd < 0) {
+        int ret = drmtap_helper_spawn(ctx);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    helper_cmd_grab_t hcmd = wire_cmd(CMD_GRAB_LAYERS, ctx->crtc_id);
+    ssize_t n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+    if (n != sizeof(hcmd)) {
+        drmtap_helper_stop(ctx);
+        int ret = drmtap_helper_spawn(ctx);
+        if (ret < 0) {
+            return ret;
+        }
+        n = send(ctx->helper_fd, &hcmd, sizeof(hcmd), MSG_NOSIGNAL);
+        if (n != sizeof(hcmd)) {
+            drmtap_set_error(ctx, "helper communication failed after respawn");
+            return -EIO;
+        }
+    }
+
+    helper_layers_reply_t rep;
+    int got[WIRE_MAX_FDS];
+    size_t ngot = 0;
+    memset(&rep, 0, sizeof(rep));
+    size_t want = max_fds < WIRE_MAX_FDS ? max_fds : WIRE_MAX_FDS;
+    if (wire_recv_fds(ctx->helper_fd, &rep, sizeof(rep), got, want, &ngot) < 0) {
+        drmtap_helper_stop(ctx);
+        if (!ctx->helper_layers_ok) {
+            if (!ctx->helper_layers_retried) {
+                ctx->helper_layers_retried = 1;
+                drmtap_debug_log(ctx, "no answer to CMD_GRAB_LAYERS; retrying it on a "
+                                 "fresh helper before concluding the binary is old");
+                return drmtap_helper_grab_layers(ctx, buf, cap, len, fds, max_fds, nfds);
+            }
+            ctx->helper_no_layers = 1;
+            drmtap_debug_log(ctx, "helper did not answer CMD_GRAB_LAYERS twice: it predates "
+                             "0.6.0, so a multi-plane frame is captured from its primary "
+                             "plane only (update drmtap-helper to compose overlay planes)");
+            return -ENOTSUP;
+        }
+        drmtap_set_error(ctx, "helper layer reply recv failed");
+        return -EIO;
+    }
+    ctx->helper_layers_ok = 1;
+    if (rep.status != 0 || rep.packet_len == 0) {
+        for (size_t i = 0; i < ngot; i++) {
+            close(got[i]);
+        }
+        drmtap_set_error(ctx, "helper could not export the layers of crtc %u",
+                         ctx->crtc_id);
+        return -EIO;
+    }
+    if (rep.packet_len > cap || rep.nfds != ngot) {
+        /* The bytes that follow cannot be framed any more: drop the channel. */
+        for (size_t i = 0; i < ngot; i++) {
+            close(got[i]);
+        }
+        drmtap_helper_stop(ctx);
+        drmtap_set_error(ctx, "helper layer reply malformed (len %u, %u fds declared, "
+                         "%zu received)", rep.packet_len, rep.nfds, ngot);
+        return -EPROTO;
+    }
+    if (recv_all(ctx->helper_fd, buf, rep.packet_len) < 0) {
+        for (size_t i = 0; i < ngot; i++) {
+            close(got[i]);
+        }
+        drmtap_helper_stop(ctx);
+        drmtap_set_error(ctx, "helper layer packet recv failed");
+        return -EIO;
+    }
+    for (size_t i = 0; i < ngot; i++) {
+        fds[i] = got[i];
+    }
+    *nfds = (uint32_t)ngot;
+    *len = rep.packet_len;
     return 0;
 }

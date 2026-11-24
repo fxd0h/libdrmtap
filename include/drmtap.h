@@ -30,8 +30,8 @@ extern "C" {
  * wrapper crate share this one version; tools/check-version.sh verifies every
  * site. */
 #define DRMTAP_VERSION_MAJOR 0
-#define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 14
+#define DRMTAP_VERSION_MINOR 6
+#define DRMTAP_VERSION_PATCH 0
 
 /**
  * @brief Get the library version as a packed integer.

@@ -51,7 +51,7 @@ int main() {
 
 ```toml
 [dependencies]
-libdrmtap = "0.5"
+libdrmtap = "0.6"
 ```
 
 > This pulls in `libdrmtap-sys`, which embeds and statically compiles the

@@ -55,6 +55,7 @@
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>  /* DRM_FORMAT_MOD_INVALID */
 #include <linux/dma-buf.h>  /* struct dma_buf_sync, DMA_BUF_IOCTL_SYNC */
+#include "layers_kms.h"  /* CMD_GRAB_LAYERS: the same layer read + packet as the library */
 
 #ifdef HAVE_LIBCAP
 #include <sys/capability.h>
@@ -931,6 +932,61 @@ out:
     return ret;
 }
 
+/* Every lit layer of the CRTC (CMD_GRAB_LAYERS, 0.6.0): read the planes, export
+ * each framebuffer read-only, read again (layers_kms.h), and answer with the
+ * reply header carrying the fds followed by a libdrmtap packet. Any failure is a
+ * status-1 header with no fds and no packet, after which the library captures the
+ * primary plane through CMD_GRAB. Every exported fd is closed here once sent. */
+static int layers_and_send(int sock, int drm_fd, uint32_t crtc_id) {
+    static drmtap_kms_cache cache;   /* zero = not built; one device per helper */
+    helper_layers_reply_t rep;
+    drmtap_layer_set s;
+    uint8_t buf[DRMTAP_PKT_MAX_LEN];
+    memset(&rep, 0, sizeof(rep));
+    const char *why = NULL;
+    if (crtc_id == 0) {
+        why = "CMD_GRAB_LAYERS needs a CRTC id";
+        goto fail;
+    }
+    int n = drmtap_kms_capture_layers(drm_fd, &cache, crtc_id, &s, NULL);
+    if (n <= 0) {
+        why = n == 0 ? "no lit plane on the CRTC" : "reading or exporting the planes failed";
+        goto fail;
+    }
+    if (s.lit > s.count) {
+        why = "more lit planes than a packet carries";
+        goto fail;
+    }
+    if (drmtap_kms_crtc_size(drm_fd, crtc_id, &s.crtc_w, &s.crtc_h) != 0) {
+        drmtap_layers_close_fds(&s);
+        why = "the CRTC has no mode";
+        goto fail;
+    }
+    read_hdr_metadata(drm_fd, crtc_id, &s.hdr_eotf, &s.hdr_max_nits);
+    int len = drmtap_packet_encode(&s, buf, sizeof(buf));
+    if (len < 0) {
+        drmtap_layers_close_fds(&s);
+        why = "the layer set does not encode";
+        goto fail;
+    }
+    rep.status = 0;
+    rep.packet_len = (uint32_t)len;
+    rep.nfds = s.nfds;
+    int ret = wire_send_fds(sock, s.fds, s.nfds, &rep, sizeof(rep));
+    if (ret == 0) {
+        ret = send_all(sock, buf, (size_t)len);
+    }
+    drmtap_layers_close_fds(&s);
+    return ret;
+
+fail:
+    fprintf(stderr, "drmtap-helper: CMD_GRAB_LAYERS: %s (%s)\n", why,
+            errno ? strerror(errno) : "-");
+    rep.status = 1;
+    send_all(sock, &rep, sizeof(rep));
+    return -1;
+}
+
 /* ========================================================================= */
 /* Main event loop                                                           */
 /* ========================================================================= */
@@ -1040,6 +1096,12 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "drmtap-helper: dropped implicit DRM master on %s\n", device);
     }
     drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+    /* The plane SRC/CRTC rectangles and FB_ID/CRTC_ID that CMD_GRAB_LAYERS reads
+     * are atomic properties, hidden without this cap. A per-fd flag: no commit is
+     * ever made, and the other commands read nothing it changes. If a driver
+     * refuses it, CMD_GRAB_LAYERS answers with an error and the library captures
+     * the primary plane through CMD_GRAB. */
+    drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1);
 
     /* Detect virtio_gpu once */
     int is_virtio = 0;
@@ -1106,6 +1168,10 @@ int main(int argc, char *argv[]) {
 
             case CMD_GET_CURSOR2:
                 cursor_and_send(sock, drm_fd, hcmd.crtc_id, 1);
+                break;
+
+            case CMD_GRAB_LAYERS:
+                layers_and_send(sock, drm_fd, hcmd.crtc_id);
                 break;
 
             case CMD_QUIT:

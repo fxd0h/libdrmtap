@@ -35,6 +35,8 @@ helper/drmtap-helper.c:drmtap-helper.c
 include/drmtap.h:drmtap.h
 src/drmtap_internal.h:drmtap_internal.h
 src/wire.h:wire.h
+src/layers.h:layers.h
+src/layers_kms.h:layers_kms.h
 "
 
 tmp="$(mktemp -d)"

@@ -30,8 +30,8 @@ extern "C" {
  * wrapper crate share this one version; tools/check-version.sh verifies every
  * site. */
 #define DRMTAP_VERSION_MAJOR 0
-#define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 14
+#define DRMTAP_VERSION_MINOR 6
+#define DRMTAP_VERSION_PATCH 0
 
 /**
  * @brief Get the library version as a packed integer.
@@ -205,6 +205,13 @@ typedef struct {
  * to hand the buffer to another process use `drmtap_grab_desc()` plus
  * `drmtap_convert_dmabuf()` on the receiving side.
  *
+ * Multi-plane scanout (0.6.0): when the CRTC blends several planes (a window the
+ * compositor put on its own overlay or underlay plane, see drmtap_grab_packet())
+ * there is no single buffer to hand out. This call then composes the planes like
+ * drmtap_grab_mapped() does and returns PIXELS: dma_buf_fd = -1, frame->data the
+ * CRTC-sized XRGB8888 frame, valid until the next grab or drmtap_close(). A
+ * consumer that needs an fd to pass on uses drmtap_grab_packet() instead.
+ *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)
  * @return 0 on success, negative errno on error
@@ -228,6 +235,14 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  *
  * With DRMTAP_SKIP_UNCHANGED=1 an unchanged frame returns the same pointer with
  * the previous pixels, so treat frame->data as read-only (see README).
+ *
+ * Multi-plane scanout (0.6.0): when the CRTC blends several planes (see
+ * drmtap_grab_packet()) the frame is composed the way the display shows it: the
+ * CRTC size, every plane at its place, bottom to top, with its blend mode and
+ * alpha, XRGB8888 in context-owned memory. Through drmtap-helper this needs a
+ * 0.6.0 helper; an older one gives the primary plane only. Composition needs the
+ * EGL backend, except for linear 8-bit RGB planes the CPU can compose; otherwise
+ * the frame is the primary plane alone, said once in the debug log.
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)
@@ -268,6 +283,12 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * is the whole point of it, and the helper hands over a fresh fd per grab, so there is
  * nothing stable to cache. Without the capability it returns -EACCES on every call, on
  * any GPU, and `drmtap_error()` names `drmtap_grab_mapped()` as the call to use instead.
+ *
+ * Multi-plane scanout (0.6.0): a frame of several planes is composed as in
+ * drmtap_grab_mapped() and nothing is cached for it (the GPU import cache still
+ * avoids re-importing the buffers). A single-plane frame takes the cached path as
+ * before; finding out which costs one property read per plane that can drive the
+ * CRTC (five on an Intel pipe), which replaced the per-frame drmModeGetPlane.
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated, reused between calls)
@@ -322,6 +343,11 @@ int drmtap_frame_owns_data(const drmtap_frame_info *frame);
  * The fd + metadata are carried between the two processes by the caller
  * (e.g. over a unix socket with SCM_RIGHTS) — libdrmtap does not impose a
  * wire format.
+ *
+ * Since 0.6.0 the packet API further down (drmtap_grab_packet() +
+ * drmtap_convert_packet()) is the split capture that also covers a scanout made of
+ * several planes; drmtap_grab_desc() describes one buffer and documents what it
+ * does when the screen is more than one.
  */
 
 /* Electro-optical transfer function of a scanout, from the connector
@@ -385,10 +411,26 @@ typedef struct {
  * calling drmtap_convert_dmabuf(), and owns/closes that received fd. Fails with
  * -ENOTSUP if the capture path produced pixels but no transferable dma-buf.
  *
+ * Multi-plane scanout (0.6.0). The descriptor carries ONE buffer. When the CRTC
+ * blends several planes (see drmtap_grab_packet()) this call keeps today's
+ * behaviour where it is still a usable picture, and refuses where it is not:
+ *   - the PRIMARY plane covers the whole CRTC (other planes sit on top of it, an
+ *     overlay window): it returns the primary plane as before. The overlay
+ *     window is NOT in the frame;
+ *   - the primary plane does not cover the CRTC (the desktop is on an overlay
+ *     plane with a transparent hole and a window sits below it on the primary, an
+ *     underlay): it returns -EAGAIN and no frame. Keep showing the last frame;
+ *     the compositor goes back to one plane when the window stops being an
+ *     underlay (seen after about a second with KWin 6.8).
+ * Only the packet API (drmtap_grab_packet() + drmtap_convert_packet()) captures
+ * those frames whole.
+ *
  * @param ctx   Capture context (a real KMS context from drmtap_open)
  * @param desc  Output descriptor (value type; ship over IPC, fixing up the fd)
  * @param frame Output frame — owns the dma_buf_fd; release when done
  * @return 0 on success, negative errno on error
+ * @retval -EAGAIN The CRTC is in a multi-plane state one buffer cannot describe
+ *                 (an underlay, see above); no frame, try again on the next one
  */
 int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
                      drmtap_frame_info *frame);
@@ -530,6 +572,129 @@ const char *drmtap_render_node(drmtap_ctx *ctx);
  */
 int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                           drmtap_frame_info *frame);
+
+/* ========================================================================= */
+/* Split capture of a multi-plane scanout: the libdrmtap packet (0.6.0)      */
+/* ========================================================================= */
+/*
+ * What is on the panel is not always one framebuffer. A compositor can put a
+ * window on its own KMS plane, above the desktop (an overlay) or below a desktop
+ * that has a transparent hole for it (an underlay), and the display engine blends
+ * the planes on the way out. KWin 6.8 does this on Intel when one output is
+ * enabled (rustdesk/rustdesk#17187). drmtap_grab_desc() describes ONE buffer, so
+ * it cannot carry such a frame.
+ *
+ * The packet carries every lit plane of the CRTC: an opaque, versioned byte string
+ * plus an array of DMA-BUF fds. The exporter fills it with drmtap_grab_packet(),
+ * the caller moves the bytes and the fds to the converter (one sendmsg with
+ * SCM_RIGHTS is enough) without looking inside, and the converter turns them into
+ * one CRTC-sized XRGB8888 frame with drmtap_convert_packet(). A later change to
+ * what a frame is made of stays inside libdrmtap, on both ends.
+ *
+ *   exporter:  drmtap_grab_packet(ctx, &pkt);
+ *              sendmsg(bytes = pkt.bytes[0..pkt.len), SCM_RIGHTS = pkt.fds[0..pkt.nfds));
+ *              drmtap_packet_release(&pkt);
+ *   converter: recvmsg(...);
+ *              drmtap_convert_packet(rctx, bytes, len, fds, nfds, &frame);
+ *              close the received fds.
+ *
+ * Both ends must run 0.6.0 or later. examples/packet_capture.c is a complete
+ * two-process example.
+ */
+
+/** Largest packet in bytes (a version-1 packet of four layers is 548). */
+#define DRMTAP_PACKET_MAX_BYTES 1024
+/** Most fds a packet carries: four layers of up to four buffer objects. */
+#define DRMTAP_PACKET_MAX_FDS 16
+
+/**
+ * @brief A packet as drmtap_grab_packet() fills it.
+ *
+ * Layout is FROZEN, like drmtap_dmabuf_desc and drmtap_device: it is written into
+ * caller-owned storage, so it never grows. What a frame contains can change
+ * inside `bytes` (which is versioned), never in this struct.
+ */
+typedef struct {
+    uint8_t  bytes[DRMTAP_PACKET_MAX_BYTES]; /**< Opaque. Send bytes[0..len) as they are */
+    uint32_t len;                            /**< Used bytes */
+    uint32_t nfds;                           /**< Used entries of fds[] */
+    int      fds[DRMTAP_PACKET_MAX_FDS];     /**< DMA-BUF fds, owned by the packet */
+} drmtap_packet;
+
+/**
+ * @brief Capture every lit plane of the CRTC into a packet (exporter side).
+ *
+ * Reads the lit non-cursor planes of the context's CRTC (framebuffer, source and
+ * destination rectangles, zpos, alpha, blend mode, rotation, YCbCr encoding and
+ * range), exports each framebuffer as a read-only DMA-BUF, and reads the planes
+ * again: if the compositor flipped in between, it does it once more, so the
+ * buffers in a packet belong to one frame. A single-plane scanout makes a packet
+ * of one layer, which converts exactly like drmtap_grab_desc() +
+ * drmtap_convert_dmabuf().
+ *
+ * More than four lit planes: the packet carries the primary plane alone (the
+ * debug log says so once per context). Without CAP_SYS_ADMIN the planes come from
+ * drmtap-helper; a helper older than 0.6.0 can only give the primary plane, and the
+ * packet then holds that one, like drmtap_grab_desc() (including its -EAGAIN).
+ *
+ * The packet owns its fds: call drmtap_packet_release() once they are sent (also
+ * after a failed send). No GPU library is loaded by this call.
+ *
+ * @param ctx Capture context (from drmtap_open, not drmtap_open_render)
+ * @param pkt Output, caller-owned
+ * @return 0 on success, negative errno on error (pkt then owns no fd)
+ * @retval -ENODEV No plane is scanning out on the CRTC
+ * @retval -ENOTSUP Render-only context
+ */
+int drmtap_grab_packet(drmtap_ctx *ctx, drmtap_packet *pkt);
+
+/**
+ * @brief Close the fds a packet owns and empty it. Safe on an empty or NULL packet.
+ */
+void drmtap_packet_release(drmtap_packet *pkt);
+
+/**
+ * @brief Convert a packet into one frame (converter side).
+ *
+ * The result is the CRTC as the panel shows it: every layer drawn bottom to top
+ * over a black background, each scaled from its source rectangle into its
+ * destination rectangle, rotated or reflected as its plane is, and blended with
+ * the plane's pixel blend mode and alpha. frame->width/height are the CRTC mode,
+ * and the pixels are XRGB8888 at stride width*4 (read frame->format and
+ * ->stride anyway, as with drmtap_convert_dmabuf()). A one-layer packet converts
+ * exactly as drmtap_convert_dmabuf() does with the descriptor of that buffer.
+ * frame->data is context-owned, valid until the next convert or drmtap_close();
+ * do not call drmtap_frame_release() on it. drmtap_set_output_buffer() and
+ * DRMTAP_SKIP_UNCHANGED apply as they do to drmtap_convert_dmabuf().
+ *
+ * The bytes and the fds cross a privilege boundary and are treated as hostile.
+ * The packet is checked field by field before anything is used (magic, version,
+ * lengths, layer count, that the declared fd count equals @p nfds, that every
+ * plane indexes one of them, that every rectangle lies inside its framebuffer,
+ * every enum is in range), and every fd must be a genuine DMA-BUF large enough for
+ * the planes that use it. Anything else is -EINVAL, before any import or mmap.
+ *
+ * The fds stay the caller's: this call never closes them. The GPU import keeps
+ * its own reference, so they can be closed right after.
+ *
+ * Composition needs the EGL backend. Without it (a -Degl=disabled build, no
+ * libEGL, a setuid or file-capability process) the CPU composes layers that are
+ * linear 8-bit RGB with no rotation; a packet with any other layer converts its
+ * primary plane alone, and the debug log says so once per context.
+ *
+ * @param ctx   Context from drmtap_open_render() (or any context with EGL)
+ * @param bytes Packet bytes as received
+ * @param len   Their length
+ * @param fds   The fds received with them, in order
+ * @param nfds  How many
+ * @param frame Output frame
+ * @return 0 on success, negative errno on error
+ * @retval -EINVAL Malformed packet, or an fd that is not a large enough DMA-BUF
+ * @retval -EPROTO Not a libdrmtap packet
+ * @retval -EPROTONOSUPPORT A packet version this library does not read (update it)
+ */
+int drmtap_convert_packet(drmtap_ctx *ctx, const void *bytes, size_t len,
+                          const int *fds, size_t nfds, drmtap_frame_info *frame);
 
 /* ========================================================================= */
 /* Cursor Capture                                                            */
