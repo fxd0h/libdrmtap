@@ -1806,14 +1806,32 @@ static EGLImageKHR egl_import_layer(drmtap_ctx *ctx, const drmtap_layer_set *set
     return image;
 }
 
+/* 1 when `s` holds a texture an earlier layer of the frame being composed has
+ * already picked. Such a slot must survive until the draw: releasing it (to evict,
+ * or because a later layer has the same fb_id with another layout) would leave the
+ * earlier layer drawing from a deleted texture, which comes out black. */
+static int egl_slot_pinned(const egl_image_slot_t *s, egl_image_slot_t *const *pinned,
+                           uint32_t npinned) {
+    for (uint32_t i = 0; i < npinned; i++) {
+        if (pinned[i] == s) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* The external texture for one layer: from the import cache when this fb_id was
  * imported with the same layout and buffer identity, else a fresh import that is
- * adopted into the cache. *uncached is set when the texture must be freed by the
- * caller after the frame (cache disabled or fb_id 0). */
+ * adopted into the cache. Slots in pinned[] (used by earlier layers of this frame)
+ * are never released or reused; when no other slot is free the import stays
+ * uncached for this frame. *uncached is set when the texture must be freed by the
+ * caller after the frame. *slot_out is the cache slot used, or NULL. */
 static int egl_layer_texture(drmtap_ctx *ctx, const drmtap_layer_set *set,
                              const drmtap_layer *l, GLuint *tex, EGLImageKHR *img,
-                             int *uncached) {
+                             int *uncached, egl_image_slot_t *const *pinned,
+                             uint32_t npinned, egl_image_slot_t **slot_out) {
     *uncached = 0;
+    *slot_out = NULL;
     int use_cache = (l->fb_id != 0 && !state.cache_disabled);
     ino_t cur_inode = 0;
     int fd0 = set->fds[l->fd_index[0]];
@@ -1847,7 +1865,11 @@ static int egl_layer_texture(drmtap_ctx *ctx, const drmtap_layer_set *set,
             if (geom_match && ident_match) {
                 *tex = s->texture;
                 *img = s->image;
+                *slot_out = s;
                 return 0;
+            }
+            if (egl_slot_pinned(s, pinned, npinned)) {
+                continue;   /* an earlier layer of this frame draws from it */
             }
             egl_image_slot_release(&state, s);
             if (!free_slot) {
@@ -1865,17 +1887,27 @@ static int egl_layer_texture(drmtap_ctx *ctx, const drmtap_layer_set *set,
         pfn_eglDestroyImageKHR(state.display, image);
         return ret;
     }
-    if (!use_cache) {
+    egl_image_slot_t *dst = use_cache ? free_slot : NULL;
+    if (use_cache && !dst) {
+        /* Round-robin eviction, skipping the slots this frame already uses. */
+        for (int k = 0; k < DRMTAP_EGL_IMAGE_SLOTS; k++) {
+            egl_image_slot_t *c = &state.image_slots[state.next_evict % DRMTAP_EGL_IMAGE_SLOTS];
+            state.next_evict++;
+            if (!egl_slot_pinned(c, pinned, npinned)) {
+                dst = c;
+                break;
+            }
+        }
+        if (dst) {
+            egl_image_slot_release(&state, dst);
+        }
+    }
+    if (!dst) {
+        /* Cache disabled, fb_id 0, or every slot held by this frame: freed after it. */
         *uncached = 1;
         *tex = t;
         *img = image;
         return 0;
-    }
-    egl_image_slot_t *dst = free_slot;
-    if (!dst) {
-        dst = &state.image_slots[state.next_evict % DRMTAP_EGL_IMAGE_SLOTS];
-        state.next_evict++;
-        egl_image_slot_release(&state, dst);
     }
     dst->owner = ctx;
     dst->fb_id = l->fb_id;
@@ -1892,6 +1924,7 @@ static int egl_layer_texture(drmtap_ctx *ctx, const drmtap_layer_set *set,
     dst->texture = t;
     *tex = t;
     *img = image;
+    *slot_out = dst;
     return 0;
 }
 
@@ -1945,9 +1978,16 @@ static int egl_compose_impl(drmtap_ctx *ctx, const drmtap_layer_set *set,
     EGLImageKHR imgs[DRMTAP_MAX_LAYERS];
     int uncached[DRMTAP_MAX_LAYERS] = {0};
     uint32_t got = 0;
+    egl_image_slot_t *pinned[DRMTAP_MAX_LAYERS];
+    uint32_t npinned = 0;
     for (uint32_t i = 0; i < set->count; i++) {
         imgs[i] = EGL_NO_IMAGE_KHR;
-        ret = egl_layer_texture(ctx, set, &set->layers[i], &texs[i], &imgs[i], &uncached[i]);
+        egl_image_slot_t *used = NULL;
+        ret = egl_layer_texture(ctx, set, &set->layers[i], &texs[i], &imgs[i], &uncached[i],
+                                pinned, npinned, &used);
+        if (ret == 0 && used) {
+            pinned[npinned++] = used;
+        }
         if (ret != 0) {
             drmtap_set_error(ctx, "egl: could not import layer %u (plane %u, fb %u, "
                              "fourcc %.4s, modifier 0x%llx)", i, set->layers[i].plane_id,
