@@ -460,6 +460,15 @@ executable('split_capture',
     install: false,
 )
 
+# Multi-plane split capture: drmtap_grab_packet -> SOCK_SEQPACKET + SCM_RIGHTS ->
+# drmtap_convert_packet in a second process (fork).
+executable('packet_capture',
+    'examples/packet_capture.c',
+    dependencies: [libdrmtap_dep],
+    include_directories: lib_include,
+    install: false,
+)
+
 # VNC server example (optional — requires libvncserver)
 libvncserver_dep = dependency('libvncserver', required: false)
 if libvncserver_dep.found()
