@@ -40,6 +40,7 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <linux/dma-buf.h>
 
 #include <xf86drm.h>
@@ -383,6 +384,14 @@ int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den) {
 int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation) {
     if (!ctx || !rotation) {
         return -EINVAL;
+    }
+    /* A composed frame is the CRTC raster: every plane was drawn with its own
+     * rotation applied, so it is in screen orientation, like a framebuffer the
+     * compositor rotated in software. Answer ROTATE_0 for it, whichever plane it
+     * came from and on a render-only context too (convert_packet). */
+    if (ctx->last_frame_composed) {
+        *rotation = DRMTAP_ROT_0;
+        return 0;
     }
     if (ctx->is_render_only) {
         return -ENOTSUP;
@@ -990,12 +999,36 @@ static uint32_t layer_min_bpp(uint32_t fourcc) {
     }
 }
 
+/* Rows of plane p of a known YUV layout of `height` rows, so a chroma plane is
+ * bounded by its whole extent and not only by one row: since 0.6.0 a packet can
+ * put it in an fd of its own, and the GPU import reads all of it. 0 for a layout
+ * this does not know (a compression/clear-colour aux plane, whose extent is a
+ * format-specific fraction): the caller then keeps the one-row bound. */
+static uint32_t layer_plane_rows(uint32_t fourcc, uint32_t p, uint32_t height) {
+    uint32_t half = (height + 1) / 2;
+    switch (fourcc) {
+    case DRM_FORMAT_NV12: case DRM_FORMAT_NV21:
+    case DRM_FORMAT_P010: case DRM_FORMAT_P012: case DRM_FORMAT_P016:
+        return p == 1 ? half : 0;
+    case DRM_FORMAT_YUV420: case DRM_FORMAT_YVU420:
+        return (p == 1 || p == 2) ? half : 0;
+    case DRM_FORMAT_NV16: case DRM_FORMAT_NV61: case DRM_FORMAT_NV24: case DRM_FORMAT_NV42:
+        return p == 1 ? height : 0;
+    case DRM_FORMAT_YUV422: case DRM_FORMAT_YVU422:
+    case DRM_FORMAT_YUV444: case DRM_FORMAT_YVU444:
+        return (p == 1 || p == 2) ? height : 0;
+    default:
+        return 0;
+    }
+}
+
 /* The fds of a set that crossed a process boundary (a packet, or the helper's
  * reply). Each must be a genuine DMA-BUF -- immutable in size, so the bound cannot
  * be raced by a peer that shrinks it -- and large enough for every plane that
- * indexes it: plane 0 needs offset + pitch * height, the auxiliary planes (CCS,
- * chroma) at least offset + one row, the same rule drmtap_convert_dmabuf applies.
- * Runs before any import or mmap. */
+ * indexes it, each plane against the size of its OWN fd (lseek): plane 0 needs
+ * offset + pitch * height, a chroma plane of a known YUV layout offset + pitch *
+ * its rows, and any other auxiliary plane (CCS, clear colour) at least offset +
+ * one row, the rule drmtap_convert_dmabuf applies. Runs before any import or mmap. */
 static int validate_layer_fds(drmtap_ctx *ctx, const drmtap_layer_set *s) {
     off_t size[DRMTAP_LAYERS_MAX_FDS];
     if (s->nfds == 0 || s->nfds > DRMTAP_LAYERS_MAX_FDS) {
@@ -1031,9 +1064,12 @@ static int validate_layer_fds(drmtap_ctx *ctx, const drmtap_layer_set *s) {
             return -EINVAL;
         }
         for (uint32_t p = 0; p < l->num_planes && p < 4; p++) {
-            uint64_t need = (p == 0)
-                ? (uint64_t)l->offsets[0] + (uint64_t)l->pitches[0] * l->fb_height
-                : (uint64_t)l->offsets[p] + (uint64_t)l->pitches[p];
+            uint32_t rows = (p == 0) ? l->fb_height
+                                     : layer_plane_rows(l->format, p, l->fb_height);
+            if (rows == 0) {
+                rows = 1;
+            }
+            uint64_t need = (uint64_t)l->offsets[p] + (uint64_t)l->pitches[p] * rows;
             if (l->fd_index[p] >= s->nfds || need > (uint64_t)size[l->fd_index[p]]) {
                 drmtap_set_error(ctx, "layers: layer %u plane %u exceeds its dma-buf "
                                  "(need %llu bytes)", i, p, (unsigned long long)need);
@@ -1228,6 +1264,7 @@ static int grab_composed(drmtap_ctx *ctx, drmtap_frame_info *frame, int allow_he
     if (ret == 0) {
         int pi = drmtap_layers_primary(&s);
         ctx->grab_plane_id = s.layers[pi >= 0 ? pi : 0].plane_id;
+        ctx->last_frame_composed = 1;
     }
     drmtap_layers_close_fds(&s);
     return ret;
@@ -1282,19 +1319,47 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
     read_hdr_for_current_crtc(ctx);
     uint32_t plane_id = 0;
     uint32_t fb_id = 0;
+    int cover = -1;   /* grab_desc after a long underlay: the layer it returns */
+    if (one_buffer && nl <= 1) {
+        ctx->underlay_since_ms = 0;
+        ctx->underlay_cover_logged = 0;
+    }
     if (nl > 1) {
         int pi = drmtap_layers_primary(&ls);
         if (one_buffer) {
             uint32_t cw = 0, ch = 0;
-            if (pi < 0 ||
-                drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) != 0 ||
-                !drmtap_layer_covers(&ls.layers[pi], cw, ch)) {
+            int have_size = drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0;
+            int underlay = pi < 0 || !have_size || !drmtap_layer_covers(&ls.layers[pi], cw, ch);
+            if (underlay && have_size) {
+                /* the topmost layer that covers the CRTC (the desktop with its hole) */
+                for (int i = (int)ls.count - 1; i >= 0 && cover < 0; i--) {
+                    if (drmtap_layer_covers(&ls.layers[i], cw, ch)) {
+                        cover = i;
+                    }
+                }
+            }
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            int d = drmtap_underlay_decide(&ctx->underlay_since_ms, now_ms, underlay,
+                                           cover >= 0, DRMTAP_UNDERLAY_EAGAIN_MS);
+            if (d == DRMTAP_UNDERLAY_EAGAIN) {
                 drmtap_set_error(ctx,
                     "crtc %u blends %d planes and its primary plane does not cover it "
                     "(a window under the desktop): one buffer cannot describe this "
                     "frame. Keep the previous frame, or capture with drmtap_grab_packet()",
                     ctx->crtc_id, nl);
                 return -EAGAIN;
+            }
+            if (d == DRMTAP_UNDERLAY_NONE) {
+                cover = -1;
+                ctx->underlay_cover_logged = 0;
+            } else if (!ctx->underlay_cover_logged) {
+                ctx->underlay_cover_logged = 1;
+                drmtap_debug_log(ctx, "crtc %u: underlay for over %d ms; grab_desc returns "
+                                 "the covering plane %u (the window shows as its hole)",
+                                 ctx->crtc_id, DRMTAP_UNDERLAY_EAGAIN_MS,
+                                 ls.layers[cover].plane_id);
             }
         } else {
             int r = grab_composed(ctx, frame, 1);
@@ -1306,7 +1371,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
             }
             log_layer_fallback(ctx, nl, r);
         }
-        int pick = pi >= 0 ? pi : 0;
+        int pick = cover >= 0 ? cover : (pi >= 0 ? pi : 0);
         plane_id = ls.layers[pick].plane_id;
         fb_id = ls.layers[pick].fb_id;
     } else if (nl == 1) {
@@ -1594,6 +1659,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
             }
             /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
             ctx->grab_plane_id = plane_id;
+            ctx->last_frame_composed = 0;
             return 0;
         }
 
@@ -1634,6 +1700,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
         drmModeFreeFB2(fb2);
         /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
         ctx->grab_plane_id = plane_id;
+        ctx->last_frame_composed = 0;
         return 0;
     }
 
@@ -1760,6 +1827,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
     drmModeFreeFB2(fb2);
     /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
     ctx->grab_plane_id = plane_id;
+    ctx->last_frame_composed = 0;
     return 0;
 
 cleanup:
@@ -2529,6 +2597,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                     return pr;
                 }
                 ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
+                ctx->last_frame_composed = 0;
                 return 0;   /* always return as new frame */
             }
         }
@@ -2588,6 +2657,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         }
 
         ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
+        ctx->last_frame_composed = 0;
 
         return 0;   /* new frame */
     }
@@ -2778,6 +2848,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 return pr;
             }
             ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
+            ctx->last_frame_composed = 0;
             return 0;
         }
 #endif
@@ -2861,6 +2932,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     }
 
     ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
+    ctx->last_frame_composed = 0;
 
     return 0;   /* new frame */
 }
@@ -3167,6 +3239,9 @@ static int packet_fill(drmtap_ctx *ctx, drmtap_packet *pkt, drmtap_layer_set *s)
     s->nfds = 0;
     int pi = drmtap_layers_primary(s);
     ctx->grab_plane_id = s->layers[pi >= 0 ? pi : 0].plane_id;
+    /* The converter composes a packet of several layers: that frame is in CRTC
+     * orientation. One layer converts as its buffer, the plane rotation applies. */
+    ctx->last_frame_composed = (s->count > 1);
     return 0;
 }
 
@@ -3226,12 +3301,17 @@ static int packet_from_desc(drmtap_ctx *ctx, drmtap_packet *pkt) {
 }
 
 int drmtap_grab_packet(drmtap_ctx *ctx, drmtap_packet *pkt) {
+    /* Empty the packet before ANY return, NULL ctx included: the documented
+     * cleanup is drmtap_packet_release() even after a failure, which would
+     * otherwise close whatever stack garbage the fds held. */
+    if (pkt) {
+        memset(pkt, 0, sizeof(*pkt));
+        for (int i = 0; i < DRMTAP_PACKET_MAX_FDS; i++) {
+            pkt->fds[i] = -1;
+        }
+    }
     if (!ctx || !pkt) {
         return -EINVAL;
-    }
-    memset(pkt, 0, sizeof(*pkt));
-    for (int i = 0; i < DRMTAP_PACKET_MAX_FDS; i++) {
-        pkt->fds[i] = -1;
     }
     if (ctx->is_render_only) {
         drmtap_set_error(ctx, "context is render-only (drmtap_open_render); "
@@ -3386,10 +3466,14 @@ int drmtap_convert_packet(drmtap_ctx *ctx, const void *bytes, size_t len,
     }
     ctx->cur_hdr_eotf = s.hdr_eotf;
     ctx->cur_hdr_max_nits = s.hdr_max_nits;
+    ctx->last_frame_composed = 0;
     if (s.count == 1) {
         return convert_one_layer(ctx, &s, 0, frame);
     }
     r = compose_layers(ctx, &s, frame);
+    if (r == 0) {
+        ctx->last_frame_composed = 1;
+    }
     if (r == 0 || !layer_fallback_ok(r)) {
         return r;
     }
