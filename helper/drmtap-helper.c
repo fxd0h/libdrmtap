@@ -57,6 +57,11 @@
 #include <linux/dma-buf.h>  /* struct dma_buf_sync, DMA_BUF_IOCTL_SYNC */
 #include "../src/layers_kms.h"  /* CMD_GRAB_LAYERS: the same layer read + packet as the library */
 
+/* Kernel 6.6; define it so a build against older headers still declares it. */
+#ifndef DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT
+#define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
+#endif
+
 #ifdef HAVE_LIBCAP
 #include <sys/capability.h>
 #endif
@@ -980,8 +985,17 @@ static int layers_and_send(int sock, int drm_fd, uint32_t crtc_id) {
     return ret;
 
 fail:
-    fprintf(stderr, "drmtap-helper: CMD_GRAB_LAYERS: %s (%s)\n", why,
-            errno ? strerror(errno) : "-");
+    /* One line for the first failure, then one per 256 with the count: the
+     * library backs off after a failure, but a helper serving several contexts
+     * must not turn a persistent state into a line per frame either. */
+    {
+        static unsigned long failures = 0;
+        failures++;
+        if (failures == 1 || failures % 256 == 0) {
+            fprintf(stderr, "drmtap-helper: CMD_GRAB_LAYERS: %s (%s) [%lu failure%s]\n",
+                    why, errno ? strerror(errno) : "-", failures, failures == 1 ? "" : "s");
+        }
+    }
     rep.status = 1;
     send_all(sock, &rep, sizeof(rep));
     return -1;
@@ -1102,6 +1116,13 @@ int main(int argc, char *argv[]) {
      * refuses it, CMD_GRAB_LAYERS answers with an error and the library captures
      * the primary plane through CMD_GRAB. */
     drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1);
+    /* And this one right after it, exactly as src/drmtap.c does (the 0.5.4 fix):
+     * a para-virtualized driver (virtio-gpu, vmwgfx, qxl, vboxvideo) hides its
+     * cursor plane from an atomic client that has not declared it honors the
+     * hotspot properties, and CMD_GET_CURSOR/CURSOR2 would then report the cursor
+     * hidden forever. cursor_and_send() does read HOTSPOT_X/HOTSPOT_Y, which is what
+     * the cap asserts. EOPNOTSUPP on real hardware, harmless. */
+    drmSetClientCap(drm_fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, 1);
 
     /* Detect virtio_gpu once */
     int is_virtio = 0;
