@@ -6,6 +6,78 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.6.0] - unreleased
+
+Capture of a screen made of several KMS planes. Until now libdrmtap read the primary plane
+only, and a compositor that puts a window on its own plane broke that: KWin 6.8 does it on
+Intel when one output is enabled (rustdesk/rustdesk#17187). With the desktop on an overlay
+plane and a window below it (an underlay) the capture was the window alone, 936x702 instead
+of 1920x1080; with a window on an overlay plane the window was missing.
+
+New API, all of it additive. The ABI of existing calls is unchanged; `drmtap_grab_desc()`
+gains one documented return value (below).
+
+### Added: frames are composed from every lit plane
+
+- `drmtap_grab()`, `drmtap_grab_mapped()` and `drmtap_grab_mapped_fast()` read every
+  non-cursor plane lit on the CRTC (source and destination rectangles, zpos, alpha, pixel
+  blend mode, rotation, YCbCr encoding and range). Several planes are composed on the GPU
+  the way the display does: a black CRTC-sized frame, each plane at its place bottom to top,
+  with its blend mode and alpha. `drmtap_grab()` then returns pixels (`dma_buf_fd = -1`),
+  since there is no single buffer to hand out. A frame of one plane takes exactly the path
+  it took before.
+- Before composing, the planes are read again after their buffers are exported; if the
+  compositor flipped in between, it is done once more, so a frame never mixes two.
+- Without EGL, linear 8-bit RGB planes are composed on the CPU. Anything else falls back to
+  the primary plane alone and the debug log says so once.
+
+### Added: the packet, split capture for a frame of several planes
+
+`drmtap_grab_packet()` on the exporter fills a `drmtap_packet` (opaque versioned bytes plus
+up to 16 DMA-BUF fds, a frozen struct); the caller moves bytes and fds to the converter
+without looking inside, and `drmtap_convert_packet()` composes them there.
+`drmtap_packet_release()` closes the exporter's fds. The converter treats the packet as
+hostile: every length, count, index, rectangle and enum is checked, and every fd must be a
+DMA-BUF large enough for the planes that use it, before anything is imported or mapped. A
+one-plane packet converts exactly like `drmtap_grab_desc()` + `drmtap_convert_dmabuf()`.
+`examples/packet_capture.c` runs both sides in two processes over `SOCK_SEQPACKET`.
+
+### Changed: `drmtap_grab_desc()` on a multi-plane frame
+
+It still describes one buffer. When the primary plane covers the CRTC it returns it as
+before (a window on an overlay is not in that frame). When it does not, the underlay case,
+it returns `-EAGAIN` and no frame, instead of a frame of the wrong size. Keep the last frame
+or move to the packet API. `drmtap_convert_dmabuf()` is unchanged.
+
+### Helper
+
+`drmtap-helper` answers a new command, `CMD_GRAB_LAYERS`, with the packet and its fds, so an
+unprivileged caller gets composed frames too. It also sets `DRM_CLIENT_CAP_ATOMIC` on its fd,
+which is what makes the plane rectangles visible. The protocol version stays 1: a helper
+older than 0.6.0 does not know the command, and the library then captures the primary plane
+through `CMD_GRAB` as before (tried on a fresh helper once before concluding that).
+
+### Measured on the NUC (Intel Meteor Lake, i915, KWin 6.8.2, 1920x1080)
+
+- Overlay (`weston-simple-egl -o`, 250x250 window on plane 5A): composed frame against a KWin
+  screenshot, 0.00% of the pixels outside the window differ; inside it 7 to 9% differ by
+  more than 16, the animation moving between the two captures. The primary plane alone
+  differs in 100% of the window.
+- Underlay (Discover opening, 936x702 window on the primary, desktop on 5A): composed frame
+  against a KWin screenshot, 0.00% differ outside the window and 1.5% inside (the window was
+  still drawing). `drmtap_grab_desc()` returned `-EAGAIN` during it.
+- Cost: a single-plane grab is unchanged within noise (about 3 ms for a 1080p capture and
+  convert, both versions); the grab side alone went from 35 to 28 us (p50), because the plane
+  property ids are now looked up once instead of by name on every frame. A second plane adds
+  about 0.1 ms of GPU work at 1080p.
+
+### Tests
+
+`tests/test_layers.c`: plane ordering, rectangle and rotation math, the packet codec against
+40 malformed packets and 300000 random mutations, the CPU composer, and (with `/dev/udmabuf`
+and a render node) the GPU composer against the CPU one on real DMA-BUFs: they agree within 1.
+`fuzz/fuzz_packet.c` fuzzes `drmtap_convert_packet()`.
+
 ## [0.5.14] - 2026-11-08
 
 Faster cursor reads on GPUs with their own video memory, and the helper builds with clang
@@ -1163,6 +1235,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.6.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.6.0
 [0.5.14]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.14
 [0.5.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.13
 [0.5.12]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.12
