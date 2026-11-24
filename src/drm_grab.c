@@ -902,7 +902,7 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
     /* Serve a memoized answer rather than re-reading the plane rect on every frame of
      * a padded scanout: the decision only changes when this key changes, and the read
      * costs a plane sweep plus a drmModeGetProperty per property. */
-    if (ctx->sw_cached && ctx->sw_key_crtc == ctx->crtc_id &&
+    if (!ctx->sw_override_on && ctx->sw_cached && ctx->sw_key_crtc == ctx->crtc_id &&
         ctx->sw_key_hdisplay == hdisplay && ctx->sw_key_fb_width == fb_width &&
         ctx->sw_key_modifier == modifier) {
         return ctx->sw_cached_width;
@@ -916,6 +916,12 @@ static uint32_t drmtap_scanout_width(drmtap_ctx *ctx, uint32_t fb_width,
                   modifier == DRM_FORMAT_MOD_INVALID);
 
     drmtap_plane_rect rect;
+    if (ctx->sw_override_on) {
+        /* The frame comes from another plane than the primary (grab_desc's covering
+         * layer): decide from that plane's rect, and keep it out of the memo. */
+        rect = ctx->sw_override;
+        return drmtap_scanout_width_of(fb_width, &rect, linear, NULL);
+    }
     read_primary_plane_rect(ctx, &rect);
 
     drmtap_scanout_why why = DRMTAP_SCANOUT_AS_IS;
@@ -1308,6 +1314,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
                          "grab needs a KMS context from drmtap_open");
         return -ENOTSUP;
     }
+    ctx->sw_override_on = 0;
 
     /* Step 1: which planes are lit (0.6.0). One lit plane is the single-buffer
      * capture below, unchanged. Several are composed, unless the caller needs ONE
@@ -1374,6 +1381,10 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
         int pick = cover >= 0 ? cover : (pi >= 0 ? pi : 0);
         plane_id = ls.layers[pick].plane_id;
         fb_id = ls.layers[pick].fb_id;
+        if (cover >= 0) {
+            drmtap_layer_plane_rect(&ls.layers[cover], &ctx->sw_override);
+            ctx->sw_override_on = 1;
+        }
     } else if (nl == 1) {
         plane_id = ls.layers[0].plane_id;
         fb_id = ls.layers[0].fb_id;
@@ -2458,6 +2469,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
      * that this entry point has no helper fallback. Answer immediately and quietly:
      * the caller has the reason in drmtap_error() from the first failure, and a
      * capture loop calling this at frame rate must not produce a line per frame. */
+    ctx->sw_override_on = 0;   /* only do_grab's covering-layer frame narrows from another rect */
     if (ctx->fast_no_privilege) {
         drmtap_set_error(ctx,
             "drmtap_grab_mapped_fast needs CAP_SYS_ADMIN in this process and has no "
@@ -3408,13 +3420,7 @@ static int convert_one_layer(drmtap_ctx *ctx, const drmtap_layer_set *s, uint32_
     if (s->crtc_w > 0 && s->crtc_w < l->fb_width) {
         drmtap_plane_rect rect;
         memset(&rect, 0, sizeof(rect));
-        rect.valid = 1;
-        rect.src_x = l->src_x >> 16;
-        rect.src_y = l->src_y >> 16;
-        rect.src_w = l->src_w >> 16;
-        rect.src_h = l->src_h >> 16;
-        rect.crtc_w = l->crtc_w;
-        rect.crtc_h = l->crtc_h;
+        drmtap_layer_plane_rect(l, &rect);
         int linear = (l->modifier == DRM_FORMAT_MOD_LINEAR ||
                       l->modifier == DRM_FORMAT_MOD_INVALID);
         w = drmtap_scanout_width_of(l->fb_width, &rect, linear, NULL);
