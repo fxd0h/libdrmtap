@@ -93,7 +93,10 @@
     X(glBindAttribLocation) \
     X(glBindFramebuffer) \
     X(glBindTexture) \
+    X(glBlendFunc) \
     X(glCheckFramebufferStatus) \
+    X(glClear) \
+    X(glClearColor) \
     X(glCompileShader) \
     X(glCreateProgram) \
     X(glCreateShader) \
@@ -101,8 +104,10 @@
     X(glDeleteProgram) \
     X(glDeleteShader) \
     X(glDeleteTextures) \
+    X(glDisable) \
     X(glDisableVertexAttribArray) \
     X(glDrawArrays) \
+    X(glEnable) \
     X(glEnableVertexAttribArray) \
     X(glFinish) \
     X(glFramebufferTexture2D) \
@@ -207,7 +212,10 @@ static int load_gl_libraries(void) {
 #define glBindAttribLocation pfn_glBindAttribLocation
 #define glBindFramebuffer pfn_glBindFramebuffer
 #define glBindTexture pfn_glBindTexture
+#define glBlendFunc pfn_glBlendFunc
 #define glCheckFramebufferStatus pfn_glCheckFramebufferStatus
+#define glClear pfn_glClear
+#define glClearColor pfn_glClearColor
 #define glCompileShader pfn_glCompileShader
 #define glCreateProgram pfn_glCreateProgram
 #define glCreateShader pfn_glCreateShader
@@ -215,8 +223,10 @@ static int load_gl_libraries(void) {
 #define glDeleteProgram pfn_glDeleteProgram
 #define glDeleteShader pfn_glDeleteShader
 #define glDeleteTextures pfn_glDeleteTextures
+#define glDisable pfn_glDisable
 #define glDisableVertexAttribArray pfn_glDisableVertexAttribArray
 #define glDrawArrays pfn_glDrawArrays
+#define glEnable pfn_glEnable
 #define glEnableVertexAttribArray pfn_glEnableVertexAttribArray
 #define glFinish pfn_glFinish
 #define glFramebufferTexture2D pfn_glFramebufferTexture2D
@@ -269,8 +279,12 @@ static pthread_mutex_t g_egl_display_lock = PTHREAD_MUTEX_INITIALIZER;
  * Geometry is stored to detect a recycled fb_id (same id, new framebuffer)
  * and re-import. An EGLImage keeps its underlying buffer alive, so at most
  * DRMTAP_EGL_IMAGE_SLOTS scanout buffers are pinned per thread — the same
- * order of pinning the fast-grab mmap slots already do. */
-#define DRMTAP_EGL_IMAGE_SLOTS 4
+ * order of pinning the fast-grab mmap slots already do.
+ *
+ * Twelve since 0.6.0: a composed frame imports every layer, and two or three
+ * layers each cycling two or three buffers no longer fit in four slots, which
+ * turned the cache into a per-frame re-import. */
+#define DRMTAP_EGL_IMAGE_SLOTS 12
 typedef struct {
     const drmtap_ctx *owner;    /* cache entries are per capture context */
     uint32_t fb_id;             /* 0 = slot unused */
@@ -318,6 +332,7 @@ typedef struct {
     char device_path[256];     /* DRM device this thread's GL state belongs to */
     EGLContext context;
     GLuint program;
+    GLuint compose_program;    /* the layer shader, built on the first composed frame */
     GLuint fbo;
     GLuint linear_texture;
     uint32_t tex_width;
@@ -916,6 +931,9 @@ static void egl_cleanup(egl_state_t *st) {
     if (st->program) {
         glDeleteProgram(st->program);
     }
+    if (st->compose_program) {
+        glDeleteProgram(st->compose_program);
+    }
     /* Release the context from this thread before destroying it. MUST NOT
      * eglTerminate(st->display): that display is shared by every capture thread
      * using the same DRM device; terminating it invalidates those threads' live
@@ -926,6 +944,7 @@ static void egl_cleanup(egl_state_t *st) {
     st->context = EGL_NO_CONTEXT;
     st->device_path[0] = '\0';
     st->program = 0;
+    st->compose_program = 0;
     st->fbo = 0;
     st->linear_texture = 0;
     st->tex_width = 0;
@@ -1276,14 +1295,14 @@ static int egl_convert_impl(drmtap_ctx *ctx,
  * mid-read and the CCS-compressed result comes out as garbage/color corruption.
  * A single process-global lock keeps every detile short enough to complete within
  * one flip interval, which eliminates the corruption while each thread still owns
- * its EGL context. */
+ * its EGL context. The layer composition below takes the same lock. */
+static pthread_mutex_t g_convert_lock = PTHREAD_MUTEX_INITIALIZER;
 int drmtap_gpu_egl_convert(drmtap_ctx *ctx,
                            int dma_buf_fd,
                            uint32_t width, uint32_t height,
                            uint32_t stride, uint32_t fourcc,
                            uint64_t modifier, uint32_t fb_id,
                            void **out_data, size_t *out_size) {
-    static pthread_mutex_t g_convert_lock = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&g_convert_lock);
     int _ret = egl_convert_impl(ctx, dma_buf_fd, width, height, stride, fourcc,
                                 modifier, fb_id, out_data, out_size);
@@ -1617,9 +1636,454 @@ cleanup:
     return ret;
 }
 
+/* ========================================================================= */
+/* Multi-plane composition                                                   */
+/* ========================================================================= */
+/*
+ * A frame whose CRTC blends several planes (a window on an overlay or underlay
+ * plane, rustdesk/rustdesk#17187) is rebuilt here the way the display engine
+ * builds it: a CRTC-sized target cleared to black, then every layer drawn bottom
+ * to top over its CRTC rectangle, sampled from its SRC rectangle, with the
+ * plane's own blend mode and alpha. The single-plane convert above is left alone,
+ * so a one-layer frame costs exactly what it did.
+ *
+ * The shader always emits PRE-MULTIPLIED colour and the blend is (ONE,
+ * ONE_MINUS_SRC_ALPHA), which covers the three KMS modes with the kernel's own
+ * formulas (drm_blend.c, "pixel blend mode"):
+ *   None:           out = pa * C + (1 - pa) * dst
+ *   Pre-multiplied: out = pa * C + (1 - pa * A) * dst
+ *   Coverage:       out = pa * A * C + (1 - pa * A) * dst
+ * HDR: the connector's PQ state applies to every layer (the kernel has no
+ * per-plane colour pipeline here); the tone map runs on the sampled colour before
+ * the blend.
+ */
+static const char *compose_fs_src =
+    "#version 100\n"
+    "#extension GL_OES_EGL_image_external : require\n"
+    "precision highp float;\n"
+    "uniform samplerExternalOES image;\n"
+    "uniform int u_hdr;\n"
+    "uniform float u_peak_n;\n"
+    "uniform float u_alpha;\n"
+    "uniform int u_blend;\n"
+    "varying vec2 v_texcoord;\n"
+    "float pq_eotf(float e) {\n"
+    "    float m1 = 0.1593017578125;\n"
+    "    float m2 = 78.84375;\n"
+    "    float c1 = 0.8359375;\n"
+    "    float c2 = 18.8515625;\n"
+    "    float c3 = 18.6875;\n"
+    "    float ep = pow(max(e, 0.0), 1.0 / m2);\n"
+    "    float num = max(ep - c1, 0.0);\n"
+    "    float den = max(c2 - c3 * ep, 1e-6);\n"
+    "    return 10000.0 * pow(num / den, 1.0 / m1);\n"
+    "}\n"
+    "float knee_curve(float x, float p) {\n"
+    "    float knee = 0.9;\n"
+    "    if (x <= knee) return x;\n"
+    "    float pk = max(p, knee + 0.5);\n"
+    "    if (x >= pk) return 1.0;\n"
+    "    float t = (x - knee) / (pk - knee);\n"
+    "    return knee + (1.0 - knee) * (t * (2.0 - t));\n"
+    "}\n"
+    "float srgb_oetf(float c) {\n"
+    "    c = clamp(c, 0.0, 1.0);\n"
+    "    if (c <= 0.0031308) return 12.92 * c;\n"
+    "    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;\n"
+    "}\n"
+    "void main() {\n"
+    "    vec4 c = texture2D(image, v_texcoord);\n"
+    "    vec3 rgb = c.rgb;\n"
+    "    if (u_hdr == 1) {\n"
+    "        float R = pq_eotf(c.r);\n"
+    "        float G = pq_eotf(c.g);\n"
+    "        float B = pq_eotf(c.b);\n"
+    "        float r =  1.660491 * R - 0.587641 * G - 0.072850 * B;\n"
+    "        float g = -0.124550 * R + 1.132900 * G - 0.008349 * B;\n"
+    "        float b = -0.018151 * R - 0.100579 * G + 1.118730 * B;\n"
+    "        float w = 203.0;\n"
+    "        rgb = vec3(srgb_oetf(knee_curve(max(r, 0.0) / w, u_peak_n)),\n"
+    "                   srgb_oetf(knee_curve(max(g, 0.0) / w, u_peak_n)),\n"
+    "                   srgb_oetf(knee_curve(max(b, 0.0) / w, u_peak_n)));\n"
+    "    }\n"
+    "    float a;\n"
+    "    if (u_blend == 2) {\n"
+    "        a = u_alpha;\n"
+    "        rgb = rgb * u_alpha;\n"
+    "    } else if (u_blend == 1) {\n"
+    "        a = c.a * u_alpha;\n"
+    "        rgb = rgb * a;\n"
+    "    } else {\n"
+    "        a = c.a * u_alpha;\n"
+    "        rgb = rgb * u_alpha;\n"
+    "    }\n"
+    "    gl_FragColor = vec4(rgb.b, rgb.g, rgb.r, a);\n"
+    "}\n";
+
+/* YUV fourccs the external sampler converts; they take the colour hints below. */
+static int egl_fourcc_is_yuv(uint32_t f) {
+    switch (f) {
+    case DRM_FORMAT_NV12: case DRM_FORMAT_NV21: case DRM_FORMAT_NV16:
+    case DRM_FORMAT_NV61: case DRM_FORMAT_NV24: case DRM_FORMAT_NV42:
+    case DRM_FORMAT_P010: case DRM_FORMAT_P012: case DRM_FORMAT_P016:
+    case DRM_FORMAT_YUYV: case DRM_FORMAT_YVYU: case DRM_FORMAT_UYVY:
+    case DRM_FORMAT_VYUY: case DRM_FORMAT_AYUV: case DRM_FORMAT_XYUV8888:
+    case DRM_FORMAT_YUV420: case DRM_FORMAT_YVU420: case DRM_FORMAT_YUV422:
+    case DRM_FORMAT_YVU422: case DRM_FORMAT_YUV444: case DRM_FORMAT_YVU444:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Import one layer's framebuffer: every plane with its own fd, offset and pitch,
+ * the modifier on each plane when the fb has one, and the YCbCr hints for YUV. */
+static EGLImageKHR egl_import_layer(drmtap_ctx *ctx, const drmtap_layer_set *set,
+                                    const drmtap_layer *l) {
+    static const EGLint fd_attr[4] = {
+        EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT,
+        EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE3_FD_EXT };
+    static const EGLint off_attr[4] = {
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+        EGL_DMA_BUF_PLANE2_OFFSET_EXT, EGL_DMA_BUF_PLANE3_OFFSET_EXT };
+    static const EGLint pitch_attr[4] = {
+        EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT,
+        EGL_DMA_BUF_PLANE2_PITCH_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT };
+    static const EGLint mlo_attr[4] = {
+        EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+        EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT };
+    static const EGLint mhi_attr[4] = {
+        EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+        EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT };
+    EGLint a[64];
+    int ai = 0;
+    uint32_t np = l->num_planes > 4 ? 4 : l->num_planes;
+    a[ai++] = EGL_WIDTH;
+    a[ai++] = (EGLint)l->fb_width;
+    a[ai++] = EGL_HEIGHT;
+    a[ai++] = (EGLint)l->fb_height;
+    a[ai++] = EGL_LINUX_DRM_FOURCC_EXT;
+    a[ai++] = (EGLint)l->format;
+    for (uint32_t p = 0; p < np; p++) {
+        /* The packet decoder and the exporter both bound these; checked again
+         * because this is the line that hands them to the driver. */
+        if (l->fd_index[p] >= set->nfds || l->offsets[p] > (uint32_t)INT32_MAX ||
+            l->pitches[p] > (uint32_t)INT32_MAX) {
+            drmtap_set_error(ctx, "egl: layer plane %u out of range", p);
+            return EGL_NO_IMAGE_KHR;
+        }
+        a[ai++] = fd_attr[p];
+        a[ai++] = set->fds[l->fd_index[p]];
+        a[ai++] = off_attr[p];
+        a[ai++] = (EGLint)l->offsets[p];
+        a[ai++] = pitch_attr[p];
+        a[ai++] = (EGLint)l->pitches[p];
+        if (l->modifier != DRM_FORMAT_MOD_INVALID) {
+            a[ai++] = mlo_attr[p];
+            a[ai++] = (EGLint)(l->modifier & 0xFFFFFFFF);
+            a[ai++] = mhi_attr[p];
+            a[ai++] = (EGLint)(l->modifier >> 32);
+        }
+    }
+    if (egl_fourcc_is_yuv(l->format)) {
+        a[ai++] = EGL_YUV_COLOR_SPACE_HINT_EXT;
+        a[ai++] = l->color_encoding == DRMTAP_YCBCR_BT2020 ? EGL_ITU_REC2020_EXT
+                : l->color_encoding == DRMTAP_YCBCR_BT709 ? EGL_ITU_REC709_EXT
+                : EGL_ITU_REC601_EXT;
+        a[ai++] = EGL_SAMPLE_RANGE_HINT_EXT;
+        a[ai++] = l->color_range == DRMTAP_RANGE_FULL ? EGL_YUV_FULL_RANGE_EXT
+                                                      : EGL_YUV_NARROW_RANGE_EXT;
+    }
+    a[ai++] = EGL_NONE;
+    EGLImageKHR image = pfn_eglCreateImageKHR(state.display, EGL_NO_CONTEXT,
+                                              EGL_LINUX_DMA_BUF_EXT, NULL, a);
+    if (image == EGL_NO_IMAGE_KHR) {
+        drmtap_debug_log(ctx, "egl: layer plane=%u fb=%u import failed: 0x%x "
+                         "(fourcc=%.4s modifier=0x%llx planes=%u)",
+                         l->plane_id, l->fb_id, eglGetError(),
+                         (const char *)&l->format, (unsigned long long)l->modifier, np);
+    }
+    return image;
+}
+
+/* The external texture for one layer: from the import cache when this fb_id was
+ * imported with the same layout and buffer identity, else a fresh import that is
+ * adopted into the cache. *uncached is set when the texture must be freed by the
+ * caller after the frame (cache disabled or fb_id 0). */
+static int egl_layer_texture(drmtap_ctx *ctx, const drmtap_layer_set *set,
+                             const drmtap_layer *l, GLuint *tex, EGLImageKHR *img,
+                             int *uncached) {
+    *uncached = 0;
+    int use_cache = (l->fb_id != 0 && !state.cache_disabled);
+    ino_t cur_inode = 0;
+    int fd0 = set->fds[l->fd_index[0]];
+    if (fd0 >= 0) {
+        struct stat st;
+        if (fstat(fd0, &st) == 0) {
+            cur_inode = st.st_ino;
+        }
+    }
+    int np = (int)l->num_planes;
+    egl_image_slot_t *free_slot = NULL;
+    if (use_cache) {
+        for (int i = 0; i < DRMTAP_EGL_IMAGE_SLOTS; i++) {
+            egl_image_slot_t *s = &state.image_slots[i];
+            if (s->fb_id == 0) {
+                if (!free_slot) {
+                    free_slot = s;
+                }
+                continue;
+            }
+            if (s->fb_id != l->fb_id || s->owner != ctx) {
+                continue;
+            }
+            int geom_match = (s->width == l->fb_width && s->height == l->fb_height &&
+                              s->stride == l->pitches[0] && s->fourcc == l->format &&
+                              s->modifier == l->modifier && s->num_planes == np &&
+                              memcmp(s->offsets, l->offsets, sizeof(s->offsets)) == 0 &&
+                              memcmp(s->pitches, l->pitches, sizeof(s->pitches)) == 0);
+            int ident_match = (cur_inode == 0 || s->buf_inode == 0 ||
+                               s->buf_inode == cur_inode);
+            if (geom_match && ident_match) {
+                *tex = s->texture;
+                *img = s->image;
+                return 0;
+            }
+            egl_image_slot_release(&state, s);
+            if (!free_slot) {
+                free_slot = s;
+            }
+        }
+    }
+    EGLImageKHR image = egl_import_layer(ctx, set, l);
+    if (image == EGL_NO_IMAGE_KHR) {
+        return -EIO;
+    }
+    GLuint t = 0;
+    int ret = egl_make_external_texture(ctx, image, &t);
+    if (ret != 0) {
+        pfn_eglDestroyImageKHR(state.display, image);
+        return ret;
+    }
+    if (!use_cache) {
+        *uncached = 1;
+        *tex = t;
+        *img = image;
+        return 0;
+    }
+    egl_image_slot_t *dst = free_slot;
+    if (!dst) {
+        dst = &state.image_slots[state.next_evict % DRMTAP_EGL_IMAGE_SLOTS];
+        state.next_evict++;
+        egl_image_slot_release(&state, dst);
+    }
+    dst->owner = ctx;
+    dst->fb_id = l->fb_id;
+    dst->width = l->fb_width;
+    dst->height = l->fb_height;
+    dst->stride = l->pitches[0];
+    dst->fourcc = l->format;
+    dst->modifier = l->modifier;
+    dst->num_planes = np;
+    memcpy(dst->offsets, l->offsets, sizeof(dst->offsets));
+    memcpy(dst->pitches, l->pitches, sizeof(dst->pitches));
+    dst->buf_inode = cur_inode;
+    dst->image = image;
+    dst->texture = t;
+    *tex = t;
+    *img = image;
+    return 0;
+}
+
+/* Key the skip-unchanged hash on, beside the size: no real fourcc. */
+#define DRMTAP_COMPOSE_FOURCC 0x53504d43u  /* "CMPS" */
+
+static int egl_compose_impl(drmtap_ctx *ctx, const drmtap_layer_set *set,
+                            void **out_data, size_t *out_size) {
+    if (!ctx || !set || !out_data || !out_size || set->count == 0 ||
+        set->count > DRMTAP_MAX_LAYERS) {
+        return -EINVAL;
+    }
+    int hash_was_valid = state.hash.valid;
+    state.hash.valid = 0;
+    state.hash.fresh = 0;
+    uint32_t width = set->crtc_w, height = set->crtc_h;
+    int dim = drmtap_validate_fb_dims(width, height);
+    if (dim != 0) {
+        drmtap_set_error(ctx, "refusing to compose %ux%u: implausible geometry", width,
+                         height);
+        return dim;
+    }
+    int ret;
+    if (state.initialized && strcmp(state.device_path, ctx->device_path) != 0) {
+        egl_cleanup(&state);
+    }
+    if (!state.initialized) {
+        ret = egl_init(ctx, &state);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    eglBindAPI(EGL_OPENGL_ES_API);
+    {
+        EGLint _maj, _min;
+        eglInitialize(state.display, &_maj, &_min);
+    }
+    if (!eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE, state.context)) {
+        drmtap_debug_log(ctx, "EGL: eglMakeCurrent in compose failed: 0x%x", eglGetError());
+        return -EIO;
+    }
+    if (!state.compose_program) {
+        state.compose_program = create_program(vertex_shader_src, compose_fs_src);
+        if (!state.compose_program) {
+            drmtap_set_error(ctx, "egl: the layer composition shader did not build");
+            return -EIO;
+        }
+    }
+
+    GLuint texs[DRMTAP_MAX_LAYERS] = {0};
+    EGLImageKHR imgs[DRMTAP_MAX_LAYERS];
+    int uncached[DRMTAP_MAX_LAYERS] = {0};
+    uint32_t got = 0;
+    for (uint32_t i = 0; i < set->count; i++) {
+        imgs[i] = EGL_NO_IMAGE_KHR;
+        ret = egl_layer_texture(ctx, set, &set->layers[i], &texs[i], &imgs[i], &uncached[i]);
+        if (ret != 0) {
+            drmtap_set_error(ctx, "egl: could not import layer %u (plane %u, fb %u, "
+                             "fourcc %.4s, modifier 0x%llx)", i, set->layers[i].plane_id,
+                             set->layers[i].fb_id, (const char *)&set->layers[i].format,
+                             (unsigned long long)set->layers[i].modifier);
+            goto cleanup;
+        }
+        got = i + 1;
+    }
+
+    ensure_linear_texture(&state, width, height);
+    glBindFramebuffer(GL_FRAMEBUFFER, state.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           state.linear_texture, 0);
+    glViewport(0, 0, width, height);
+    glDisable(GL_BLEND);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    GLuint prog = state.compose_program;
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "image"), 0);
+    glUniform1i(glGetUniformLocation(prog, "u_hdr"),
+                ctx->cur_hdr_eotf == DRMTAP_EOTF_PQ ? 1 : 0);
+    {
+        uint32_t mn = (ctx->cur_hdr_max_nits > 0) ? ctx->cur_hdr_max_nits : 1000u;
+        glUniform1f(glGetUniformLocation(prog, "u_peak_n"), (float)((double)mn / 203.0));
+    }
+    GLint loc_alpha = glGetUniformLocation(prog, "u_alpha");
+    GLint loc_blend = glGetUniformLocation(prog, "u_blend");
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glActiveTexture(GL_TEXTURE0);
+    for (uint32_t i = 0; i < set->count; i++) {
+        const drmtap_layer *l = &set->layers[i];
+        float pos[8], tex[8], v[16];
+        drmtap_layer_quad(l, width, height, pos, tex);
+        for (int k = 0; k < 4; k++) {
+            v[k * 4 + 0] = pos[k * 2];
+            v[k * 4 + 1] = pos[k * 2 + 1];
+            v[k * 4 + 2] = tex[k * 2];
+            v[k * 4 + 3] = tex[k * 2 + 1];
+        }
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, texs[i]);
+        glUniform1f(loc_alpha, (float)l->alpha / 65535.0f);
+        glUniform1i(loc_blend, (int)l->blend);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), v);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), v + 2);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDisable(GL_BLEND);
+    glFinish();
+
+    uint64_t key = drmtap_layers_key(set);
+    int hashing = state.hash.on && !ctx->user_out &&
+                  (uint64_t)width * height >= 1920u * 1080u;
+    int untouched = (ctx->out_gen == state.hash.gen);
+    if (hashing) {
+        GLenum render_err = glGetError();
+        if (render_err != GL_NO_ERROR) {
+            drmtap_debug_log(ctx, "EGL: GL error 0x%x across compose, failing", render_err);
+            ret = -EIO;
+            goto cleanup;
+        }
+    }
+    size_t rgba_size = (size_t)width * height * 4;
+    void *dst = NULL;
+    ret = drmtap_ensure_out(ctx, rgba_size, &dst);
+    if (ret != 0) {
+        if (ret != -ENOSPC) {
+            drmtap_set_error(ctx, "cannot allocate %zu bytes for the %ux%u composed "
+                             "frame: %s", rgba_size, width, height, strerror(-ret));
+        }
+        goto cleanup;
+    }
+    if (hashing && hash_check(ctx, &state.hash, hash_was_valid && untouched,
+                              state.linear_texture, width, height,
+                              DRMTAP_COMPOSE_FOURCC, key, dst)) {
+        state.hash.gen = ctx->out_gen;
+        *out_data = dst;
+        *out_size = rgba_size;
+        ret = 0;
+        goto cleanup;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, state.fbo);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, dst);
+    GLenum gl_err = glGetError();
+    if (gl_err != GL_NO_ERROR) {
+        drmtap_debug_log(ctx, "EGL: GL error 0x%x across compose, failing", gl_err);
+        ret = -EIO;
+        goto cleanup;
+    }
+    *out_data = dst;
+    *out_size = rgba_size;
+    ret = 0;
+    if (hashing && state.hash.on && state.hash.fresh) {
+        hash_commit(ctx, &state.hash, width, height, DRMTAP_COMPOSE_FOURCC, key, dst);
+        state.hash.gen = ctx->out_gen;
+    }
+    drmtap_debug_log(ctx, "egl: composed %u layers into %ux%u", set->count, width, height);
+
+cleanup:
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+    for (uint32_t i = 0; i < got; i++) {
+        if (uncached[i]) {
+            glDeleteTextures(1, &texs[i]);
+            pfn_eglDestroyImageKHR(state.display, imgs[i]);
+        }
+    }
+    return ret;
+}
+
+int drmtap_gpu_egl_compose(drmtap_ctx *ctx, const drmtap_layer_set *set,
+                           void **out_data, size_t *out_size) {
+    /* The same process-wide lock as the single-plane convert, for the same reason. */
+    pthread_mutex_lock(&g_convert_lock);
+    int ret = egl_compose_impl(ctx, set, out_data, out_size);
+    pthread_mutex_unlock(&g_convert_lock);
+    return ret;
+}
+
 #else /* !HAVE_EGL */
 
 #include "drmtap_internal.h"
+
+int drmtap_gpu_egl_compose(drmtap_ctx *ctx, const drmtap_layer_set *set,
+                           void **out_data, size_t *out_size) {
+    (void)set; (void)out_data; (void)out_size;
+    drmtap_set_error(ctx, "EGL backend not available (built without EGL)");
+    return -ENOTSUP;
+}
 
 int drmtap_gpu_egl_available(drmtap_ctx *ctx) {
     (void)ctx;

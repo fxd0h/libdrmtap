@@ -31,6 +31,7 @@
 #include <drm_fourcc.h>   /* DRM_FORMAT_MOD_INVALID */
 
 #include "drmtap.h"
+#include "drmtap_internal.h"   /* the CPU layer composer and its layer type */
 
 /* ========================================================================= */
 /* Intel tiling deswizzle                                                    */
@@ -793,4 +794,146 @@ int drmtap_diff_frames(const void *frame_a, const void *frame_b,
     }
 
     return dirty_count;
+}
+
+/* ========================================================================= */
+/* CPU composition of linear RGB layers (multi-plane scanout, 0.6.0)         */
+/* ========================================================================= */
+/*
+ * The fallback for a composed frame when there is no EGL backend (a
+ * -Degl=disabled build, a host without libEGL, or a setuid process that does not
+ * load GL). Only the layers a CPU can read as they are: one linear 8-bit RGB
+ * plane, no rotation. Tiled or compressed layers need the GPU; the callers fall
+ * back to the primary plane alone for those and say so. Nearest-neighbour when
+ * a plane scales: the point is a correct picture of what is on screen, not a
+ * filtered one, and a scaling plane is rare outside video overlays.
+ */
+
+int drmtap_compose_cpu_supported(const drmtap_layer *l, int invalid_is_linear) {
+    if (!l) {
+        return 0;
+    }
+    switch (l->format) {
+    case DRM_FORMAT_XRGB8888:
+    case DRM_FORMAT_ARGB8888:
+    case DRM_FORMAT_XBGR8888:
+    case DRM_FORMAT_ABGR8888:
+        break;
+    default:
+        return 0;
+    }
+    if (l->num_planes != 1 || l->rotation != DRMTAP_ROT_0) {
+        return 0;
+    }
+    if (!(l->modifier == DRM_FORMAT_MOD_LINEAR ||
+          (invalid_is_linear && l->modifier == DRM_FORMAT_MOD_INVALID))) {
+        return 0;
+    }
+    if (l->fb_width == 0 || l->fb_height == 0 ||
+        (uint64_t)l->fb_width * 4u > l->pitches[0]) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Source texel index for destination index d (0-based inside the CRTC rect of
+ * length dst_len), sampling at the destination pixel centre. src_pos/src_len are
+ * 16.16. Clamped to the source rect and the framebuffer. */
+static uint32_t compose_src_index(uint64_t d, uint32_t dst_len, uint32_t src_pos,
+                                  uint32_t src_len, uint32_t fb_len) {
+    uint64_t s = (uint64_t)src_pos + ((d * 2u + 1u) * (uint64_t)src_len) / (2u * (uint64_t)dst_len);
+    uint64_t lo = src_pos >> 16;
+    uint64_t hi = ((uint64_t)src_pos + src_len + 0xffffu) >> 16;  /* exclusive */
+    uint64_t i = s >> 16;
+    if (hi > fb_len) {
+        hi = fb_len;
+    }
+    if (hi == 0) {
+        return 0;
+    }
+    if (i >= hi) {
+        i = hi - 1;
+    }
+    if (i < lo) {
+        i = lo;
+    }
+    return (uint32_t)i;
+}
+
+int drmtap_compose_cpu(const drmtap_layer *layers, uint32_t n,
+                       const uint8_t *const *bases,
+                       uint32_t out_w, uint32_t out_h, uint8_t *out, uint32_t out_stride) {
+    if (!layers || !bases || !out || n == 0 || out_w == 0 || out_h == 0 ||
+        out_w > DRMTAP_MAX_DIM || out_h > DRMTAP_MAX_DIM ||
+        (uint64_t)out_w * 4u > out_stride) {
+        return -EINVAL;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        if (!bases[i] || !drmtap_compose_cpu_supported(&layers[i], 1) ||
+            layers[i].crtc_w == 0 || layers[i].crtc_h == 0 ||
+            layers[i].src_w == 0 || layers[i].src_h == 0) {
+            return -EINVAL;
+        }
+    }
+    /* Black, with the X byte the EGL readback leaves (opaque). */
+    for (uint32_t y = 0; y < out_h; y++) {
+        uint8_t *row = out + (size_t)y * out_stride;
+        for (uint32_t x = 0; x < out_w; x++) {
+            row[x * 4 + 0] = 0;
+            row[x * 4 + 1] = 0;
+            row[x * 4 + 2] = 0;
+            row[x * 4 + 3] = 0xff;
+        }
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        const drmtap_layer *l = &layers[i];
+        int bgr = (l->format == DRM_FORMAT_XBGR8888 || l->format == DRM_FORMAT_ABGR8888);
+        int has_alpha = (l->format == DRM_FORMAT_ARGB8888 ||
+                         l->format == DRM_FORMAT_ABGR8888);
+        int64_t x0 = l->crtc_x, y0 = l->crtc_y;
+        int64_t x1 = x0 + (int64_t)l->crtc_w, y1 = y0 + (int64_t)l->crtc_h;
+        int64_t cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0;
+        int64_t cx1 = x1 > (int64_t)out_w ? (int64_t)out_w : x1;
+        int64_t cy1 = y1 > (int64_t)out_h ? (int64_t)out_h : y1;
+        if (cx0 >= cx1 || cy0 >= cy1) {
+            continue;
+        }
+        uint64_t pa = l->alpha > 0xffffu ? 0xffffu : l->alpha;
+        for (int64_t y = cy0; y < cy1; y++) {
+            uint32_t sy = compose_src_index((uint64_t)(y - y0), l->crtc_h, l->src_y,
+                                            l->src_h, l->fb_height);
+            const uint8_t *srow = bases[i] + (size_t)sy * l->pitches[0];
+            uint8_t *drow = out + (size_t)y * out_stride;
+            for (int64_t x = cx0; x < cx1; x++) {
+                uint32_t sx = compose_src_index((uint64_t)(x - x0), l->crtc_w, l->src_x,
+                                                l->src_w, l->fb_width);
+                const uint8_t *s = srow + (size_t)sx * 4u;
+                uint64_t c[3];
+                c[0] = bgr ? s[2] : s[0];   /* B */
+                c[1] = s[1];                /* G */
+                c[2] = bgr ? s[0] : s[2];   /* R */
+                uint64_t a = has_alpha ? s[3] : 255u;
+                /* sa: effective source alpha in 0..65535; sc: premultiplied colour
+                 * scaled by 65535 (see the formulas in gpu_egl.c). */
+                uint64_t sa;
+                uint64_t mul;   /* what each colour channel is multiplied by, x65535 */
+                if (l->blend == DRMTAP_BLEND_NONE) {
+                    sa = pa;
+                    mul = pa;
+                } else if (l->blend == DRMTAP_BLEND_COVERAGE) {
+                    sa = (a * pa + 127u) / 255u;
+                    mul = sa;
+                } else {
+                    sa = (a * pa + 127u) / 255u;
+                    mul = pa;
+                }
+                uint8_t *d = drow + (size_t)x * 4u;
+                for (int k = 0; k < 3; k++) {
+                    uint64_t v = (c[k] * mul + (uint64_t)d[k] * (65535u - sa) + 32767u) / 65535u;
+                    d[k] = (uint8_t)(v > 255u ? 255u : v);
+                }
+            }
+        }
+    }
+    return 0;
 }
