@@ -372,6 +372,13 @@ test_connector_names = executable('test_connector_names',
     dependencies: [libdrmtap_test_dep, libdrm_dep],
     include_directories: lib_include,
 )
+# Multi-plane scanout: layer math, the packet codec against hostile input, the
+# CPU composer, and (with udmabuf + a render node) the GPU composer against it.
+test_layers = executable('test_layers',
+    'tests/test_layers.c',
+    dependencies: [libdrmtap_test_dep],
+    include_directories: lib_include,
+)
 test_refresh = executable('test_refresh',
     'tests/test_refresh.c',
     dependencies: [libdrmtap_test_dep, libdrm_dep],
@@ -400,6 +407,10 @@ test('hashskip', test_hashskip, suite: 'unit',
 )
 test('connector_names', test_connector_names, suite: 'unit')
 test('refresh', test_refresh, suite: 'unit')
+# Builds an EGL context when a render node is there: same LSan suppression.
+test('layers', test_layers, suite: 'unit',
+    env: ['LSAN_OPTIONS=suppressions=' + meson.project_source_root() / 'tests' / 'lsan.supp'],
+)
 test('cursor', test_cursor, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
