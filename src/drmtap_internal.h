@@ -38,6 +38,17 @@
  * Far above any real scanout; the byte cap above is what actually binds. */
 #define DRMTAP_MAX_DIM 32768u
 
+/* The primary plane rectangle: which region of the framebuffer the plane reads and
+ * where it lands on the CRTC. Whole pixels (the kernel SRC_* properties are 16.16
+ * fixed point; the fractional part is dropped by the reader). `valid` is 0 when the
+ * properties could not be read, which is a distinct case from "no scaling" and must
+ * not be treated as one. */
+typedef struct {
+    int      valid;
+    uint32_t src_x, src_y, src_w, src_h;
+    uint32_t crtc_w, crtc_h;
+} drmtap_plane_rect;
+
 struct drmtap_ctx {
     /* DRM device */
     int drm_fd;
@@ -240,6 +251,12 @@ struct drmtap_ctx {
      * (see drmtap_underlay_decide in layers.h). */
     int64_t  underlay_since_ms;
     int      underlay_cover_logged;   /* the switch to the covering layer was logged */
+    /* Set by do_grab for the frame it is building when that frame comes from a layer
+     * other than the primary (grab_desc's covering layer after a long underlay):
+     * drmtap_scanout_width then narrows from THIS rect, not from the primary plane's,
+     * and neither reads nor fills its memo. Cleared at the start of every grab. */
+    int      sw_override_on;
+    drmtap_plane_rect sw_override;
 };
 
 /* ========================================================================= */
@@ -466,16 +483,6 @@ typedef enum {
     DRMTAP_SCANOUT_NO_PLANE_RECT,       /* plane rect unreadable: cannot tell, so do not */
 } drmtap_scanout_why;
 
-/* The primary plane rectangle: which region of the framebuffer the plane reads and
- * where it lands on the CRTC. Whole pixels (the kernel SRC_* properties are 16.16
- * fixed point; the fractional part is dropped by the reader). `valid` is 0 when the
- * properties could not be read, which is a distinct case from "no scaling" and must
- * not be treated as one. */
-typedef struct {
-    int      valid;
-    uint32_t src_x, src_y, src_w, src_h;
-    uint32_t crtc_w, crtc_h;
-} drmtap_plane_rect;
 
 /* Decide the width a CRTC actually scans out of a framebuffer that may be wider
  * than its mode. Pure (no DRM fd) so it is testable without the padding hardware.
@@ -484,6 +491,19 @@ uint32_t drmtap_scanout_width_of(uint32_t fb_width,
                                  const drmtap_plane_rect *rect,
                                  int layout_is_linear,
                                  drmtap_scanout_why *why);
+
+/* The plane rect of a layer (16.16 SRC truncated to whole pixels, like the property
+ * reader), so the width decision can be made for the plane a frame actually came
+ * from and not only for the primary. Pure. */
+static inline void drmtap_layer_plane_rect(const drmtap_layer *l, drmtap_plane_rect *rect) {
+    rect->valid = 1;
+    rect->src_x = l->src_x >> 16;
+    rect->src_y = l->src_y >> 16;
+    rect->src_w = l->src_w >> 16;
+    rect->src_h = l->src_h >> 16;
+    rect->crtc_w = l->crtc_w;
+    rect->crtc_h = l->crtc_h;
+}
 
 /* Kernel spelling of a DRM connector type ("eDP", "HDMI-A", "LVDS", ...), the
  * prefix of drmtap_display.name. "Unknown" for a type this build does not know.

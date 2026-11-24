@@ -196,6 +196,30 @@ static void test_underlay_timing(void) {
           "a clock reading 0 still marks the start");
 }
 
+/* grab_desc's covering layer after a long underlay is narrowed from ITS rect: a
+ * padded 64-wide fb scanned out 60 wide is reported 60, whatever the (window-sized)
+ * primary plane says. */
+static void test_cover_rect(void) {
+    printf("test_cover_rect:\n");
+    drmtap_layer cover = mk_layer(134, 64, 2170, 0, 0, 60, 2170, 4);
+    cover.src_w = 60u << 16;
+    drmtap_plane_rect r;
+    memset(&r, 0, sizeof(r));
+    drmtap_layer_plane_rect(&cover, &r);
+    drmtap_scanout_why why = DRMTAP_SCANOUT_AS_IS;
+    check(r.valid && r.src_w == 60 && r.crtc_w == 60 &&
+          drmtap_scanout_width_of(64, &r, 1, &why) == 60 && why == DRMTAP_SCANOUT_NARROWED,
+          "the covering layer rect narrows its padded fb to 60");
+    drmtap_layer win = mk_layer(34, 20, 30, 10, 10, 20, 30, 0);
+    memset(&r, 0, sizeof(r));
+    drmtap_layer_plane_rect(&win, &r);
+    check(drmtap_scanout_width_of(64, &r, 1, &why) == 20,
+          "the window-sized primary rect would have cut the desktop to 20 columns");
+    cover.src_x = (2u << 16) | 0x8000u;
+    drmtap_layer_plane_rect(&cover, &r);
+    check(r.src_x == 2, "16.16 SRC is truncated to whole pixels, like the property reader");
+}
+
 static void test_packet_init(void) {
     printf("test_packet_init:\n");
     drmtap_packet p;
@@ -783,6 +807,7 @@ int main(void) {
     test_key();
     test_underlay_timing();
     test_packet_init();
+    test_cover_rect();
     test_packet_roundtrip();
     test_packet_malformed();
     test_packet_fuzz();
