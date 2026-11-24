@@ -26,6 +26,11 @@ the first byte picks how many of four real udmabuf dma-bufs (of different
 sizes) go with it, the second shifts the length, the rest is XORed over the
 bytes. `DRMTAP_NO_EGL=1` keeps it on the CPU composer.
 
+It needs a render node (or card) it can open and `/dev/udmabuf`, and exits with
+a FATAL line when it has neither, instead of running at no coverage. On a box
+where the user is not in the `render` group, run it as root or with the groups,
+for example `sudo setpriv --reuid=$(id -u) --regid=$(id -g) --groups=video,render,kvm ...`.
+
     fuzz/build.sh /tmp/fuzz_packet packet
     mkdir -p corpus-packet
     ASAN_OPTIONS=detect_leaks=0 /tmp/fuzz_packet -max_len=2048 -max_total_time=300 corpus-packet

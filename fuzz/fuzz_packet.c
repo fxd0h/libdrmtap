@@ -29,6 +29,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -88,10 +89,19 @@ static void fuzz_init(void) {
         l->rotation = DRMTAP_ROT_0;
     }
     g_tmpl_len = drmtap_packet_encode(&s, g_tmpl, sizeof(g_tmpl));
+    /* Without a context or the dma-bufs every input returns at the first line and
+     * the run reports millions of executions at no coverage. Refuse to start. */
+    if (!g_ctx || g_fds[0] < 0 || g_fds[1] < 0 || g_tmpl_len <= 0) {
+        fprintf(stderr, "fuzz_packet: FATAL: %s. Run it with access to a render node "
+                "(group render, or root) and to /dev/udmabuf (group kvm here).\n",
+                !g_ctx ? "no DRM render node or card could be opened"
+                       : "could not create the udmabuf dma-bufs");
+        exit(1);
+    }
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
-    if (!g_ctx || g_tmpl_len <= 0 || g_fds[0] < 0 || size < 2) {
+    if (size < 2) {
         return 0;
     }
     size_t nfds = data[0] % 5;
