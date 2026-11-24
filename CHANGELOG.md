@@ -27,7 +27,11 @@ gains one documented return value (below).
   since there is no single buffer to hand out. A frame of one plane takes exactly the path
   it took before.
 - Before composing, the planes are read again after their buffers are exported; if the
-  compositor flipped in between, it is done once more, so a frame never mixes two.
+  compositor flipped in between, or a framebuffer was removed before it could be exported,
+  it is done once more, so a frame never mixes two.
+- The GPU import cache never releases a texture an earlier plane of the same frame is
+  using. Without that, with three windows on planes and more than 12 buffers in rotation,
+  about one composed frame in ten came out mostly black.
 - Without EGL, linear 8-bit RGB planes are composed on the CPU. Anything else falls back to
   the primary plane alone and the debug log says so once.
 
@@ -38,7 +42,8 @@ up to 16 DMA-BUF fds, a frozen struct); the caller moves bytes and fds to the co
 without looking inside, and `drmtap_convert_packet()` composes them there.
 `drmtap_packet_release()` closes the exporter's fds. The converter treats the packet as
 hostile: every length, count, index, rectangle and enum is checked, and every fd must be a
-DMA-BUF large enough for the planes that use it, before anything is imported or mapped. A
+DMA-BUF large enough for the planes that use it (a chroma plane of a known YUV layout by
+its whole extent, against its own fd), before anything is imported or mapped. A
 one-plane packet converts exactly like `drmtap_grab_desc()` + `drmtap_convert_dmabuf()`.
 `examples/packet_capture.c` runs both sides in two processes over `SOCK_SEQPACKET`.
 
@@ -46,14 +51,32 @@ one-plane packet converts exactly like `drmtap_grab_desc()` + `drmtap_convert_dm
 
 It still describes one buffer. When the primary plane covers the CRTC it returns it as
 before (a window on an overlay is not in that frame). When it does not, the underlay case,
-it returns `-EAGAIN` and no frame, instead of a frame of the wrong size. Keep the last frame
-or move to the packet API. `drmtap_convert_dmabuf()` is unchanged.
+it returns `-EAGAIN` and no frame for the first 2 seconds of a continuous underlay, instead
+of a frame of the wrong size: keep the last frame. KWin 6.8 kept its underlays for 1.1 to
+1.4 s here. After 2 seconds, so that a consumer that gives up after a few seconds of
+`-EAGAIN` (rustdesk does at about 5) keeps its stream, it returns the topmost lit plane that
+covers the whole CRTC, the desktop: screen-sized, with the window below it showing as that
+plane's transparent hole, until the underlay ends. With no such plane, `-EAGAIN` goes on.
+The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchanged.
+
+### Changed: what a composed frame reports
+
+- `drmtap_plane_rotation()` answers `DRM_MODE_ROTATE_0` after a composed frame (in process,
+  through `drmtap_convert_packet()`, and on the exporter after a packet of several layers):
+  every plane was drawn with its own rotation, so the frame is already in screen
+  orientation and the consumer turns it by the output transform.
+- A composed frame's `fb_id` is the primary plane's. It does not change when only a window
+  on another plane does, so it is not a content key.
 
 ### Helper
 
 `drmtap-helper` answers a new command, `CMD_GRAB_LAYERS`, with the packet and its fds, so an
 unprivileged caller gets composed frames too. It also sets `DRM_CLIENT_CAP_ATOMIC` on its fd,
-which is what makes the plane rectangles visible. The protocol version stays 1: a helper
+which is what makes the plane rectangles visible, and right after it
+`DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT` as the library does since 0.5.4, or a virtualized GPU
+would hide its cursor plane from the helper. When the helper cannot export the layers the
+library does not ask again for 2 seconds, and the helper logs one line for the first
+failure and one per 256 after it. The protocol version stays 1: a helper
 older than 0.6.0 does not know the command, and the library then captures the primary plane
 through `CMD_GRAB` as before (tried on a fresh helper once before concluding that).
 

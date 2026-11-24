@@ -243,6 +243,9 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * 0.6.0 helper; an older one gives the primary plane only. Composition needs the
  * EGL backend, except for linear 8-bit RGB planes the CPU can compose; otherwise
  * the frame is the primary plane alone, said once in the debug log.
+ * A composed frame's fb_id is the PRIMARY plane's: it names no buffer holding
+ * these pixels and does not change when only a window on another plane does, so
+ * it is not a content key (compare pixels, or use DRMTAP_SKIP_UNCHANGED).
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)
@@ -419,9 +422,14 @@ typedef struct {
  *     window is NOT in the frame;
  *   - the primary plane does not cover the CRTC (the desktop is on an overlay
  *     plane with a transparent hole and a window sits below it on the primary, an
- *     underlay): it returns -EAGAIN and no frame. Keep showing the last frame;
- *     the compositor goes back to one plane when the window stops being an
- *     underlay (seen after about a second with KWin 6.8).
+ *     underlay): for the first 2 seconds of a continuous underlay it returns
+ *     -EAGAIN and no frame. Keep showing the last frame; KWin 6.8 went back to
+ *     one plane after 1.1 to 1.4 s when a window opened. After 2 seconds, so that
+ *     a consumer that gives up after a few seconds of -EAGAIN keeps its stream,
+ *     it returns the topmost lit plane that covers the whole CRTC (the desktop):
+ *     same size as the screen, with the window under it showing as that plane's
+ *     transparent hole, and keeps doing so until the underlay ends. When no lit
+ *     plane covers the CRTC it keeps returning -EAGAIN.
  * Only the packet API (drmtap_grab_packet() + drmtap_convert_packet()) captures
  * those frames whole.
  *
@@ -430,7 +438,7 @@ typedef struct {
  * @param frame Output frame — owns the dma_buf_fd; release when done
  * @return 0 on success, negative errno on error
  * @retval -EAGAIN The CRTC is in a multi-plane state one buffer cannot describe
- *                 (an underlay, see above); no frame, try again on the next one
+ *                 (an underlay, first 2 s, see above); no frame, try again
  */
 int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
                      drmtap_frame_info *frame);
@@ -666,6 +674,10 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * frame->data is context-owned, valid until the next convert or drmtap_close();
  * do not call drmtap_frame_release() on it. drmtap_set_output_buffer() and
  * DRMTAP_SKIP_UNCHANGED apply as they do to drmtap_convert_dmabuf().
+ * frame->fb_id of a composed frame is the primary plane's and does not track the
+ * content (a window on another plane can change while it stays the same): do not
+ * use it as a content key. After a composed convert, drmtap_plane_rotation() on
+ * this context answers ROTATE_0.
  *
  * The bytes and the fds cross a privilege boundary and are treated as hostile.
  * The packet is checked field by field before anything is used (magic, version,
@@ -823,6 +835,16 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  * plane a grab would use), so the rotation belongs to the same plane as the frame. Read
  * at the time of the call, not from a cached frame: call it right after the grab. Costs
  * one OBJ_GETPROPERTIES per call once the property id is known.
+ *
+ * Composed frames (0.6.0). When the last frame was composed from several planes
+ * (drmtap_grab(), drmtap_grab_mapped(), drmtap_grab_mapped_fast() on a multi-plane
+ * CRTC, drmtap_convert_packet() of a packet with several layers, and
+ * drmtap_grab_packet() on the exporter when its packet has several layers) the
+ * answer is DRM_MODE_ROTATE_0 and 0: every plane was drawn with its own rotation,
+ * so the frame is already the CRTC raster, like a framebuffer the compositor
+ * rotated in software, and the consumer turns it by the output transform. This
+ * also answers on a drmtap_open_render() context after such a convert (it answers
+ * -ENOTSUP there otherwise).
  *
  * @param ctx      Capture context from drmtap_open()
  * @param rotation Set to the DRM rotation bitmask: DRM_MODE_ROTATE_0 (0x1),
