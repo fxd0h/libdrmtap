@@ -171,6 +171,42 @@ static void test_key(void) {
           "a moved window changes the key");
 }
 
+static void test_underlay_timing(void) {
+    printf("test_underlay_timing:\n");
+    int64_t since = 0;
+    const int64_t L = DRMTAP_UNDERLAY_EAGAIN_MS;
+    check(drmtap_underlay_decide(&since, 1000, 0, 1, L) == DRMTAP_UNDERLAY_NONE && since == 0,
+          "no underlay: normal path");
+    check(drmtap_underlay_decide(&since, 5000, 1, 1, L) == DRMTAP_UNDERLAY_EAGAIN && since == 5000,
+          "underlay starts: -EAGAIN, start remembered");
+    check(drmtap_underlay_decide(&since, 5000 + L - 1, 1, 1, L) == DRMTAP_UNDERLAY_EAGAIN,
+          "still -EAGAIN 1 ms before the limit");
+    check(drmtap_underlay_decide(&since, 5000 + L, 1, 1, L) == DRMTAP_UNDERLAY_COVER,
+          "at the limit: the covering layer");
+    check(drmtap_underlay_decide(&since, 5000 + 10 * L, 1, 1, L) == DRMTAP_UNDERLAY_COVER,
+          "and for as long as the underlay lasts");
+    check(drmtap_underlay_decide(&since, 5000 + 10 * L, 1, 0, L) == DRMTAP_UNDERLAY_EAGAIN,
+          "no covering layer: -EAGAIN goes on");
+    check(drmtap_underlay_decide(&since, 5000 + 11 * L, 0, 1, L) == DRMTAP_UNDERLAY_NONE && since == 0,
+          "underlay over: reset");
+    check(drmtap_underlay_decide(&since, 5000 + 11 * L + 1, 1, 1, L) == DRMTAP_UNDERLAY_EAGAIN,
+          "a new underlay starts the 2 s again");
+    since = 0;
+    check(drmtap_underlay_decide(&since, 0, 1, 1, L) == DRMTAP_UNDERLAY_EAGAIN && since != 0,
+          "a clock reading 0 still marks the start");
+}
+
+static void test_packet_init(void) {
+    printf("test_packet_init:\n");
+    drmtap_packet p;
+    memset(&p, 0x5a, sizeof(p));
+    check(drmtap_grab_packet(NULL, &p) == -EINVAL && p.nfds == 0 && p.len == 0 &&
+          p.fds[0] == -1 && p.fds[DRMTAP_PACKET_MAX_FDS - 1] == -1,
+          "grab_packet(NULL ctx) leaves an empty packet that is safe to release");
+    drmtap_packet_release(&p);
+    drmtap_packet_release(NULL);
+}
+
 /* ===== packet codec ===== */
 
 static drmtap_layer_set sample_set(void) {
@@ -630,6 +666,107 @@ static void test_convert_packet(void) {
                   "rotate-270 puts it at the bottom");
             close(rb);
         }
+
+        /* Import-cache pinning: a later layer must never release the texture an
+         * earlier layer of the same frame already picked. Fill the 12 slots, then
+         * a frame whose bottom layer hits and whose top layer misses (eviction),
+         * and one whose top layer reuses the bottom fb_id with another geometry. */
+        int red = make_buf(ctrl, W, H, 0xffff0000u, 0);
+        int blue = make_buf(ctrl, 16, 16, 0xff0000ffu, 0);
+        if (red >= 0 && blue >= 0) {
+            drmtap_layer_set e;
+            for (int k = 0; k < 6; k++) {
+                memset(&e, 0, sizeof(e));
+                e.crtc_w = W; e.crtc_h = H; e.count = 2; e.lit = 2; e.nfds = 1;
+                e.fds[0] = red;
+                e.layers[0] = mk_layer(10, W, H, 0, 0, W, H, 0);
+                e.layers[0].fb_id = 1000 + 2 * k;
+                e.layers[1] = mk_layer(11, W, H, 0, 0, W, H, 1);
+                e.layers[1].fb_id = 1001 + 2 * k;
+                gpu_compose(ctx, &e, gpu);
+            }
+            for (int mode = 0; mode < 2; mode++) {
+                memset(&e, 0, sizeof(e));
+                e.crtc_w = W; e.crtc_h = H; e.count = 2; e.lit = 2; e.nfds = 2;
+                e.fds[0] = red;
+                e.fds[1] = blue;
+                e.layers[0] = mk_layer(10, W, H, 0, 0, W, H, 0);
+                e.layers[0].fb_id = 1000;
+                e.layers[1] = mk_layer(11, 16, 16, 0, 0, 16, 16, 1);
+                e.layers[1].fd_index[0] = 1;
+                e.layers[1].fb_id = mode == 0 ? 4242 : 1000;
+                r = gpu_compose(ctx, &e, gpu);
+                const uint8_t *px = gpu + ((size_t)40 * W + 40) * 4;
+                const uint8_t *top = gpu + ((size_t)4 * W + 4) * 4;
+                check(r == 0 && px[2] == 255 && px[0] == 0 && top[0] == 255,
+                      mode == 0 ? "a cache eviction does not black out a layer of the same frame"
+                                : "the same fb_id with another layout in one frame keeps both");
+            }
+            /* more layers than free slots: run several frames, all still exact */
+            int bad = 0;
+            for (int k = 0; k < 40; k++) {
+                memset(&e, 0, sizeof(e));
+                e.crtc_w = W; e.crtc_h = H; e.count = 4; e.lit = 4; e.nfds = 2;
+                e.fds[0] = red;
+                e.fds[1] = blue;
+                e.layers[0] = mk_layer(10, W, H, 0, 0, W, H, 0);
+                e.layers[0].fb_id = 2000 + (uint32_t)k * 4;
+                for (int j = 1; j < 4; j++) {
+                    e.layers[j] = mk_layer(10 + (uint32_t)j, 16, 16, 16 * j, 0, 16, 16, (uint32_t)j);
+                    e.layers[j].fd_index[0] = 1;
+                    e.layers[j].fb_id = 2000 + (uint32_t)k * 4 + (uint32_t)j;
+                }
+                if (gpu_compose(ctx, &e, gpu) != 0 || gpu[((size_t)40 * W + 40) * 4 + 2] != 255 ||
+                    gpu[((size_t)4 * W + 20) * 4] != 255) {
+                    bad++;
+                }
+            }
+            check(bad == 0, "40 frames of 4 fresh layers, cache always full: no layer lost");
+        }
+        if (red >= 0) {
+            close(red);
+        }
+        if (blue >= 0) {
+            close(blue);
+        }
+
+        /* a composed convert is in CRTC orientation */
+        r = convert(ctx, &s, &f, NULL, 0);
+        uint32_t rot = 0;
+        check(r == 0 && drmtap_plane_rotation(ctx, &rot) == 0 && rot == DRMTAP_ROT_0,
+              "after a composed convert, plane_rotation answers ROTATE_0");
+    }
+
+    /* a chroma plane in an fd of its own is bounded by its whole extent */
+    {
+        int y = make_buf(ctrl, 16, 16, 0, 0);       /* 1024 bytes: plenty for 64x16 luma */
+        int uv_small = make_buf(ctrl, 1, 1, 0, 0);  /* one page */
+        int uv_big = make_buf(ctrl, 64, 64, 0, 0);  /* 16 KiB */
+        if (y >= 0 && uv_small >= 0 && uv_big >= 0) {
+            drmtap_layer_set n;
+            memset(&n, 0, sizeof(n));
+            n.crtc_w = W; n.crtc_h = H; n.count = 1; n.lit = 1; n.nfds = 2;
+            n.fds[0] = y;
+            n.fds[1] = uv_small;
+            n.layers[0] = mk_layer(10, 64, 16, 0, 0, 64, 16, 0);
+            n.layers[0].format = 0x3231564eu;   /* NV12 */
+            n.layers[0].num_planes = 2;
+            n.layers[0].pitches[0] = 64;
+            n.layers[0].pitches[1] = 512;       /* 8 rows x 512 = 4096: fits one page */
+            n.layers[0].fd_index[1] = 1;
+            n.layers[0].src_w = 64u << 16; n.layers[0].src_h = 16u << 16;
+            check(convert(ctx, &n, &f, NULL, 0) != -EINVAL,
+                  "NV12 chroma that fits its own fd passes validation");
+            n.layers[0].pitches[1] = 1024;      /* 8 rows x 1024 = 8192 > 4096 */
+            check(convert(ctx, &n, &f, NULL, 0) == -EINVAL,
+                  "NV12 chroma larger than its own fd is refused");
+            n.fds[1] = uv_big;
+            check(convert(ctx, &n, &f, NULL, 0) != -EINVAL,
+                  "and accepted when its fd is big enough");
+        }
+        if (y >= 0) close(y);
+        if (uv_small >= 0) close(uv_small);
+        if (uv_big >= 0) close(uv_big);
     }
     for (int i = 0; i < 4; i++) {
         close(s.fds[i]);
@@ -644,6 +781,8 @@ int main(void) {
     test_sort_and_cover();
     test_quad();
     test_key();
+    test_underlay_timing();
+    test_packet_init();
     test_packet_roundtrip();
     test_packet_malformed();
     test_packet_fuzz();
