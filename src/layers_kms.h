@@ -463,7 +463,9 @@ fail:
 
 /* Read, export, read again. When the compositor flipped a layer (or moved one)
  * between the two reads the exported buffers may not belong to one frame, so the
- * whole thing runs once more and that second result is used as it is. Returns
+ * whole thing runs once more and that second result is used as it is. An export
+ * that fails with -ENOENT (an fb removed between the read and GetFB2) also gets
+ * that one more pass. Returns
  * the lit count with s->fds filled (when s->lit <= DRMTAP_MAX_LAYERS), 0 when
  * nothing is lit, or -errno. *retried (optional) is set when the second pass ran. */
 static inline int drmtap_kms_capture_layers(int fd, drmtap_kms_cache *c, uint32_t crtc_id,
@@ -477,6 +479,14 @@ static inline int drmtap_kms_capture_layers(int fd, drmtap_kms_cache *c, uint32_
             return n;
         }
         int r = drmtap_kms_export_layers(fd, s);
+        if (r == -ENOENT && attempt == 0) {
+            /* A framebuffer went away between the read and GetFB2 (a window closed
+             * or resized): read the planes again rather than fail the frame. */
+            if (retried) {
+                *retried = 1;
+            }
+            continue;
+        }
         if (r < 0) {
             return r;
         }

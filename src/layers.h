@@ -223,6 +223,37 @@ static inline int drmtap_layers_same(const drmtap_layer_set *a, const drmtap_lay
     return 1;
 }
 
+/* What drmtap_grab_desc() does about an underlay (the primary plane does not
+ * cover the CRTC, so its one buffer is not the screen). For the first
+ * DRMTAP_UNDERLAY_EAGAIN_MS of a continuous underlay: -EAGAIN, the consumer keeps
+ * its last frame (KWin's underlays while a window opens lasted 1.1-1.4 s here).
+ * After that, a consumer that counts stalls (rustdesk closes after ~5 s) would
+ * drop the capture, so if some lit layer covers the whole CRTC that layer is
+ * returned instead: the size stays the CRTC's and the window under it shows as
+ * its transparent hole. With no covering layer, -EAGAIN goes on.
+ *
+ * Pure, the clock is passed in, so the timing is unit-tested. *since_ms is the
+ * start of the current underlay (0 = none) and is kept by the caller per context.
+ * `underlay`: this frame is one; `have_cover`: a lit layer covers the CRTC. */
+#define DRMTAP_UNDERLAY_EAGAIN_MS 2000
+#define DRMTAP_UNDERLAY_NONE   0   /* not an underlay: the normal path */
+#define DRMTAP_UNDERLAY_EAGAIN 1   /* return -EAGAIN */
+#define DRMTAP_UNDERLAY_COVER  2   /* return the covering layer */
+static inline int drmtap_underlay_decide(int64_t *since_ms, int64_t now_ms, int underlay,
+                                         int have_cover, int64_t limit_ms) {
+    if (!underlay) {
+        *since_ms = 0;
+        return DRMTAP_UNDERLAY_NONE;
+    }
+    if (*since_ms == 0) {
+        *since_ms = now_ms > 0 ? now_ms : 1;
+    }
+    if (now_ms - *since_ms < limit_ms) {
+        return DRMTAP_UNDERLAY_EAGAIN;
+    }
+    return have_cover ? DRMTAP_UNDERLAY_COVER : DRMTAP_UNDERLAY_EAGAIN;
+}
+
 /* 1 for a rotation value the kernel can hold: exactly one rotate bit, and only
  * the rotate and reflect bits. */
 static inline int drmtap_rotation_valid(uint32_t r) {

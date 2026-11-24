@@ -34,6 +34,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 
 #include "drmtap_internal.h"
 #include "wire.h"
@@ -446,6 +447,18 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
  * command and closes the connection, which reads exactly like a helper that died
  * before answering, so the same rule as the cursor2 path applies: one retry on a
  * fresh helper, and only a second silence latches "old helper". */
+static uint64_t mono_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+
+/* After the helper says it cannot export the layers, do not ask again for this
+ * long: the frames meanwhile come from CMD_GRAB (primary plane), as they would
+ * after the failed request anyway, without a round trip and a helper log line
+ * each. */
+#define HELPER_LAYERS_BACKOFF_MS 2000u
+
 int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t *len,
                               int *fds, uint32_t max_fds, uint32_t *nfds) {
     *len = 0;
@@ -453,6 +466,12 @@ int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t 
     if (ctx->helper_no_layers) {
         return -ENOTSUP;
     }
+    if (ctx->helper_layers_backoff_ms && mono_ms() < ctx->helper_layers_backoff_ms) {
+        drmtap_set_error(ctx, "helper could not export the layers of crtc %u a moment "
+                         "ago; not asking again yet", ctx->crtc_id);
+        return -EIO;
+    }
+    ctx->helper_layers_backoff_ms = 0;
     if (ctx->helper_fd < 0) {
         int ret = drmtap_helper_spawn(ctx);
         if (ret < 0) {
@@ -502,6 +521,7 @@ int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t 
         for (size_t i = 0; i < ngot; i++) {
             close(got[i]);
         }
+        ctx->helper_layers_backoff_ms = mono_ms() + HELPER_LAYERS_BACKOFF_MS;
         drmtap_set_error(ctx, "helper could not export the layers of crtc %u",
                          ctx->crtc_id);
         return -EIO;

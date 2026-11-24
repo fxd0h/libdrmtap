@@ -228,6 +228,18 @@ struct drmtap_ctx {
     int      helper_no_layers;
     int      helper_layers_ok;
     int      helper_layers_retried;
+    /* CLOCK_MONOTONIC ms until which CMD_GRAB_LAYERS is not asked again, after the
+     * helper answered that it could not export the layers. Without it such a state
+     * cost a failed request, a CMD_GRAB fallback and a helper stderr line on every
+     * frame. */
+    uint64_t helper_layers_backoff_ms;
+    /* 1 when the last frame this context produced was composed from several planes
+     * (it is then in CRTC orientation: drmtap_plane_rotation answers ROTATE_0). */
+    int      last_frame_composed;
+    /* CLOCK_MONOTONIC ms when grab_desc first saw the current underlay, 0 = none
+     * (see drmtap_underlay_decide in layers.h). */
+    int64_t  underlay_since_ms;
+    int      underlay_cover_logged;   /* the switch to the covering layer was logged */
 };
 
 /* ========================================================================= */
