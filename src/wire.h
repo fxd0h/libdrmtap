@@ -56,6 +56,12 @@
  * adds the hotspot provenance). A helper that does not know this type closes the
  * connection without replying, which is the client's signal to fall back. */
 #define CMD_GET_CURSOR2 0x03u
+/* Every lit layer of the CRTC (multi-plane scanout, 0.6.0), answered with
+ * helper_layers_reply_t carrying the fds, then `packet_len` bytes of a libdrmtap
+ * packet (src/layers.h). Added as a NEW command for the reason given at
+ * HELPER_PROTO_VERSION: an older helper rejects it at wire_cmd_valid and closes
+ * the connection, and the client falls back to CMD_GRAB (primary plane only). */
+#define CMD_GRAB_LAYERS 0x04u
 #define CMD_QUIT       0xFFu
 
 typedef struct {
@@ -88,8 +94,24 @@ static inline int wire_cmd_valid(const helper_cmd_grab_t *c) {
            c->version == HELPER_PROTO_VERSION &&
            c->length == (uint32_t)sizeof(helper_cmd_grab_t) &&
            (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR ||
-            c->type == CMD_GET_CURSOR2 || c->type == CMD_QUIT);
+            c->type == CMD_GET_CURSOR2 || c->type == CMD_GRAB_LAYERS ||
+            c->type == CMD_QUIT);
 }
+
+/* Most fds one message may carry (CMD_GRAB_LAYERS: up to 4 layers of up to 4
+ * buffer objects each). */
+#define WIRE_MAX_FDS 16
+
+/* The CMD_GRAB_LAYERS reply header. status 0 = a packet of packet_len bytes
+ * follows and nfds fds came with this header; anything else = no packet, no fds. */
+typedef struct {
+    uint32_t status;
+    uint32_t packet_len;
+    uint32_t nfds;
+    uint32_t reserved;
+} helper_layers_reply_t;
+_Static_assert(sizeof(helper_layers_reply_t) == 16,
+               "the CMD_GRAB_LAYERS reply layout is frozen: extend via a new command");
 
 /* Send exactly len bytes, handling partial writes and EINTR. 0 ok, -1 error. */
 static inline int wire_send_all(int sock, const void *buf, size_t len) {
@@ -240,6 +262,118 @@ static inline int wire_recv_fd(int sock, void *meta_buf, size_t meta_len, int *o
             return -1;
         }
     }
+    return 0;
+}
+
+/* Send `meta` with n (0..WIRE_MAX_FDS) fds attached via SCM_RIGHTS, finishing a
+ * partial metadata write like wire_send_fd. n == 0 sends the bytes alone (an
+ * empty SCM_RIGHTS block is invalid). Returns 0 on success, -1 on error. */
+static inline int wire_send_fds(int sock, const int *fds, size_t n,
+                                const void *meta, size_t meta_len) {
+    if (n == 0) {
+        return wire_send_all(sock, meta, meta_len);
+    }
+    if (n > WIRE_MAX_FDS || !fds) {
+        return -1;
+    }
+    struct msghdr msg;
+    struct iovec iov;
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int) * WIRE_MAX_FDS)];
+    } cmsg_buf;
+    memset(&msg, 0, sizeof(msg));
+    memset(&cmsg_buf, 0, sizeof(cmsg_buf));
+    iov.iov_base = (void *)meta;
+    iov.iov_len = meta_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.buf;
+    msg.msg_controllen = CMSG_SPACE(sizeof(int) * n);
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int) * n);
+    memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * n);
+    ssize_t r;
+    do {
+        r = sendmsg(sock, &msg, MSG_NOSIGNAL);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0) {
+        return -1;
+    }
+    if ((size_t)r < meta_len) {
+        return wire_send_all(sock, (const unsigned char *)meta + (size_t)r,
+                             meta_len - (size_t)r);
+    }
+    return 0;
+}
+
+/* Receive `meta` plus at most `max_fds` (<= WIRE_MAX_FDS) fds. Same rules as
+ * wire_recv_fd: MSG_CMSG_CLOEXEC, and a truncated control message or more fds
+ * than allowed rejects the whole message with every received fd closed.
+ * *n_out is the number of fds stored in fds[]. Returns 0 or -1. */
+static inline int wire_recv_fds(int sock, void *meta_buf, size_t meta_len,
+                                int *fds, size_t max_fds, size_t *n_out) {
+    struct msghdr msg;
+    struct iovec iov;
+    union {
+        struct cmsghdr align;
+        /* One spare slot so "one more than allowed" arrives (and is refused)
+         * instead of being cut by MSG_CTRUNC with no way to count it. */
+        char buf[CMSG_SPACE(sizeof(int) * (WIRE_MAX_FDS + 1))];
+    } cmsg_buf;
+    *n_out = 0;
+    if (max_fds > WIRE_MAX_FDS) {
+        max_fds = WIRE_MAX_FDS;
+    }
+    memset(&msg, 0, sizeof(msg));
+    iov.iov_base = meta_buf;
+    iov.iov_len = meta_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.buf;
+    msg.msg_controllen = sizeof(cmsg_buf.buf);
+
+    ssize_t r = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+    if (r <= 0) {
+        return -1;
+    }
+    size_t kept = 0;
+    int bad = (msg.msg_flags & MSG_CTRUNC) != 0;
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+            cmsg->cmsg_len < CMSG_LEN(0)) {
+            continue;
+        }
+        size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (size_t i = 0; i < count; i++) {
+            int fd;
+            memcpy(&fd, CMSG_DATA(cmsg) + i * sizeof(int), sizeof(int));
+            if (kept < max_fds) {
+                fds[kept++] = fd;
+            } else {
+                close(fd);
+                bad = 1;
+            }
+        }
+    }
+    if (bad) {
+        for (size_t i = 0; i < kept; i++) {
+            close(fds[i]);
+        }
+        return -1;
+    }
+    if ((size_t)r < meta_len) {
+        if (wire_recv_all(sock, (unsigned char *)meta_buf + r, meta_len - (size_t)r) < 0) {
+            for (size_t i = 0; i < kept; i++) {
+                close(fds[i]);
+            }
+            return -1;
+        }
+    }
+    *n_out = kept;
     return 0;
 }
 

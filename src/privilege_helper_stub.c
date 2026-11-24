@@ -19,7 +19,7 @@
  * about a spawn it never wanted, and `nm -D` on the .so shows no fork or exec.
  *
  * So this file deliberately contains no search paths, no fork, no exec and no
- * socketpair. It keeps the four symbols the callers reference, and each one
+ * socketpair. It keeps the five symbols the callers reference, and each one
  * fails with the capability the caller is actually missing.
  */
 
@@ -67,6 +67,20 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     if (cursor) {
         memset(cursor, 0, sizeof(*cursor));
         cursor->pixels = NULL;
+    }
+    return no_helper(ctx);
+}
+int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t *len,
+                              int *fds, uint32_t max_fds, uint32_t *nfds) {
+    (void)buf;
+    (void)cap;
+    (void)fds;
+    (void)max_fds;
+    if (len) {
+        *len = 0;
+    }
+    if (nfds) {
+        *nfds = 0;
     }
     return no_helper(ctx);
 }
