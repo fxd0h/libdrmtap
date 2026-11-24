@@ -26,6 +26,9 @@
         drmtap_grab_mapped_fast;
         drmtap_grab_desc;
         drmtap_convert_dmabuf;
+        drmtap_grab_packet;
+        drmtap_packet_release;
+        drmtap_convert_packet;
         drmtap_frame_release;
         drmtap_frame_owns_data;
         drmtap_get_cursor;

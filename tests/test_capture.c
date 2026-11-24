@@ -123,7 +123,12 @@ static void test_grab_real_capture(void) {
     TEST_ASSERT(frame.width > 0);
     TEST_ASSERT(frame.height > 0);
     TEST_ASSERT(frame.stride > 0);
-    TEST_ASSERT(frame.dma_buf_fd >= 0);
+    /* An fd, or pixels where there is no single buffer to hand out: a screen made
+     * of several planes is composed (0.6.0), and the helper pixel path copies. */
+    TEST_ASSERT(frame.dma_buf_fd >= 0 || frame.data != NULL);
+    if (frame.dma_buf_fd < 0) {
+        printf("  zero-copy grab returned pixels (multi-plane frame or helper copy)\n");
+    }
 
     drmtap_frame_release(ctx, &frame);
     printf("  PASS: zero-copy grab + release\n");
