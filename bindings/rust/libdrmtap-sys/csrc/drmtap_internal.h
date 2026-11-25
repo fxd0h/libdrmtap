@@ -250,6 +250,7 @@ struct drmtap_ctx {
      * cost a failed request, a CMD_GRAB fallback and a helper stderr line on every
      * frame. */
     uint64_t helper_layers_backoff_ms;
+    uint32_t helper_layers_backoff_crtc;   /* the CRTC that backoff is for */
     /* What the last frame this context produced was, for drmtap_plane_rotation:
      * 0 = one plane's buffer (the answer is that plane's KMS property), 1 = composed
      * from several planes (CRTC orientation: ROTATE_0), DRMTAP_FRAME_ONE_LAYER =

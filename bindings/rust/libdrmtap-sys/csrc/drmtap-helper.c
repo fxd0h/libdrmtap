@@ -953,15 +953,16 @@ static uint64_t layers_now_ms(void) {
  * touches it: (1) a request that finds the next one already queued gets a reply
  * with no fds, so a peer that floods commands without reading gets one set of
  * fds per burst; (2)
- * after a failure, LAYERS_BACKOFF_MS of fast refusals with no plane read, the
- * same 2 s the library waits after a status-1 reply. Every refusal is a status-1
+ * after a failure on a CRTC, LAYERS_BACKOFF_MS of fast refusals with no plane read
+ * for THAT CRTC (wire_backoff_t: the other CRTCs keep their frames), the same 2 s
+ * the library waits after a status-1 reply. Every refusal is a status-1
  * header with no fds, which the library already handles (primary through
  * CMD_GRAB). The remaining bound for a peer that sends one command at a time and
  * never reads is the socket buffer. */
 #define LAYERS_BACKOFF_MS 2000
 static int layers_and_send(int sock, int drm_fd, uint32_t crtc_id) {
     static drmtap_kms_cache cache;   /* zero = not built; one device per helper */
-    static uint64_t backoff_until_ms;
+    static wire_backoff_t backoff[WIRE_BACKOFF_SLOTS];
     helper_layers_reply_t rep;
     drmtap_layer_set s;
     uint8_t buf[DRMTAP_PKT_MAX_LEN];
@@ -976,7 +977,7 @@ static int layers_and_send(int sock, int drm_fd, uint32_t crtc_id) {
         quiet = 1;
         goto fail;
     }
-    if (now < backoff_until_ms) {
+    if (wire_backoff_active(backoff, crtc_id, now)) {
         why = "backing off after a failure";
         quiet = 1;
         goto fail;
@@ -1028,7 +1029,7 @@ fail:
     if (!quiet) {
         static unsigned long failures = 0;
         failures++;
-        backoff_until_ms = now + LAYERS_BACKOFF_MS;
+        wire_backoff_set(backoff, crtc_id, now, now + LAYERS_BACKOFF_MS);
         if (failures == 1 || failures % 256 == 0) {
             fprintf(stderr, "drmtap-helper: CMD_GRAB_LAYERS: %s (%s) [%lu failure%s]\n",
                     why, err ? strerror(err) : "-", failures, failures == 1 ? "" : "s");

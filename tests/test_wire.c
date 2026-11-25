@@ -282,6 +282,30 @@ static void test_cursor_reply_is_extended_by_prefix(void) {
           "the extension is one word, appended after the frozen part");
 }
 
+/* The helper's CMD_GRAB_LAYERS backoff is per CRTC: one CRTC failing does not
+ * refuse the others (multi-monitor), and the table never grows. */
+static void test_backoff_per_crtc(void) {
+    printf("test_backoff_per_crtc:\n");
+    wire_backoff_t t[WIRE_BACKOFF_SLOTS];
+    memset(t, 0, sizeof(t));
+    uint64_t now = 1000;
+    wire_backoff_set(t, 150, now, now + 2000);        /* crtc 150 failed */
+    int frames_268 = 0, refused_150 = 0;
+    for (uint64_t ms = now; ms < now + 1900; ms += 16) {   /* 60 fps for 1.9 s */
+        frames_268 += !wire_backoff_active(t, 268, ms);
+        refused_150 += wire_backoff_active(t, 150, ms);
+    }
+    CHECK(frames_268 == 119,"the healthy CRTC keeps every frame while the other backs off");
+    CHECK(refused_150 == 119,"the failed CRTC is refused for the whole window");
+    CHECK(!wire_backoff_active(t, 150, now + 2000),"and served again after 2 s");
+    for (uint32_t c = 1; c <= 20; c++) {               /* a peer cycling bad ids */
+        wire_backoff_set(t, 1000 + c, now + c, now + c + 2000);
+    }
+    CHECK(!wire_backoff_active(t, 268, now + 30),"bad ids fill a fixed table and never block a healthy CRTC");
+    wire_backoff_set(t, 0, now, now + 2000);           /* crtc 0 is a key like any other */
+    CHECK(wire_backoff_active(t, 0, now + 1) && !wire_backoff_active(t, 150, now + 1500),"a crtc 0 failure does not refuse a real CRTC");
+}
+
 int main(void) {
     printf("Running wire-protocol tests (against src/wire.h)...\n");
     test_received_fd_is_cloexec();
@@ -293,6 +317,7 @@ int main(void) {
     test_eof_midframe_rejected();
     test_cmd_frame_magic_version();
     test_cursor_reply_is_extended_by_prefix();
+    test_backoff_per_crtc();
     if (g_failures == 0) {
         printf("All wire-protocol tests passed.\n");
         return 0;
