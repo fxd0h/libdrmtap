@@ -32,6 +32,7 @@
  */
 
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -193,6 +194,13 @@ static int run_exporter(int sock, int frames) {
         drmtap_packet pkt;
         double t0 = now_us();
         int r = drmtap_grab_packet(ctx, &pkt);
+        for (int tries = 0; r == -EAGAIN && tries < 100; tries++) {
+            /* "no frame this time" (a plane flipped during the export, an old helper
+             * in an underlay): keep trying for up to ~1 s, it is not a failure */
+            drmtap_packet_release(&pkt);
+            usleep(10000);
+            r = drmtap_grab_packet(ctx, &pkt);
+        }
         double grab_us = now_us() - t0;
         if (r != 0) {
             printf("  frame %d: SKIP: drmtap_grab_packet failed (%d): %s\n", i, r,

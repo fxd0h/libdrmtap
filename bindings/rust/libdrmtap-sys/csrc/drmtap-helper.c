@@ -942,13 +942,45 @@ out:
  * reply header carrying the fds followed by a libdrmtap packet. Any failure is a
  * status-1 header with no fds and no packet, after which the library captures the
  * primary plane through CMD_GRAB. Every exported fd is closed here once sent. */
+static uint64_t layers_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+/* The helper's own bounds on CMD_GRAB_LAYERS, which hands out up to 16 scanout
+ * dma-bufs per reply and is not subject to the kernel's in-flight fd limit (it
+ * holds CAP_SYS_ADMIN). The library is strictly request/reply, so none of these
+ * touches it: (1) a request that finds the next one already queued gets a reply
+ * with no fds, so a peer that floods commands without reading gets one set of
+ * fds per burst; (2)
+ * after a failure, LAYERS_BACKOFF_MS of fast refusals with no plane read, the
+ * same 2 s the library waits after a status-1 reply. Every refusal is a status-1
+ * header with no fds, which the library already handles (primary through
+ * CMD_GRAB). The remaining bound for a peer that sends one command at a time and
+ * never reads is the socket buffer. */
+#define LAYERS_BACKOFF_MS 2000
 static int layers_and_send(int sock, int drm_fd, uint32_t crtc_id) {
     static drmtap_kms_cache cache;   /* zero = not built; one device per helper */
+    static uint64_t backoff_until_ms;
     helper_layers_reply_t rep;
     drmtap_layer_set s;
     uint8_t buf[DRMTAP_PKT_MAX_LEN];
     memset(&rep, 0, sizeof(rep));
     const char *why = NULL;
+    int err = 0;          /* the errno of the failure, for the log (not a stale one) */
+    int quiet = 0;        /* a bound, not a failure: no log line, no backoff */
+    uint64_t now = layers_now_ms();
+    char peek;
+    if (recv(sock, &peek, 1, MSG_PEEK | MSG_DONTWAIT) > 0) {
+        why = "the next request is already queued";
+        quiet = 1;
+        goto fail;
+    }
+    if (now < backoff_until_ms) {
+        why = "backing off after a failure";
+        quiet = 1;
+        goto fail;
+    }
     if (crtc_id == 0) {
         why = "CMD_GRAB_LAYERS needs a CRTC id";
         goto fail;
@@ -956,15 +988,18 @@ static int layers_and_send(int sock, int drm_fd, uint32_t crtc_id) {
     int n = drmtap_kms_capture_layers(drm_fd, &cache, crtc_id, &s, NULL);
     if (n <= 0) {
         why = n == 0 ? "no lit plane on the CRTC" : "reading or exporting the planes failed";
+        err = n < 0 ? -n : 0;
         goto fail;
     }
     if (s.lit > s.count) {
         why = "more lit planes than a packet carries";
         goto fail;
     }
-    if (drmtap_kms_crtc_size(drm_fd, crtc_id, &s.crtc_w, &s.crtc_h) != 0) {
+    int cr = drmtap_kms_crtc_size(drm_fd, crtc_id, &s.crtc_w, &s.crtc_h);
+    if (cr != 0) {
         drmtap_layers_close_fds(&s);
         why = "the CRTC has no mode";
+        err = cr < 0 ? -cr : 0;
         goto fail;
     }
     read_hdr_metadata(drm_fd, crtc_id, &s.hdr_eotf, &s.hdr_max_nits);
@@ -972,8 +1007,10 @@ static int layers_and_send(int sock, int drm_fd, uint32_t crtc_id) {
     if (len < 0) {
         drmtap_layers_close_fds(&s);
         why = "the layer set does not encode";
+        err = -len;
         goto fail;
     }
+
     rep.status = 0;
     rep.packet_len = (uint32_t)len;
     rep.nfds = s.nfds;
@@ -988,12 +1025,13 @@ fail:
     /* One line for the first failure, then one per 256 with the count: the
      * library backs off after a failure, but a helper serving several contexts
      * must not turn a persistent state into a line per frame either. */
-    {
+    if (!quiet) {
         static unsigned long failures = 0;
         failures++;
+        backoff_until_ms = now + LAYERS_BACKOFF_MS;
         if (failures == 1 || failures % 256 == 0) {
             fprintf(stderr, "drmtap-helper: CMD_GRAB_LAYERS: %s (%s) [%lu failure%s]\n",
-                    why, errno ? strerror(errno) : "-", failures, failures == 1 ? "" : "s");
+                    why, err ? strerror(err) : "-", failures, failures == 1 ? "" : "s");
         }
     }
     rep.status = 1;
