@@ -24,7 +24,8 @@
  * drmtap_grab_desc() describes ONE buffer. When a compositor scans a window out of
  * its own plane (KWin 6.8 on Intel with one output) that buffer is not the whole
  * screen: grab_desc() then returns -EAGAIN for up to ~2 s and after that the plane
- * that covers the screen, without the window on top. To capture every plane across
+ * that covers the screen, without the window on top, if one does (if none does,
+ * -EAGAIN goes on). To capture every plane across
  * a process boundary use the packet API instead: see packet_capture.c.
  *
  * Run it on a box with an active scanout. It SKIPs cleanly (exit 0) when no
