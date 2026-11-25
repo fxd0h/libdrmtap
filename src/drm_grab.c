@@ -1249,6 +1249,116 @@ static int helper_layers(drmtap_ctx *ctx, drmtap_layer_set *s) {
     return 0;
 }
 
+/* grab_desc after a long underlay, through the helper. CMD_GRAB answers for the
+ * primary plane, which in an underlay is the window, so the covering layer comes
+ * from CMD_GRAB_LAYERS, with its own buffer and its own layout staged in ctx->fb2_*.
+ * When that is not possible the answer stays -EAGAIN, as during the first
+ * DRMTAP_UNDERLAY_EAGAIN_MS: a descriptor never pairs one plane's metadata with the
+ * buffer of another plane. */
+static int helper_cover_layer(drmtap_ctx *ctx, uint32_t plane_id, helper_grab_result_t *res) {
+    drmtap_layer_set s;
+    int r = helper_layers(ctx, &s);
+    if (r < 0) {
+        drmtap_set_error(ctx, "crtc %u: underlay, and the helper could not export the "
+                         "covering plane %u (%s). Keep the previous frame, or capture "
+                         "with drmtap_grab_packet()", ctx->crtc_id, plane_id, strerror(-r));
+        return -EAGAIN;
+    }
+    const drmtap_layer *l = NULL;
+    for (uint32_t i = 0; i < s.count; i++) {
+        if (s.layers[i].plane_id == plane_id) {
+            l = &s.layers[i];
+        }
+    }
+    int one_fd = l != NULL;
+    for (uint32_t p = 1; l && p < l->num_planes; p++) {
+        one_fd = one_fd && l->fd_index[p] == l->fd_index[0];
+    }
+    int fd = one_fd ? fcntl(s.fds[l->fd_index[0]], F_DUPFD_CLOEXEC, 0) : -1;
+    if (fd < 0) {
+        drmtap_layers_close_fds(&s);
+        drmtap_set_error(ctx, "crtc %u: underlay, and the helper's planes do not give the "
+                         "covering plane %u as one buffer (%s). Keep the previous frame, "
+                         "or capture with drmtap_grab_packet()", ctx->crtc_id, plane_id,
+                         !l ? "it is no longer lit" : !one_fd ? "its planes span buffers"
+                                                            : strerror(errno));
+        return -EAGAIN;
+    }
+    memset(res, 0, sizeof(*res));
+    res->dmabuf_fd = fd;
+    res->wire.width = l->fb_width;
+    res->wire.height = l->fb_height;
+    res->wire.stride = l->pitches[0];
+    res->wire.format = l->format;
+    res->wire.modifier = l->modifier;
+    res->wire.fb_id = l->fb_id;
+    res->wire.flags = HELPER_FLAG_HAS_DMABUF;
+    res->wire.hdr_eotf = s.hdr_eotf;
+    res->wire.hdr_max_nits = s.hdr_max_nits;
+    ctx->fb2_num_planes = (int)l->num_planes;
+    ctx->fb2_fb_id = l->fb_id;
+    for (uint32_t p = 0; p < 4; p++) {
+        ctx->fb2_pitches[p] = p < l->num_planes ? l->pitches[p] : 0;
+        ctx->fb2_offsets[p] = p < l->num_planes ? l->offsets[p] : 0;
+    }
+    drmtap_layers_close_fds(&s);
+    return 0;
+}
+
+/* The helper read its own framebuffer, which is a newer one when the compositor
+ * flipped since our GetFB2: stage the layout of the fb it actually sent. Only a
+ * flip of the same buffer chain (same size, format and modifier) is taken; any
+ * other fb is another plane's buffer, and that frame is skipped. */
+static int helper_restage_fb(drmtap_ctx *ctx, const drmModeFB2 *asked, uint32_t fb_id) {
+    drmModeFB2 *f = drmModeGetFB2(ctx->drm_fd, fb_id);
+    if (!f) {
+        drmtap_set_error(ctx, "the helper sent fb %u, which is already gone: frame "
+                         "skipped", fb_id);
+        return -EAGAIN;
+    }
+    if (f->width != asked->width || f->height != asked->height ||
+        f->pixel_format != asked->pixel_format || f->modifier != asked->modifier) {
+        drmtap_set_error(ctx, "the helper sent fb %u (%ux%u %.4s), not a flip of the "
+                         "fb %u asked for (%ux%u %.4s): frame skipped", fb_id, f->width,
+                         f->height, (const char *)&f->pixel_format, asked->fb_id,
+                         asked->width, asked->height, (const char *)&asked->pixel_format);
+        for (int p = 0; p < 4; p++) {
+            int seen = 0;
+            for (int q = 0; q < p; q++) {
+                seen = seen || f->handles[q] == f->handles[p];
+            }
+            if (f->handles[p] && !seen) {
+                drmtap_gem_close(ctx, f->handles[p]);
+            }
+        }
+        drmModeFreeFB2(f);
+        return -EAGAIN;
+    }
+    ctx->fb2_num_planes = 0;
+    ctx->fb2_fb_id = fb_id;
+    for (int p = 0; p < 4; p++) {
+        ctx->fb2_pitches[p] = f->pitches[p];
+        ctx->fb2_offsets[p] = f->offsets[p];
+        if (f->handles[p] || f->pitches[p]) {
+            ctx->fb2_num_planes = p + 1;
+        }
+    }
+    uint32_t closed[4] = {0, 0, 0, 0};
+    for (int p = 0; p < 4; p++) {
+        uint32_t h = f->handles[p];
+        int seen = 0;
+        for (int q = 0; q < p; q++) {
+            seen = seen || closed[q] == h;
+        }
+        if (h && !seen) {
+            drmtap_gem_close(ctx, h);
+        }
+        closed[p] = h;
+    }
+    drmModeFreeFB2(f);
+    return 0;
+}
+
 /* Capture every lit layer and compose them, for the in-process consumers. Exports
  * the buffers itself with CAP_SYS_ADMIN; otherwise asks the helper when
  * allow_helper. -E2BIG: more lit planes than a frame carries. */
@@ -1468,6 +1578,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
 
     /* Cache multi-plane info for EGL CCS import */
     ctx->fb2_num_planes = 0;
+    ctx->fb2_fb_id = fb_id;
     for (int p = 0; p < 4; p++) {
         ctx->fb2_pitches[p] = fb2->pitches[p];
         ctx->fb2_offsets[p] = fb2->offsets[p];
@@ -1522,7 +1633,27 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
 
         /* Helper reads pixels in its own process and sends via socket */
         helper_grab_result_t hresult;
-        ret = drmtap_helper_grab(ctx, &hresult, pixel_buf, buf_size);
+        if (cover >= 0) {
+            /* grab_desc after a long underlay: the covering layer, never CMD_GRAB's
+             * primary (the window) under the covering layer's metadata. */
+            ret = helper_cover_layer(ctx, ls.layers[cover].plane_id, &hresult);
+            if (ret < 0) {
+                drmModeFreeFB2(fb2);
+                return ret;
+            }
+        } else {
+            ret = drmtap_helper_grab(ctx, &hresult, pixel_buf, buf_size);
+            if (ret == 0 && hresult.wire.fb_id != fb_id) {
+                int rr = helper_restage_fb(ctx, fb2, hresult.wire.fb_id);
+                if (rr < 0) {
+                    if (hresult.dmabuf_fd >= 0) {
+                        close(hresult.dmabuf_fd);
+                    }
+                    drmModeFreeFB2(fb2);
+                    return rr;
+                }
+            }
+        }
         if (ret < 0) {
 #ifdef DRMTAP_NO_HELPER
             /* Built with -Dhelper=disabled: the stub has already said the one
@@ -2327,6 +2458,16 @@ static int drmtap_grab_desc_impl(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
      * on ctx during do_grab (from GetFB2 and the connector metadata) — they are
      * NOT in frame_info, which is exactly why a split exporter needs this call
      * rather than drmtap_grab alone. */
+    /* A descriptor never pairs the plane layout of one framebuffer with the
+     * buffer of another (the helper path once sent the window buffer under the
+     * covering layer's layout during an underlay). */
+    if (frame->fb_id != ctx->fb2_fb_id) {
+        drmtap_set_error(ctx, "grab_desc: the buffer is fb %u but the plane layout is "
+                         "of fb %u; frame skipped", frame->fb_id, ctx->fb2_fb_id);
+        drmtap_frame_release(ctx, frame);
+        ctx->grab_plane_id = plane_before;
+        return -EAGAIN;
+    }
     memset(desc, 0, sizeof(*desc));
     desc->dma_buf_fd = frame->dma_buf_fd;
     desc->width = frame->width;
@@ -2490,6 +2631,7 @@ static int find_or_alloc_slot(drmtap_ctx *ctx, uint32_t fb_id) {
  * keeps the plane metadata matched to the frame actually being converted. */
 static void fast_slot_restage_planes(drmtap_ctx *ctx, int slot) {
     ctx->fb2_num_planes = ctx->fast_slots[slot].fb2_num_planes;
+    ctx->fb2_fb_id = ctx->fast_slots[slot].fb_id;
     for (int p = 0; p < 4; p++) {
         ctx->fb2_pitches[p] = ctx->fast_slots[slot].fb2_pitches[p];
         ctx->fb2_offsets[p] = ctx->fast_slots[slot].fb2_offsets[p];
@@ -2786,6 +2928,7 @@ static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *fram
      * offsets/pitches from ctx->fb2_*, which otherwise still holds whatever
      * the last do_grab() left there (stale geometry from another fb). */
     ctx->fb2_num_planes = 0;
+    ctx->fb2_fb_id = fb_id;
     for (int p = 0; p < 4; p++) {
         ctx->fb2_pitches[p] = fb2->pitches[p];
         ctx->fb2_offsets[p] = fb2->offsets[p];
@@ -3066,6 +3209,7 @@ static int drmtap_convert_dmabuf_impl(drmtap_ctx *ctx, const drmtap_dmabuf_desc 
      * (drmModeGetFB2 + the connector HDR read) would put it — the conversion
      * paths below consume both from the context. */
     ctx->fb2_num_planes = (int)num_planes;
+    ctx->fb2_fb_id = desc->fb_id;
     for (uint32_t p = 0; p < 4; p++) {
         ctx->fb2_pitches[p] = (p < num_planes) ? desc->pitches[p] : 0;
         ctx->fb2_offsets[p] = (p < num_planes) ? desc->offsets[p] : 0;

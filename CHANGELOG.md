@@ -74,6 +74,16 @@ covers the whole CRTC, the desktop: screen-sized, with the window below it showi
 plane's transparent hole, until the underlay ends. With no such plane, `-EAGAIN` goes on.
 The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchanged.
 
+### Fixed: `drmtap_grab_desc()` through the helper after a long underlay
+- After 2 s of underlay `drmtap_grab_desc()` returns the covering plane. Through the
+  unprivileged helper it took that plane's layout but the helper's CMD_GRAB buffer, which
+  is the primary plane (the window), and every convert failed with "descriptor exceeds
+  dma-buf size". The covering plane now comes from CMD_GRAB_LAYERS with its own buffer and
+  layout; if the helper cannot give it, the answer stays -EAGAIN. A descriptor never pairs
+  the layout of one framebuffer with the buffer of another: when the helper read another
+  fb, only a flip of the same chain (size, format, modifier) is taken, and `grab_desc`
+  refuses any other pair with -EAGAIN.
+
 ### Fixed: every error return leaves a message
 - A negative return of any public call now always sets `drmtap_error()`: some returned
   with no message, or with the message of an earlier call (a NULL argument almost
