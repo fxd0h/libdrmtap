@@ -220,6 +220,22 @@ static void test_cover_rect(void) {
     check(r.src_x == 2, "16.16 SRC is truncated to whole pixels, like the property reader");
 }
 
+static void test_stand_in(void) {
+    printf("test_stand_in:\n");
+    drmtap_layer_set s;
+    memset(&s, 0, sizeof(s));
+    s.count = 3;
+    s.layers[0] = mk_layer(10, 64, 48, 0, 0, 64, 48, 0);
+    s.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+    s.layers[1] = mk_layer(11, 16, 16, 5, 5, 16, 16, 1);
+    s.layers[2] = mk_layer(12, 64, 48, 0, 0, 64, 48, 2);
+    check(drmtap_layers_stand_in(&s, 64, 48) == 0, "a covering primary stands for the screen");
+    s.layers[0] = mk_layer(10, 16, 16, 10, 10, 16, 16, 0);   /* underlay: primary = window */
+    s.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+    check(drmtap_layers_stand_in(&s, 64, 48) == 2, "in an underlay the topmost covering layer does");
+    s.layers[2] = mk_layer(12, 32, 48, 0, 0, 32, 48, 2);
+    check(drmtap_layers_stand_in(&s, 64, 48) == -1, "no covering layer: none does");
+}
 static void test_packet_init(void) {
     printf("test_packet_init:\n");
     drmtap_packet p;
@@ -645,6 +661,30 @@ static void test_convert_packet(void) {
         check(r == 0 && f.width == W && f.height == H && rr == 0 && rot == DRMTAP_ROT_180,
               "a primary-alone fallback answers the primary rotation, not ROTATE_0");
     }
+    /* Underlay: the primary is a 16x16 window under a covering 64x48 layer that the
+     * CPU cannot compose. The fallback is the covering layer (the screen with the
+     * window's hole), never the window as the screen. */
+    {
+        drmtap_layer_set u = s;
+        u.count = 2; u.lit = 2; u.nfds = 2;
+        u.layers[0] = mk_layer(10, 16, 16, 10, 10, 16, 16, 0);
+        u.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+        u.layers[0].fd_index[0] = 1;
+        u.layers[1] = mk_layer(11, W, H, 0, 0, W, H, 1);
+        u.layers[1].fd_index[0] = 0;
+        u.layers[1].rotation = DRMTAP_ROT_180;   /* the CPU composer refuses it */
+        rot = 0;
+        r = convert(ctx, &u, &f, NULL, 0);
+        int rr = drmtap_plane_rotation(ctx, &rot);
+        check(r == 0 && f.width == W && f.height == H && rr == 0 && rot == DRMTAP_ROT_180,
+              "an underlay fallback converts the covering layer, not the window");
+        u.layers[1] = mk_layer(11, 16, 16, 30, 30, 16, 16, 1);
+        u.layers[1].fd_index[0] = 1;
+        u.layers[1].rotation = DRMTAP_ROT_180;
+        r = convert(ctx, &u, &f, NULL, 0);
+        check(r < 0 && drmtap_error(ctx) != NULL,
+              "with no covering layer the fallback fails, and says why");
+    }
     unsetenv("DRMTAP_NO_EGL");
 
     /* the same layers on the GPU */
@@ -822,6 +862,7 @@ int main(void) {
     test_key();
     test_underlay_timing();
     test_packet_init();
+    test_stand_in();
     test_cover_rect();
     test_packet_roundtrip();
     test_packet_malformed();
