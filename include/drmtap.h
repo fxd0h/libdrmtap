@@ -689,7 +689,7 @@ typedef struct {
  * again: if the compositor flipped in between, it reads and exports them once
  * more and uses that second result, so a packet is one frame unless the
  * compositor flipped again during that second export. A single-plane scanout
- * makes a packet of one layer. A layer of 32 or 64 bits per pixel converts
+ * makes a packet of one layer. An RGB layer of 32 or 64 bits per pixel converts
  * exactly like drmtap_grab_desc() + drmtap_convert_dmabuf(); a YUV, 16-bit or
  * 24-bit layer goes through the EGL composer (-ENOTSUP without EGL).
  *
@@ -728,8 +728,8 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * destination rectangle, rotated or reflected as its plane is, and blended with
  * the plane's pixel blend mode and alpha. frame->width/height are the CRTC mode,
  * and the pixels are XRGB8888 at stride width*4 (read frame->format and
- * ->stride anyway, as with drmtap_convert_dmabuf()). A one-layer packet of 32 or
- * 64 bits per pixel converts as drmtap_convert_dmabuf() does with the descriptor of
+ * ->stride anyway, as with drmtap_convert_dmabuf()). A one-layer RGB packet of 32
+ * or 64 bits per pixel converts as drmtap_convert_dmabuf() does with the descriptor of
  * that buffer: the buffer at its own size, unrotated. A one-layer YUV, 16-bit or
  * 24-bit packet, or a layer whose planes are in separate buffers, gives the same
  * picture through the GPU, and needs EGL.
