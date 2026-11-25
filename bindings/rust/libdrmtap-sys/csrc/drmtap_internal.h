@@ -21,6 +21,8 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include "drmtap.h"
+/* drmtap_ctx.last_frame_composed: a packet's primary layer converted alone. */
+#define DRMTAP_FRAME_PRIMARY_ALONE 2
 #include "layers.h"
 
 /* ========================================================================= */
@@ -244,9 +246,14 @@ struct drmtap_ctx {
      * cost a failed request, a CMD_GRAB fallback and a helper stderr line on every
      * frame. */
     uint64_t helper_layers_backoff_ms;
-    /* 1 when the last frame this context produced was composed from several planes
-     * (it is then in CRTC orientation: drmtap_plane_rotation answers ROTATE_0). */
+    /* What the last frame this context produced was, for drmtap_plane_rotation:
+     * 0 = one plane's buffer (the answer is that plane's KMS property), 1 = composed
+     * from several planes (CRTC orientation: ROTATE_0), DRMTAP_FRAME_PRIMARY_ALONE =
+     * drmtap_convert_packet could not compose a packet of several layers and
+     * converted its primary layer alone (the answer is that layer's rotation, as the
+     * exporter read it, kept in packet_rotation). */
     int      last_frame_composed;
+    uint32_t packet_rotation;
     /* CLOCK_MONOTONIC ms when grab_desc first saw the current underlay, 0 = none
      * (see drmtap_underlay_decide in layers.h). */
     int64_t  underlay_since_ms;

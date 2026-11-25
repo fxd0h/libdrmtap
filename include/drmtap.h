@@ -677,7 +677,11 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * frame->fb_id of a composed frame is the primary plane's and does not track the
  * content (a window on another plane can change while it stays the same): do not
  * use it as a content key. After a composed convert, drmtap_plane_rotation() on
- * this context answers ROTATE_0.
+ * this context answers ROTATE_0. After a convert that fell back to the primary
+ * layer alone (below), it answers the rotation of that plane as the exporter read
+ * it, since that buffer is not turned. The exporter's own answer after
+ * drmtap_grab_packet() assumes the packet will be composed, so a consumer that
+ * turns frames by the rotation asks the converting context, after each convert.
  *
  * The bytes and the fds cross a privilege boundary and are treated as hostile.
  * The packet is checked field by field before anything is used (magic, version,
@@ -844,7 +848,9 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  * so the frame is already the CRTC raster, like a framebuffer the compositor
  * rotated in software, and the consumer turns it by the output transform. This
  * also answers on a drmtap_open_render() context after such a convert (it answers
- * -ENOTSUP there otherwise).
+ * -ENOTSUP there otherwise). When drmtap_convert_packet() could not compose a packet
+ * of several layers and converted its primary layer alone, the answer is that plane's
+ * rotation as carried in the packet (the buffer is unrotated), on any context.
  *
  * @param ctx      Capture context from drmtap_open()
  * @param rotation Set to the DRM rotation bitmask: DRM_MODE_ROTATE_0 (0x1),

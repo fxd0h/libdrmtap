@@ -389,6 +389,13 @@ int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation) {
      * rotation applied, so it is in screen orientation, like a framebuffer the
      * compositor rotated in software. Answer ROTATE_0 for it, whichever plane it
      * came from and on a render-only context too (convert_packet). */
+    if (ctx->last_frame_composed == DRMTAP_FRAME_PRIMARY_ALONE) {
+        /* convert_packet fell back to the primary layer: that buffer is unrotated,
+         * so the answer is its plane's rotation, which the packet carries (the
+         * exporter's own answer after grab_packet assumed a composed frame). */
+        *rotation = ctx->packet_rotation;
+        return 0;
+    }
     if (ctx->last_frame_composed) {
         *rotation = DRMTAP_ROT_0;
         return 0;
@@ -3485,5 +3492,11 @@ int drmtap_convert_packet(drmtap_ctx *ctx, const void *bytes, size_t len,
     }
     log_layer_fallback(ctx, (int)s.count, r);
     int pi = drmtap_layers_primary(&s);
-    return convert_one_layer(ctx, &s, (uint32_t)(pi >= 0 ? pi : 0), frame);
+    uint32_t one = (uint32_t)(pi >= 0 ? pi : 0);
+    r = convert_one_layer(ctx, &s, one, frame);
+    if (r == 0) {
+        ctx->packet_rotation = s.layers[one].rotation;
+        ctx->last_frame_composed = DRMTAP_FRAME_PRIMARY_ALONE;
+    }
+    return r;
 }
