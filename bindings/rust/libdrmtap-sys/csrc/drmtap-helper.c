@@ -1029,6 +1029,7 @@ fail:
     if (!quiet) {
         static unsigned long failures = 0;
         failures++;
+        now = layers_now_ms();   /* the backoff runs from the failure, not the request */
         wire_backoff_set(backoff, crtc_id, now, now + LAYERS_BACKOFF_MS);
         if (failures == 1 || failures % 256 == 0) {
             fprintf(stderr, "drmtap-helper: CMD_GRAB_LAYERS: %s (%s) [%lu failure%s]\n",

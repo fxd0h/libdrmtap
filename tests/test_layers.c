@@ -232,7 +232,9 @@ static void test_stand_in(void) {
     check(drmtap_layers_stand_in(&s, 64, 48) == 0, "a covering primary stands for the screen");
     s.layers[0] = mk_layer(10, 16, 16, 10, 10, 16, 16, 0);   /* underlay: primary = window */
     s.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+    s.layers[1] = mk_layer(11, 64, 48, 0, 0, 64, 48, 1);     /* covers too, but lower */
     check(drmtap_layers_stand_in(&s, 64, 48) == 2, "in an underlay the topmost covering layer does");
+    s.layers[1] = mk_layer(11, 16, 16, 5, 5, 16, 16, 1);
     s.layers[2] = mk_layer(12, 32, 48, 0, 0, 32, 48, 2);
     check(drmtap_layers_stand_in(&s, 64, 48) == -1, "no covering layer: none does");
 }
@@ -629,7 +631,13 @@ static void test_convert_packet(void) {
     if (memfd >= 0) {
         close(memfd);
     }
-    int small = make_buf(ctrl, 4, 4, 0, 0);
+    /* udmabuf rounds up to a page: with pages over 4 KiB the "too small" buffers
+     * below are big enough, so those two checks only run on 4 KiB pages. */
+    int page4k = sysconf(_SC_PAGESIZE) <= 4096;
+    if (!page4k) {
+        printf("  SKIP: the undersized-buffer checks need 4 KiB pages\n");
+    }
+    int small = page4k ? make_buf(ctrl, 4, 4, 0, 0) : -1;
     if (small >= 0) {
         int fds3[4] = { small, s.fds[1], s.fds[2], s.fds[3] };
         check(drmtap_convert_packet(ctx, buf, (size_t)len, fds3, 4, &f) == -EINVAL,
@@ -649,8 +657,8 @@ static void test_convert_packet(void) {
     uint32_t rot = 0;
     check(drmtap_plane_rotation(ctx, &rot) == 0 && rot == DRMTAP_ROT_0,
           "a composed convert answers ROTATE_0");
-    /* A packet that cannot be composed converts its primary layer alone; that
-     * buffer is unrotated, so the rotation answered is the primary plane's. */
+    /* A packet that cannot be composed converts one covering layer alone (here the
+     * primary); that buffer is unrotated, so the rotation answered is its own. */
     {
         drmtap_layer_set p2 = s;
         p2.count = 2; p2.lit = 2; p2.nfds = 2;
@@ -767,10 +775,11 @@ static void test_convert_packet(void) {
             close(rb);
         }
 
-        /* One NV12 layer with luma and chroma in separate fds, rotate-180, placed at
-         * +16+8 of a 64x48 CRTC: converted as its buffer (32x16, unrotated: white
-         * left half, black right half) and the rotation is the converter's answer. */
-        {
+        /* One NV12 layer, rotate-180, placed at +16+8 of a 64x48 CRTC: converted as
+         * its buffer (32x16, unrotated: white left half, black right half) and the
+         * rotation is the converter's answer. Twice: luma and chroma in separate
+         * fds, then both in one fd (the usual NV12 layout, chroma at YW*YH). */
+        for (int onefd = 0; onefd < 2; onefd++) {
             enum { YW = 32, YH = 16 };
             uint8_t *yb = malloc(4096), *cb = malloc(4096);
             memset(yb, 0, 4096);
@@ -780,21 +789,25 @@ static void test_convert_packet(void) {
                     yb[y * YW + x] = x < YW / 2 ? 235 : 16;
                 }
             }
+            if (onefd) {
+                memset(yb + YW * YH, 128, YW * YH / 2);
+            }
             int yfd = drmtap_udmabuf_wrap(ctrl, yb, 4096);
-            int cfd = drmtap_udmabuf_wrap(ctrl, cb, 4096);
+            int cfd = onefd ? -1 : drmtap_udmabuf_wrap(ctrl, cb, 4096);
             free(yb);
             free(cb);
-            if (yfd >= 0 && cfd >= 0) {
+            if (yfd >= 0 && (onefd || cfd >= 0)) {
                 drmtap_layer_set n;
                 memset(&n, 0, sizeof(n));
-                n.crtc_w = W; n.crtc_h = H; n.count = 1; n.lit = 1; n.nfds = 2;
+                n.crtc_w = W; n.crtc_h = H; n.count = 1; n.lit = 1; n.nfds = onefd ? 1 : 2;
                 n.fds[0] = yfd; n.fds[1] = cfd;
                 n.layers[0] = mk_layer(10, YW, YH, 16, 8, YW, YH, 0);
                 n.layers[0].format = 0x3231564eu;   /* NV12 */
                 n.layers[0].num_planes = 2;
                 n.layers[0].pitches[0] = YW;
                 n.layers[0].pitches[1] = YW;
-                n.layers[0].fd_index[1] = 1;
+                n.layers[0].fd_index[1] = onefd ? 0 : 1;
+                n.layers[0].offsets[1] = onefd ? YW * YH : 0;
                 n.layers[0].rotation = DRMTAP_ROT_180;
                 n.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
                 static uint8_t one[YW * YH * 4];
@@ -804,7 +817,8 @@ static void test_convert_packet(void) {
                 check(r == 0 && f.width == YW && f.height == YH && rr == 0 &&
                       rot == DRMTAP_ROT_180 && one[(8 * YW + 2) * 4 + 1] > 200 &&
                       one[(8 * YW + 29) * 4 + 1] < 40,
-                      "a one-layer packet in two fds converts as its buffer, unrotated");
+                      onefd ? "a one-layer NV12 packet in one fd converts as its buffer, unrotated"
+                            : "a one-layer packet in two fds converts as its buffer, unrotated");
             }
             if (yfd >= 0) close(yfd);
             if (cfd >= 0) close(cfd);
@@ -900,8 +914,10 @@ static void test_convert_packet(void) {
             check(convert(ctx, &n, &f, NULL, 0) != -EINVAL,
                   "NV12 chroma that fits its own fd passes validation");
             n.layers[0].pitches[1] = 1024;      /* 8 rows x 1024 = 8192 > 4096 */
-            check(convert(ctx, &n, &f, NULL, 0) == -EINVAL,
-                  "NV12 chroma larger than its own fd is refused");
+            if (page4k) {
+                check(convert(ctx, &n, &f, NULL, 0) == -EINVAL,
+                      "NV12 chroma larger than its own fd is refused");
+            }
             n.fds[1] = uv_big;
             check(convert(ctx, &n, &f, NULL, 0) != -EINVAL,
                   "and accepted when its fd is big enough");

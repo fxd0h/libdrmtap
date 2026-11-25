@@ -297,6 +297,8 @@ typedef struct {
     uint32_t pitches[4];
     ino_t    buf_inode;         /* dma-buf inode = the real buffer identity;
                                    0 = unknown (fd was -1 or fstat failed) */
+    uint32_t yuv_hint;          /* the YCbCr hints of the import: 0 = none (RGB,
+                                   or the single-buffer path), else 1 + enc * 4 + range */
     EGLImageKHR image;
     GLuint texture;             /* GL_TEXTURE_EXTERNAL_OES bound to image */
 } egl_image_slot_t;
@@ -827,10 +829,6 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         return -EIO;
     }
 
-    EGLint context_attribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE
-    };
     /* Opt-in skip-unchanged wants an ES 3 context; anything short of that falls
      * through to the ES 2 context below, i.e. today's path. */
     const char *skip_env = secure_getenv("DRMTAP_SKIP_UNCHANGED");
@@ -846,6 +844,10 @@ static int egl_init(drmtap_ctx *ctx, egl_state_t *state) {
         state->hash.es3 = want_hash;
     }
     if (state->context == EGL_NO_CONTEXT) {
+        EGLint context_attribs[] = {
+            EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL_NONE
+        };
         drmtap_debug_log(ctx, "EGL: eglCreateContext(config=%p)...", (void*)config);
         state->context = eglCreateContext(state->display, config,
                                           EGL_NO_CONTEXT, context_attribs);
@@ -1420,7 +1422,8 @@ static int egl_convert_impl(drmtap_ctx *ctx,
                  s->modifier == modifier &&
                  s->num_planes == ctx->fb2_num_planes &&
                  memcmp(s->offsets, ctx->fb2_offsets, sizeof(s->offsets)) == 0 &&
-                 memcmp(s->pitches, ctx->fb2_pitches, sizeof(s->pitches)) == 0);
+                 memcmp(s->pitches, ctx->fb2_pitches, sizeof(s->pitches)) == 0 &&
+                 s->yuv_hint == 0);
             /* Identity holds unless BOTH inodes are known and differ — i.e. a
              * recycled fb_id on a new buffer. If either is unknown, geometry
              * is the best signal we have and we trust it. */
@@ -1487,6 +1490,7 @@ static int egl_convert_impl(drmtap_ctx *ctx,
             memcpy(dst->offsets, ctx->fb2_offsets, sizeof(dst->offsets));
             memcpy(dst->pitches, ctx->fb2_pitches, sizeof(dst->pitches));
             dst->buf_inode = cur_inode;
+            dst->yuv_hint = 0;
             dst->image = image;
             dst->texture = ext_texture;
             slot = dst;
@@ -1738,6 +1742,10 @@ static int egl_fourcc_is_yuv(uint32_t f) {
     }
 }
 
+/* The YCbCr hints egl_import_layer() gives a layer, as an import-cache key. */
+static uint32_t egl_layer_yuv_hint(const drmtap_layer *l) {
+    return egl_fourcc_is_yuv(l->format) ? 1 + l->color_encoding * 4 + l->color_range : 0;
+}
 /* Import one layer's framebuffer: every plane with its own fd, offset and pitch,
  * the modifier on each plane when the fb has one, and the YCbCr hints for YUV. */
 static EGLImageKHR egl_import_layer(drmtap_ctx *ctx, const drmtap_layer_set *set,
@@ -1861,7 +1869,8 @@ static int egl_layer_texture(drmtap_ctx *ctx, const drmtap_layer_set *set,
                               s->stride == l->pitches[0] && s->fourcc == l->format &&
                               s->modifier == l->modifier && s->num_planes == np &&
                               memcmp(s->offsets, l->offsets, sizeof(s->offsets)) == 0 &&
-                              memcmp(s->pitches, l->pitches, sizeof(s->pitches)) == 0);
+                              memcmp(s->pitches, l->pitches, sizeof(s->pitches)) == 0 &&
+                              s->yuv_hint == egl_layer_yuv_hint(l));
             int ident_match = (cur_inode == 0 || s->buf_inode == 0 ||
                                s->buf_inode == cur_inode);
             if (geom_match && ident_match) {
@@ -1922,6 +1931,7 @@ static int egl_layer_texture(drmtap_ctx *ctx, const drmtap_layer_set *set,
     memcpy(dst->offsets, l->offsets, sizeof(dst->offsets));
     memcpy(dst->pitches, l->pitches, sizeof(dst->pitches));
     dst->buf_inode = cur_inode;
+    dst->yuv_hint = egl_layer_yuv_hint(l);
     dst->image = image;
     dst->texture = t;
     *tex = t;

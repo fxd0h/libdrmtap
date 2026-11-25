@@ -526,14 +526,14 @@ static int dmabuf_sync_start(int fd) {
     struct dma_buf_sync sync = {
         .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
     };
-    return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+    return drmIoctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
 static int dmabuf_sync_end(int fd) {
     struct dma_buf_sync sync = {
         .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
     };
-    return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+    return drmIoctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
 // Close whatever CPU-access window the fast path left open.
@@ -1304,18 +1304,21 @@ static int helper_cover_layer(drmtap_ctx *ctx, uint32_t plane_id, helper_grab_re
             l = &s.layers[i];
         }
     }
+    if (l && !drmtap_layer_covers(l, s.crtc_w, s.crtc_h)) {
+        l = NULL;   /* the helper read a newer commit: that plane no longer covers */
+    }
     int one_fd = l != NULL;
     for (uint32_t p = 1; l && p < l->num_planes; p++) {
         one_fd = one_fd && l->fd_index[p] == l->fd_index[0];
     }
-    int fd = one_fd ? fcntl(s.fds[l->fd_index[0]], F_DUPFD_CLOEXEC, 0) : -1;
+    int fd = (l && one_fd) ? fcntl(s.fds[l->fd_index[0]], F_DUPFD_CLOEXEC, 0) : -1;
     if (fd < 0) {
         drmtap_layers_close_fds(&s);
         drmtap_set_error(ctx, "crtc %u: underlay, and the helper's planes do not give the "
                          "covering plane %u as one buffer (%s). Keep the previous frame, "
                          "or capture with drmtap_grab_packet()", ctx->crtc_id, plane_id,
-                         !l ? "it is no longer lit" : !one_fd ? "its planes span buffers"
-                                                            : strerror(errno));
+                         !l ? "it no longer covers the CRTC"
+                            : !one_fd ? "its planes span buffers" : strerror(errno));
         return -EAGAIN;
     }
     memset(res, 0, sizeof(*res));
@@ -1335,6 +1338,8 @@ static int helper_cover_layer(drmtap_ctx *ctx, uint32_t plane_id, helper_grab_re
         ctx->fb2_pitches[p] = p < l->num_planes ? l->pitches[p] : 0;
         ctx->fb2_offsets[p] = p < l->num_planes ? l->offsets[p] : 0;
     }
+    /* the crop rect of the buffer the helper sent, not of our earlier read */
+    drmtap_layer_plane_rect(l, &ctx->sw_override);
     drmtap_layers_close_fds(&s);
     return 0;
 }
@@ -2786,7 +2791,11 @@ static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *fram
             ctx->fast_initialized = 1;
             drmtap_debug_log(ctx, "fast2: initialized plane=%u", ls.layers[pick].plane_id);
         }
-        /* The slots are keyed by fb_id, so a different plane needs no reset. */
+        /* The slots are keyed by fb_id, so a different plane needs no slot reset,
+         * but the not-CPU-mappable verdict belongs to the old plane: drop it. */
+        if (ctx->fast_plane_id != ls.layers[pick].plane_id) {
+            ctx->fast_no_cpu_map = 0;
+        }
         ctx->fast_plane_id = ls.layers[pick].plane_id;
         fb_id = ls.layers[pick].fb_id;
     } else if (nl == 0) {
@@ -3635,7 +3644,7 @@ static int drmtap_grab_packet_impl(drmtap_ctx *ctx, drmtap_packet *pkt) {
         int r = helper_layers(ctx, &s);
         if (r == -ENOTSUP || r == -EIO) {
             /* An old helper, or one that could not export these layers (more than a
-             * packet carries, for one): the primary plane, like grab_desc. */
+             * packet carries, for one): one plane, like grab_desc. */
             return packet_from_desc(ctx, pkt);
         }
         if (r < 0) {
@@ -3699,7 +3708,9 @@ static int drmtap_grab_packet_impl(drmtap_ctx *ctx, drmtap_packet *pkt) {
 /* One layer through the single-buffer convert, exactly as drmtap_grab_desc() +
  * drmtap_convert_dmabuf() would handle that buffer, including the padded-scanout
  * width: the buffer as it is, unrotated, at its own size. A layer whose planes live
- * in several buffer objects cannot be one descriptor; the GPU composer reads it,
+ * in several buffer objects cannot be one descriptor, and a YUV or 16-bit layer
+ * (less than 4 bytes per pixel) is not one the descriptor path reads, even with
+ * all its planes in one fd (the usual NV12 layout); the GPU composer reads them,
  * with the same result: the w x h buffer as it is (rotation 0, opaque, no scaling,
  * no placement), so the caller's rotation answer applies to it the same way. */
 static int convert_one_layer(drmtap_ctx *ctx, const drmtap_layer_set *s, uint32_t i,
@@ -3714,28 +3725,30 @@ static int convert_one_layer(drmtap_ctx *ctx, const drmtap_layer_set *s, uint32_
                       l->modifier == DRM_FORMAT_MOD_INVALID);
         w = drmtap_scanout_width_of(l->fb_width, &rect, linear, NULL);
     }
-    for (uint32_t p = 1; p < l->num_planes; p++) {
-        if (l->fd_index[p] != l->fd_index[0]) {
-            drmtap_layer_set one = *s;
-            drmtap_layer *o = &one.layers[0];
-            *o = *l;
-            one.count = 1;
-            one.lit = 1;
-            one.crtc_w = w;
-            one.crtc_h = l->fb_height;
-            o->src_x = 0;
-            o->src_y = 0;
-            o->src_w = w << 16;
-            o->src_h = l->fb_height << 16;
-            o->crtc_x = 0;
-            o->crtc_y = 0;
-            o->crtc_w = w;
-            o->crtc_h = l->fb_height;
-            o->rotation = DRMTAP_ROT_0;
-            o->alpha = 0xffffu;
-            o->blend = DRMTAP_BLEND_NONE;
-            return compose_layers(ctx, &one, frame);
-        }
+    int gpu = layer_min_bpp(l->format) < 4;
+    for (uint32_t p = 1; !gpu && p < l->num_planes; p++) {
+        gpu = l->fd_index[p] != l->fd_index[0];
+    }
+    if (gpu) {
+        drmtap_layer_set one = *s;
+        drmtap_layer *o = &one.layers[0];
+        *o = *l;
+        one.count = 1;
+        one.lit = 1;
+        one.crtc_w = w;
+        one.crtc_h = l->fb_height;
+        o->src_x = 0;
+        o->src_y = 0;
+        o->src_w = w << 16;
+        o->src_h = l->fb_height << 16;
+        o->crtc_x = 0;
+        o->crtc_y = 0;
+        o->crtc_w = w;
+        o->crtc_h = l->fb_height;
+        o->rotation = DRMTAP_ROT_0;
+        o->alpha = 0xffffu;
+        o->blend = DRMTAP_BLEND_NONE;
+        return compose_layers(ctx, &one, frame);
     }
     drmtap_dmabuf_desc d;
     memset(&d, 0, sizeof(d));
@@ -3761,7 +3774,8 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
 int drmtap_convert_packet(drmtap_ctx *ctx, const void *bytes, size_t len,
                           const int *fds, size_t nfds, drmtap_frame_info *frame) {
     unsigned mark = drmtap_error_mark(ctx);
-    return drmtap_error_ensure(ctx, mark, drmtap_convert_packet_impl(ctx, bytes, len, fds, nfds, frame), "drmtap_convert_packet");
+    return drmtap_error_ensure(ctx, mark,
+                               drmtap_convert_packet_impl(ctx, bytes, len, fds, nfds, frame), "drmtap_convert_packet");
 }
 static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t len,
                           const int *fds, size_t nfds, drmtap_frame_info *frame) {
