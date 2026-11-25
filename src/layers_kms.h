@@ -62,20 +62,28 @@ static inline uint32_t drmtap_kms_enum_map(uint32_t n, const uint64_t *vals,
     return dflt;
 }
 
-/* Look up every property id once. Returns 0, or -ENOTSUP when the planes do not
- * show the atomic properties (no DRM_CLIENT_CAP_ATOMIC, or a driver without
- * atomic), or another -errno. The verdict is kept in c->state. */
-static inline int drmtap_kms_cache_build(int fd, drmtap_kms_cache *c) {
+/* Look up every property id once, for the non-cursor planes (the capture never
+ * reads a cursor plane). Returns 0, or -ENOTSUP when the planes do not show the
+ * atomic properties (no DRM_CLIENT_CAP_ATOMIC, or a driver without atomic) or when
+ * the device has more non-cursor planes than `max`: both send the caller to the
+ * single-plane legacy lookup, as before 0.6.0, instead of a cache that misses the
+ * primary plane. Another -errno otherwise. The verdict is kept in c->state. */
+static inline int drmtap_kms_cache_build_max(int fd, drmtap_kms_cache *c, uint32_t max) {
     memset(c, 0, sizeof(*c));
     c->crtc_index = -1;
+    if (max > DRMTAP_KMS_MAX_PLANES) {
+        max = DRMTAP_KMS_MAX_PLANES;
+    }
     drmModePlaneRes *pr = drmModeGetPlaneResources(fd);
     if (!pr) {
         int err = errno ? errno : EIO;
         return -err;
     }
     int usable = 1;
-    for (uint32_t i = 0; i < pr->count_planes && c->count < DRMTAP_KMS_MAX_PLANES; i++) {
-        drmtap_kms_plane *kp = &c->planes[c->count];
+    int overflow = 0;
+    drmtap_kms_plane tmp;
+    for (uint32_t i = 0; i < pr->count_planes; i++) {
+        drmtap_kms_plane *kp = &tmp;
         memset(kp, 0, sizeof(*kp));
         kp->id = pr->planes[i];
         kp->type = DRM_PLANE_TYPE_OVERLAY;
@@ -163,16 +171,29 @@ static inline int drmtap_kms_cache_build(int fd, drmtap_kms_cache *c) {
             drmModeFreeProperty(prop);
         }
         drmModeFreeObjectProperties(props);
-        if (kp->type != DRM_PLANE_TYPE_CURSOR &&
-            (!kp->p_fb || !kp->p_crtc || !kp->p_sx || !kp->p_sy || !kp->p_sw ||
-             !kp->p_sh || !kp->p_cx || !kp->p_cy || !kp->p_cw || !kp->p_ch)) {
+        if (kp->type == DRM_PLANE_TYPE_CURSOR) {
+            continue;
+        }
+        if (c->count >= max) {
+            overflow = 1;
+            break;
+        }
+        if (!kp->p_fb || !kp->p_crtc || !kp->p_sx || !kp->p_sy || !kp->p_sw ||
+            !kp->p_sh || !kp->p_cx || !kp->p_cy || !kp->p_cw || !kp->p_ch) {
             usable = 0;
         }
-        c->count++;
+        c->planes[c->count++] = *kp;
     }
     drmModeFreePlaneResources(pr);
+    if (overflow) {
+        c->count = 0;
+        usable = 0;
+    }
     c->state = usable ? 1 : -1;
     return usable ? 0 : -ENOTSUP;
+}
+static inline int drmtap_kms_cache_build(int fd, drmtap_kms_cache *c) {
+    return drmtap_kms_cache_build_max(fd, c, DRMTAP_KMS_MAX_PLANES);
 }
 
 /* Position of crtc_id in the resources' CRTC list: the bit possible_crtcs uses. */
