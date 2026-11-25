@@ -64,7 +64,10 @@ The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchang
 - `drmtap_plane_rotation()` answers `DRM_MODE_ROTATE_0` after a composed frame (in process,
   through `drmtap_convert_packet()`, and on the exporter after a packet of several layers):
   every plane was drawn with its own rotation, so the frame is already in screen
-  orientation and the consumer turns it by the output transform.
+  orientation and the consumer turns it by the output transform. When
+  `drmtap_convert_packet()` cannot compose a packet and converts its primary plane alone,
+  it answers that plane's rotation instead (that buffer is not turned), so a consumer asks
+  the converting context after each convert, not the exporter.
 - A composed frame's `fb_id` is the primary plane's. It does not change when only a window
   on another plane does, so it is not a content key.
 

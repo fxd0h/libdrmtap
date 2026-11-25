@@ -630,6 +630,21 @@ static void test_convert_packet(void) {
     int r = convert(ctx, &s, &f, cpu, sizeof(cpu));
     check(r == 0 && f.width == W && f.height == H && f.stride == W * 4,
           "four linear layers compose on the CPU into the CRTC size");
+    uint32_t rot = 0;
+    check(drmtap_plane_rotation(ctx, &rot) == 0 && rot == DRMTAP_ROT_0,
+          "a composed convert answers ROTATE_0");
+    /* A packet that cannot be composed converts its primary layer alone; that
+     * buffer is unrotated, so the rotation answered is the primary plane's. */
+    {
+        drmtap_layer_set p2 = s;
+        p2.count = 2; p2.lit = 2; p2.nfds = 2;
+        p2.layers[0].rotation = DRMTAP_ROT_180;   /* the CPU composer refuses it */
+        rot = 0;
+        r = convert(ctx, &p2, &f, NULL, 0);
+        int rr = drmtap_plane_rotation(ctx, &rot);
+        check(r == 0 && f.width == W && f.height == H && rr == 0 && rot == DRMTAP_ROT_180,
+              "a primary-alone fallback answers the primary rotation, not ROTATE_0");
+    }
     unsetenv("DRMTAP_NO_EGL");
 
     /* the same layers on the GPU */
