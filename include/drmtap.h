@@ -689,8 +689,9 @@ typedef struct {
  * again: if the compositor flipped in between, it reads and exports them once
  * more and uses that second result, so a packet is one frame unless the
  * compositor flipped again during that second export. A single-plane scanout
- * makes a packet of one layer, which converts exactly like drmtap_grab_desc() +
- * drmtap_convert_dmabuf().
+ * makes a packet of one layer. A layer of 32 or 64 bits per pixel converts
+ * exactly like drmtap_grab_desc() + drmtap_convert_dmabuf(); a YUV, 16-bit or
+ * 24-bit layer goes through the EGL composer (-ENOTSUP without EGL).
  *
  * More than four lit planes: the packet carries one plane that covers the CRTC
  * (the primary plane when it does, else the topmost covering plane), or the call
@@ -727,10 +728,11 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * destination rectangle, rotated or reflected as its plane is, and blended with
  * the plane's pixel blend mode and alpha. frame->width/height are the CRTC mode,
  * and the pixels are XRGB8888 at stride width*4 (read frame->format and
- * ->stride anyway, as with drmtap_convert_dmabuf()). A one-layer packet converts
- * as drmtap_convert_dmabuf() does with the descriptor of that buffer: the buffer
- * at its own size, unrotated (a layer whose planes are in separate buffers gives
- * the same picture through the GPU).
+ * ->stride anyway, as with drmtap_convert_dmabuf()). A one-layer packet of 32 or
+ * 64 bits per pixel converts as drmtap_convert_dmabuf() does with the descriptor of
+ * that buffer: the buffer at its own size, unrotated. A one-layer YUV, 16-bit or
+ * 24-bit packet, or a layer whose planes are in separate buffers, gives the same
+ * picture through the GPU, and needs EGL.
  * frame->data is context-owned, valid until the next convert or drmtap_close();
  * do not call drmtap_frame_release() on it. drmtap_set_output_buffer() and
  * DRMTAP_SKIP_UNCHANGED apply as they do to drmtap_convert_dmabuf().
@@ -758,7 +760,8 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * linear 8-bit RGB with no rotation; a packet with any other layer converts the
  * one plane that covers the CRTC (the primary plane when it does, else the topmost
  * covering plane), or fails with a message when none covers it; the debug log says
- * which, once per context.
+ * which, once per context. A one-layer YUV, 16-bit or 24-bit packet has no such fallback:
+ * it fails with -ENOTSUP without EGL.
  *
  * @param ctx   Context from drmtap_open_render() (or any context with EGL)
  * @param bytes Packet bytes as received
@@ -770,6 +773,7 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * @retval -EINVAL Malformed packet, or an fd that is not a large enough DMA-BUF
  * @retval -EPROTO Not a libdrmtap packet
  * @retval -EPROTONOSUPPORT A packet version this library does not read (update it)
+ * @retval -ENOTSUP No EGL, and a layer the CPU cannot convert with no covering plane to fall back to
  */
 int drmtap_convert_packet(drmtap_ctx *ctx, const void *bytes, size_t len,
                           const int *fds, size_t nfds, drmtap_frame_info *frame);
