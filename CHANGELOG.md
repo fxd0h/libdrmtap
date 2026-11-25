@@ -6,7 +6,7 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
-## [0.6.0] - unreleased
+## [0.6.0] - 2026-11-25
 
 Capture of a screen made of several KMS planes. Until now libdrmtap read the primary plane
 only, and a compositor that puts a window on its own plane broke that: KWin 6.8 does it on
@@ -53,7 +53,11 @@ one-plane packet converts exactly like `drmtap_grab_desc()` + `drmtap_convert_dm
   contract bumps oldest. A consumer built against level X accepts the library when
   `oldest <= X <= current` and turns features on by level, instead of matching the minor
   version. A library without the `drmtap_abi` symbol is level 1 (0.5.x). 0.6.0 is
-  current 2 (the packet API), oldest 1: every 0.5 struct and call is unchanged.
+  current 2 (the packet API), oldest 1. Every 0.5 struct and signature is unchanged; the
+  0.5 calls changed behaviour only inside what 0.5 documented, which is why oldest stays 1:
+  `drmtap_grab_desc()` can return -EAGAIN and then the covering plane (underlay, below),
+  `drmtap_grab()` returns composed pixels with no fd on a frame of several planes, and a
+  composed frame's `fb_id` is not a content key.
 - The values are constants of the loaded library (no state, no environment). They are a
   compatibility hint, not a trust check: load the library from a trusted path.
 - `libdrmtap_sys::DRMTAP_ABI_LEVEL`, `libdrmtap_sys::drmtap_abi` and `libdrmtap::abi()`.
@@ -73,6 +77,27 @@ of a frame of the wrong size: keep the last frame. KWin 6.8 kept its underlays f
 covers the whole CRTC, the desktop: screen-sized, with the window below it showing as that
 plane's transparent hole, until the underlay ends. With no such plane, `-EAGAIN` goes on.
 The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchanged.
+
+### Fixed before release (review of 3061a28)
+- Every one-plane fallback (`drmtap_convert_packet()`, `drmtap_grab()`, `drmtap_grab_mapped()`,
+  `drmtap_grab_mapped_fast()`, `drmtap_grab_packet()` with more than four lit planes) takes the
+  `grab_desc` rule: the primary when it covers the screen, else the topmost plane that covers
+  it, else no frame. It used to take the primary, which in an underlay is the window alone.
+- `drmtap_plane_rotation()` on the converting context answers the plane's rotation after any
+  one-layer convert (it answered `-ENOTSUP` after a one-layer packet), and
+  `drmtap_convert_dmabuf()` clears the composed/packet answer. A one-layer packet whose planes
+  are in separate fds converts as its buffer (size, unrotated), not at the CRTC size rotated.
+- The plane cache holds non-cursor planes only, and a device with more than it holds takes the
+  legacy single-plane lookup instead of reading 0 lit planes (`-ENODEV`).
+- `drmtap_grab_desc()` returns an error when the CRTC mode cannot be read, instead of an
+  `-EAGAIN` that never ended.
+- Packets: a fourcc in a message is printed as hex unless printable; a used plane needs a
+  non-zero stride, and a chroma plane of a known YUV layout at least its narrowest row.
+- Helper: a `CMD_GRAB_LAYERS` that finds the next request already queued is answered with no
+  fds, and after a failure the helper refuses for 2 s on its own; its failure log prints the
+  error of the failing step, not a stale `errno`.
+- `fuzz/build.sh` builds into `build-fuzz/` by default, not `/tmp`; `packet_capture` retries a
+  `-EAGAIN`.
 
 ### Fixed: `drmtap_grab_desc()` through the helper after a long underlay
 - After 2 s of underlay `drmtap_grab_desc()` returns the covering plane. Through the

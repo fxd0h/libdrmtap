@@ -190,6 +190,32 @@ denial-of-service on a malformed IPC message, fixed in 0.4.12 and covered by the
 `fuzz/fuzz_convert.c` libFuzzer target). The converter never trusts the
 descriptor's geometry against the real buffer.
 
+### The packet boundary (0.6.0)
+
+A screen of several planes crosses the same boundary as a **packet**:
+`drmtap_grab_packet()` on the exporter fills opaque bytes (at most 1024) plus up to
+16 DMA-BUF fds, and `drmtap_convert_packet()` on the converter takes them back. The
+library decodes the same format from the helper's `CMD_GRAB_LAYERS` reply. Both
+treat the bytes and the fds as hostile, and check everything before any import or
+`mmap`:
+
+- the bytes: magic, version, exact header and record lengths, 1 to 4 layers, a
+  declared fd count equal to the fds that arrived, every plane's fd index inside
+  that count, every source rectangle inside its framebuffer (64-bit arithmetic),
+  destination rectangles and sizes bounded, a non-zero stride for every used plane,
+  enums, rotation and flags in range, layers in zpos order;
+- the fds: each must be a genuine DMA-BUF (the `DMA_BUF_IOCTL_SYNC` probe), with its
+  size read by `lseek`, and every plane that uses it must fit: plane 0
+  `offset + stride * height` with `stride >= width * bpp`, a chroma plane of a known
+  YUV layout its full rows with at least its narrowest row as stride, any other
+  auxiliary plane one row;
+- a fourcc from a packet is printed in messages as its characters only when they
+  are printable, else as hex, so no control byte reaches a log.
+
+`fuzz/fuzz_packet.c` is the libFuzzer target of this boundary. Not bounded: the
+extent of a tiled layout past `offset + stride * rows` (tile heights are
+format-specific); the GPU then samples inside the converter's own address space.
+
 ---
 
 ## Honest caveats (what it does NOT do)
@@ -242,6 +268,8 @@ Do not read the above as more locked down than it is:
 | Malformed scanout geometry drives an oversized allocation / overflow | Geometry guard rejects zero/absurd `pitch`/`height`, capping at one 8K BGRA frame |
 | Long-running helper exhausts kernel GEM handles / pins buffer objects | The helper closes the GEM handle `drmModeGetFB2` mints on every grab and cursor path (`helper_gem_close`), so handle/BO use cannot grow unboundedly |
 | Malformed convert descriptor faults the unprivileged converter (SIGBUS DoS) | `drmtap_convert_dmabuf` validates geometry, requires a genuine DMA-BUF, and bounds the read against the buffer size (`lseek`), failing closed on unknown size |
+| Malformed packet (0.6.0) faults or misleads the converter | `drmtap_convert_packet` and the `CMD_GRAB_LAYERS` reply decoder check every field and every fd before use (see "The packet boundary"); fuzzed by `fuzz/fuzz_packet.c` |
+| A peer floods `CMD_GRAB_LAYERS` to keep many scanout buffers in flight | A request that finds the next one already queued gets a reply with no fds, and after a failure the helper refuses for 2 s without reading planes. A peer that sends one request at a time and never reads is bounded only by the socket buffer |
 | Stale helper/library binary misparses the command stream | The command frame carries a magic + protocol version; the helper rejects a mismatched frame and stops serving |
 | Helper gains new privileges via exec | `PR_SET_NO_NEW_PRIVS` |
 | Helper runs unconfined if hardening fails | Hard-fails: refuses to serve if cap-drop or seccomp cannot be established |
@@ -258,6 +286,7 @@ Do not read the above as more locked down than it is:
 | Physical access | Physical access is full access |
 | Insecure transport by the app | Transport security is the application's responsibility |
 | A bug in the helper while it holds CAP_SYS_ADMIN | The helper is small and seccomp-confined, but a memory-safety bug while holding CAP_SYS_ADMIN is the residual risk; the cap is not dropped after init |
+| Whoever receives an exported scanout fd draws on that screen | The DMA-BUF is exported `O_RDONLY`. That blocks CPU writes (`mmap` with `PROT_WRITE` fails) but NOT GPU writes: importing the fd with EGL and rendering into it changes the buffer. Measured on i915 with Mesa 26 on a private buffer: `eglCreateImage` on the `O_RDONLY` fd, an FBO on it, `glClear`, and the pixels changed (a write to a live scanout was not tried, to leave the session alone; the import is the same one the converter makes every frame). So every member of the group allowed to run the helper (`CMD_GRAB`, `CMD_GRAB_LAYERS`), and the converter process of a split, can draw on the screen whose buffer it holds, a greeter or lock screen included, until the compositor flips that buffer. 0.5 exported the primary plane; 0.6 also exports the overlay planes. Restrict the helper's group to users trusted with the integrity of every session on the card, not only with reading it |
 
 ### Relationship to Wayland
 

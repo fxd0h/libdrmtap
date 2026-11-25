@@ -350,10 +350,12 @@ impl DrmTap {
         unsafe { ffi::drmtap_displays_changed(self.ctx.0) != 0 }
     }
 
-    /// Capture a frame (zero-copy — a DMA-BUF fd, no conversion).
+    /// Capture a frame: usually zero-copy, a DMA-BUF fd and no conversion.
     ///
-    /// Through the privileged helper, a linear scanout on a GPU other than virtio-gpu is not
-    /// exported: the frame has no fd and `data()` holds a copy of its raw, unconverted pixels.
+    /// Not always: on a screen of several planes (0.6.0) the planes are composed and the frame
+    /// holds converted pixels with no fd; through the privileged helper, a linear scanout on a
+    /// GPU other than virtio-gpu is not exported, and `data()` holds a copy of its raw,
+    /// unconverted pixels with no fd. Check [`Frame::dma_buf_borrowed_fd`] before using one.
     pub fn grab(&mut self) -> Result<Frame> {
         let mut raw = unsafe { std::mem::zeroed::<ffi::drmtap_frame_info>() };
         let ret = unsafe { ffi::drmtap_grab(self.ctx.0, &mut raw) };
@@ -432,6 +434,11 @@ impl DrmTap {
     /// `drmtap_grab_desc` fails closed with `-ENOTSUP` rather than hand back a descriptor no
     /// receiver could convert -- so `dma_buf_borrowed_fd()` is never `None` here, unlike on a
     /// frame from [`DrmTap::grab`].
+    ///
+    /// On a screen of several planes (0.6.0) one buffer cannot describe an underlay (a window
+    /// under the desktop): the call fails with `EAGAIN` (no frame, keep the last one) for 2 s,
+    /// then returns the plane that covers the screen. The multi-plane packet API that carries
+    /// every plane has no safe wrapper yet; it is in `libdrmtap-sys` only.
     ///
     /// The receiving half is not wrapped: `drmtap_open_render`/`drmtap_convert_dmabuf` exist in
     /// `libdrmtap-sys` and not here, so the consumer that imports this descriptor is expected to
