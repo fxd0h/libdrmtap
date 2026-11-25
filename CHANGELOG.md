@@ -74,6 +74,16 @@ covers the whole CRTC, the desktop: screen-sized, with the window below it showi
 plane's transparent hole, until the underlay ends. With no such plane, `-EAGAIN` goes on.
 The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchanged.
 
+### Fixed: every error return leaves a message
+- A negative return of any public call now always sets `drmtap_error()`: some returned
+  with no message, or with the message of an earlier call (a NULL argument almost
+  everywhere, a render-only context in `drmtap_list_displays()`,
+  `drmtap_displays_changed()` and `drmtap_plane_rotation()`, `drmtap_drm_fd(NULL)`, and
+  `drmtap_grab_mapped_fast()` on virtio-gpu without 3D, -ENOSYS from TRANSFER_FROM_HOST).
+  The paths that had no message of their own get "<function>: <strerror>". A call without
+  a context reports through `drmtap_error(NULL)`, per thread. `test_errors` checks 33
+  error returns through the shared library.
+
 ### Changed: what a composed frame reports
 
 - `drmtap_plane_rotation()` answers `DRM_MODE_ROTATE_0` after a composed frame (in process,

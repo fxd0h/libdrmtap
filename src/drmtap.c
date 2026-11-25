@@ -64,6 +64,7 @@ static int drmtap_have_cap_sys_admin(void) {
 /* Error string for when ctx is NULL (from failed drmtap_open). Thread-local so
  * concurrent NULL-ctx failures on different threads don't race on one buffer. */
 static _Thread_local char g_static_error[512] = "";
+static _Thread_local unsigned g_static_seq;
 
 /* ========================================================================= */
 /* Internal helpers (exported via drmtap_internal.h)                         */
@@ -74,10 +75,21 @@ void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...) {
     va_start(ap, fmt);
     if (ctx) {
         vsnprintf(ctx->error_msg, sizeof(ctx->error_msg), fmt, ap);
+        ctx->error_seq++;
     } else {
         vsnprintf(g_static_error, sizeof(g_static_error), fmt, ap);
+        g_static_seq++;
     }
     va_end(ap);
+}
+unsigned drmtap_error_mark(const drmtap_ctx *ctx) {
+    return ctx ? ctx->error_seq : g_static_seq;
+}
+int drmtap_error_ensure(drmtap_ctx *ctx, unsigned mark, int ret, const char *fn) {
+    if (ret < 0 && drmtap_error_mark(ctx) == mark) {
+        drmtap_set_error(ctx, "%s: %s", fn, strerror(-ret));
+    }
+    return ret;
 }
 
 void drmtap_debug_log(const drmtap_ctx *ctx, const char *fmt, ...) {
@@ -273,7 +285,17 @@ int drmtap_version(void) {
            DRMTAP_VERSION_PATCH;
 }
 
+static drmtap_ctx *drmtap_open_impl(const drmtap_config *config);
+/* Public entry: a NULL return always leaves a message for drmtap_error(NULL). */
 drmtap_ctx *drmtap_open(const drmtap_config *config) {
+    unsigned mark = drmtap_error_mark(NULL);
+    drmtap_ctx *c = drmtap_open_impl(config);
+    if (!c && drmtap_error_mark(NULL) == mark) {
+        drmtap_set_error(NULL, "drmtap_open: no context could be opened");
+    }
+    return c;
+}
+static drmtap_ctx *drmtap_open_impl(const drmtap_config *config) {
     drmtap_ctx *ctx = calloc(1, sizeof(drmtap_ctx));
     if (!ctx) {
         drmtap_set_error(NULL, "Failed to allocate context: %s",
@@ -411,7 +433,13 @@ fail:
     return NULL;
 }
 
+static int drmtap_list_devices_impl(drmtap_device *out, int max_count);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_list_devices(drmtap_device *out, int max_count) {
+    unsigned mark = drmtap_error_mark(NULL);
+    return drmtap_error_ensure(NULL, mark, drmtap_list_devices_impl(out, max_count), "drmtap_list_devices");
+}
+static int drmtap_list_devices_impl(drmtap_device *out, int max_count) {
     if (!out || max_count <= 0) {
         return -EINVAL;
     }
@@ -658,7 +686,17 @@ const char *drmtap_render_node(drmtap_ctx *ctx) {
     return ctx->render_node[0] ? ctx->render_node : NULL;
 }
 
+static drmtap_ctx *drmtap_open_render_impl(const char *render_node);
+/* Public entry: a NULL return always leaves a message for drmtap_error(NULL). */
 drmtap_ctx *drmtap_open_render(const char *render_node) {
+    unsigned mark = drmtap_error_mark(NULL);
+    drmtap_ctx *c = drmtap_open_render_impl(render_node);
+    if (!c && drmtap_error_mark(NULL) == mark) {
+        drmtap_set_error(NULL, "drmtap_open_render: no context could be opened");
+    }
+    return c;
+}
+static drmtap_ctx *drmtap_open_render_impl(const char *render_node) {
     drmtap_ctx *ctx = calloc(1, sizeof(drmtap_ctx));
     if (!ctx) {
         drmtap_set_error(NULL, "Failed to allocate context: %s",
@@ -815,12 +853,19 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx) {
 
 int drmtap_drm_fd(drmtap_ctx *ctx) {
     if (!ctx) {
+        drmtap_set_error(NULL, "drmtap_drm_fd: ctx is NULL");
         return -1;
     }
     return ctx->drm_fd;
 }
 
+static int drmtap_set_output_buffer_impl(drmtap_ctx *ctx, void *dst, size_t len);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_set_output_buffer(drmtap_ctx *ctx, void *dst, size_t len) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_set_output_buffer_impl(ctx, dst, len), "drmtap_set_output_buffer");
+}
+static int drmtap_set_output_buffer_impl(drmtap_ctx *ctx, void *dst, size_t len) {
     if (!ctx) {
         return -EINVAL;
     }

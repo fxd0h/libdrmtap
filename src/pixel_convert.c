@@ -241,7 +241,19 @@ static void convert_abgr_to_argb(const void *src, void *dst,
 /* Public API — Deswizzle                                                    */
 /* ========================================================================= */
 
+static int drmtap_deswizzle_impl(const void *src, void *dst,
+                     uint32_t width, uint32_t height,
+                     uint32_t src_stride, uint32_t dst_stride,
+                     uint64_t modifier, size_t src_size);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_deswizzle(const void *src, void *dst,
+                     uint32_t width, uint32_t height,
+                     uint32_t src_stride, uint32_t dst_stride,
+                     uint64_t modifier, size_t src_size) {
+    unsigned mark = drmtap_error_mark(NULL);
+    return drmtap_error_ensure(NULL, mark, drmtap_deswizzle_impl(src, dst, width, height, src_stride, dst_stride, modifier, src_size), "drmtap_deswizzle");
+}
+static int drmtap_deswizzle_impl(const void *src, void *dst,
                      uint32_t width, uint32_t height,
                      uint32_t src_stride, uint32_t dst_stride,
                      uint64_t modifier, size_t src_size) {
@@ -499,7 +511,19 @@ static double hdr_peak_units(uint32_t max_nits) {
     return peak / DRMTAP_SDR_WHITE_NITS;
 }
 
+static int drmtap_tonemap_hdr10_impl(const void *src, void *dst,
+                         uint32_t width, uint32_t height,
+                         uint32_t src_stride, uint32_t dst_stride,
+                         uint32_t src_format, uint32_t max_nits);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_tonemap_hdr10(const void *src, void *dst,
+                         uint32_t width, uint32_t height,
+                         uint32_t src_stride, uint32_t dst_stride,
+                         uint32_t src_format, uint32_t max_nits) {
+    unsigned mark = drmtap_error_mark(NULL);
+    return drmtap_error_ensure(NULL, mark, drmtap_tonemap_hdr10_impl(src, dst, width, height, src_stride, dst_stride, src_format, max_nits), "drmtap_tonemap_hdr10");
+}
+static int drmtap_tonemap_hdr10_impl(const void *src, void *dst,
                          uint32_t width, uint32_t height,
                          uint32_t src_stride, uint32_t dst_stride,
                          uint32_t src_format, uint32_t max_nits) {
@@ -677,7 +701,19 @@ int drmtap_convert_rgb16f(const void *src, void *dst,
     return 0;
 }
 
+static int drmtap_convert_format_impl(const void *src, void *dst,
+                          uint32_t width, uint32_t height,
+                          uint32_t src_stride, uint32_t dst_stride,
+                          uint32_t src_format, uint32_t dst_format);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_convert_format(const void *src, void *dst,
+                          uint32_t width, uint32_t height,
+                          uint32_t src_stride, uint32_t dst_stride,
+                          uint32_t src_format, uint32_t dst_format) {
+    unsigned mark = drmtap_error_mark(NULL);
+    return drmtap_error_ensure(NULL, mark, drmtap_convert_format_impl(src, dst, width, height, src_stride, dst_stride, src_format, dst_format), "drmtap_convert_format");
+}
+static int drmtap_convert_format_impl(const void *src, void *dst,
                           uint32_t width, uint32_t height,
                           uint32_t src_stride, uint32_t dst_stride,
                           uint32_t src_format, uint32_t dst_format) {
@@ -749,7 +785,19 @@ int drmtap_convert_format(const void *src, void *dst,
 /* Public API — Frame Differencing                                           */
 /* ========================================================================= */
 
+static int drmtap_diff_frames_impl(const void *frame_a, const void *frame_b,
+                       uint32_t width, uint32_t height, uint32_t stride,
+                       drmtap_rect *rects_out, int max_rects,
+                       int tile_size);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_diff_frames(const void *frame_a, const void *frame_b,
+                       uint32_t width, uint32_t height, uint32_t stride,
+                       drmtap_rect *rects_out, int max_rects,
+                       int tile_size) {
+    unsigned mark = drmtap_error_mark(NULL);
+    return drmtap_error_ensure(NULL, mark, drmtap_diff_frames_impl(frame_a, frame_b, width, height, stride, rects_out, max_rects, tile_size), "drmtap_diff_frames");
+}
+static int drmtap_diff_frames_impl(const void *frame_a, const void *frame_b,
                        uint32_t width, uint32_t height, uint32_t stride,
                        drmtap_rect *rects_out, int max_rects,
                        int tile_size) {

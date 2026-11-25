@@ -184,7 +184,13 @@ static uint64_t topology_hash(int drm_fd, drmModeRes *res) {
 /* Public API                                                                */
 /* ========================================================================= */
 
+static int drmtap_list_displays_impl(drmtap_ctx *ctx, drmtap_display *out, int max_count);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_list_displays(drmtap_ctx *ctx, drmtap_display *out, int max_count) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_list_displays_impl(ctx, out, max_count), "drmtap_list_displays");
+}
+static int drmtap_list_displays_impl(drmtap_ctx *ctx, drmtap_display *out, int max_count) {
     if (!ctx || !out || max_count <= 0) {
         return -EINVAL;
     }
@@ -298,7 +304,13 @@ int drmtap_list_displays(drmtap_ctx *ctx, drmtap_display *out, int max_count) {
     return found;
 }
 
+static int drmtap_displays_changed_impl(drmtap_ctx *ctx);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_displays_changed(drmtap_ctx *ctx) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_displays_changed_impl(ctx), "drmtap_displays_changed");
+}
+static int drmtap_displays_changed_impl(drmtap_ctx *ctx) {
     if (!ctx) {
         return -EINVAL;
     }

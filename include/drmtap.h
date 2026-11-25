@@ -837,7 +837,11 @@ void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 /**
  * @brief Get last error message (human-readable).
  *
- * If ctx is NULL, returns a static error from the last drmtap_open() failure.
+ * Every negative return of a call that takes this context leaves a message here,
+ * written during that call (0.6.0; before, some returns left none or an older one).
+ * With ctx NULL: the calling thread's message from the last failure of a call that
+ * has no context (drmtap_open(), drmtap_open_render(), drmtap_list_devices(), the
+ * pixel helpers, drmtap_cursor_hotspot_valid()) or that was passed a NULL ctx.
  *
  * @param ctx Capture context (may be NULL)
  * @return Error string (do not free), or NULL if no error

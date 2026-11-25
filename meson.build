@@ -413,6 +413,12 @@ test_abi = executable('test_abi',
     dependencies: [libdrmtap_dep],
 )
 test('abi', test_abi, suite: 'unit')
+# Every error return leaves a message for drmtap_error(); shared library, public API.
+test_errors = executable('test_errors',
+    'tests/test_errors.c',
+    dependencies: [libdrmtap_dep, dependency('threads')],
+)
+test('errors', test_errors, suite: 'unit')
 nm_prog = find_program('nm', required: false)
 if nm_prog.found()
     test('abi_symbols', find_program('tools/check-abi-symbols.sh'),

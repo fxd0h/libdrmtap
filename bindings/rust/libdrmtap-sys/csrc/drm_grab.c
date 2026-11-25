@@ -348,7 +348,13 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
 /* The exact refresh of the captured CRTC, from its current mode. No connector probe:
  * once the CRTC is known it is one GETCRTC, so a caller can ask again to follow a
  * mode change. */
+static int drmtap_crtc_refresh_impl(drmtap_ctx *ctx, uint64_t *num, uint64_t *den);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_crtc_refresh_impl(ctx, num, den), "drmtap_crtc_refresh");
+}
+static int drmtap_crtc_refresh_impl(drmtap_ctx *ctx, uint64_t *num, uint64_t *den) {
     if (!ctx || !num || !den) {
         return -EINVAL;
     }
@@ -381,7 +387,13 @@ int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den) {
  * the one do_grab or the fast path recorded (before any grab: the one a grab would
  * use), never a fresh sweep, so the answer is for the same plane the frame came
  * from. The property id is looked up by name once per plane and reused. */
+static int drmtap_plane_rotation_impl(drmtap_ctx *ctx, uint32_t *rotation);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_plane_rotation_impl(ctx, rotation), "drmtap_plane_rotation");
+}
+static int drmtap_plane_rotation_impl(drmtap_ctx *ctx, uint32_t *rotation) {
     if (!ctx || !rotation) {
         return -EINVAL;
     }
@@ -668,9 +680,10 @@ static int virtio_transfer_from_host(drmtap_ctx *ctx, uint32_t handle,
     int ret = drmIoctl(ctx->drm_fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST,
                        &xfer);
     if (ret != 0) {
-        drmtap_debug_log(ctx, "TRANSFER_FROM_HOST failed: %s",
-                         strerror(errno));
-        return -errno;
+        int err = errno ? errno : EIO;
+        drmtap_set_error(ctx, "virtio: TRANSFER_FROM_HOST failed: %s%s", strerror(err),
+                         err == ENOSYS ? " (virtio-gpu without 3D/virgl)" : "");
+        return -err;
     }
 
     /* Wait for transfer completion */
@@ -678,8 +691,9 @@ static int virtio_transfer_from_host(drmtap_ctx *ctx, uint32_t handle,
     wait_args.handle = handle;
     ret = drmIoctl(ctx->drm_fd, DRM_IOCTL_VIRTGPU_WAIT, &wait_args);
     if (ret != 0) {
-        drmtap_debug_log(ctx, "VIRTGPU_WAIT failed: %s", strerror(errno));
-        return -errno;
+        int err = errno ? errno : EIO;
+        drmtap_set_error(ctx, "virtio: VIRTGPU_WAIT failed: %s", strerror(err));
+        return -err;
     }
 
     drmtap_debug_log(ctx, "virtio: transferred %ux%u from host",
@@ -2263,14 +2277,28 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
 /* Public API                                                                */
 /* ========================================================================= */
 
+static int drmtap_grab_impl(drmtap_ctx *ctx, drmtap_frame_info *frame);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_grab_impl(ctx, frame), "drmtap_grab");
+}
+static int drmtap_grab_impl(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (!ctx || !frame) {
         return -EINVAL;
     }
     return do_grab(ctx, frame, 0, 0);  /* zero-copy: DMA-BUF fd only */
 }
 
+static int drmtap_grab_desc_impl(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
+                     drmtap_frame_info *frame);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
+                     drmtap_frame_info *frame) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_grab_desc_impl(ctx, desc, frame), "drmtap_grab_desc");
+}
+static int drmtap_grab_desc_impl(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
                      drmtap_frame_info *frame) {
     if (!ctx || !desc || !frame) {
         return -EINVAL;
@@ -2326,7 +2354,13 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
     return 0;
 }
 
+static int drmtap_grab_mapped_impl(drmtap_ctx *ctx, drmtap_frame_info *frame);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_grab_mapped_impl(ctx, frame), "drmtap_grab_mapped");
+}
+static int drmtap_grab_mapped_impl(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (!ctx || !frame) {
         return -EINVAL;
     }
@@ -2462,7 +2496,13 @@ static void fast_slot_restage_planes(drmtap_ctx *ctx, int slot) {
     }
 }
 
+static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *frame);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_grab_mapped_fast_impl(ctx, frame), "drmtap_grab_mapped_fast");
+}
+static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (!ctx || !frame) {
         return -EINVAL;
     }
@@ -2979,7 +3019,15 @@ static uint32_t format_min_bpp(uint32_t fourcc) {
     }
 }
 
+static int drmtap_convert_dmabuf_impl(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
+                          drmtap_frame_info *frame);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
+                          drmtap_frame_info *frame) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_convert_dmabuf_impl(ctx, desc, frame), "drmtap_convert_dmabuf");
+}
+static int drmtap_convert_dmabuf_impl(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
                           drmtap_frame_info *frame) {
     if (!ctx || !desc || !frame) {
         return -EINVAL;
@@ -3319,7 +3367,13 @@ static int packet_from_desc(drmtap_ctx *ctx, drmtap_packet *pkt) {
     return packet_fill(ctx, pkt, &s);
 }
 
+static int drmtap_grab_packet_impl(drmtap_ctx *ctx, drmtap_packet *pkt);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_grab_packet(drmtap_ctx *ctx, drmtap_packet *pkt) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_grab_packet_impl(ctx, pkt), "drmtap_grab_packet");
+}
+static int drmtap_grab_packet_impl(drmtap_ctx *ctx, drmtap_packet *pkt) {
     /* Empty the packet before ANY return, NULL ctx included: the documented
      * cleanup is drmtap_packet_release() even after a failure, which would
      * otherwise close whatever stack garbage the fds held. */
@@ -3450,7 +3504,15 @@ static int convert_one_layer(drmtap_ctx *ctx, const drmtap_layer_set *s, uint32_
     return drmtap_convert_dmabuf(ctx, &d, frame);
 }
 
+static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t len,
+                          const int *fds, size_t nfds, drmtap_frame_info *frame);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_convert_packet(drmtap_ctx *ctx, const void *bytes, size_t len,
+                          const int *fds, size_t nfds, drmtap_frame_info *frame) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_convert_packet_impl(ctx, bytes, len, fds, nfds, frame), "drmtap_convert_packet");
+}
+static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t len,
                           const int *fds, size_t nfds, drmtap_frame_info *frame) {
     if (!ctx || !bytes || !frame || (nfds > 0 && !fds)) {
         return -EINVAL;
