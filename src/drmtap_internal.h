@@ -207,6 +207,8 @@ struct drmtap_ctx {
     uint32_t fb2_pitches[4];
     uint32_t fb2_offsets[4];
     int      fb2_num_planes;  /* number of active planes (1..4) */
+    uint32_t fb2_fb_id;       /* the fb these fb2_* describe: grab_desc never pairs
+                               * them with the buffer of another fb */
 
     /* HDR state of the frame currently being processed. Set per grab from the
      * connector HDR_OUTPUT_METADATA (helper sends it on the wire; direct mode
