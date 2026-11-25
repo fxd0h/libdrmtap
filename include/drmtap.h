@@ -705,16 +705,18 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * the plane's pixel blend mode and alpha. frame->width/height are the CRTC mode,
  * and the pixels are XRGB8888 at stride width*4 (read frame->format and
  * ->stride anyway, as with drmtap_convert_dmabuf()). A one-layer packet converts
- * exactly as drmtap_convert_dmabuf() does with the descriptor of that buffer.
+ * as drmtap_convert_dmabuf() does with the descriptor of that buffer: the buffer
+ * at its own size, unrotated (a layer whose planes are in separate buffers gives
+ * the same picture through the GPU).
  * frame->data is context-owned, valid until the next convert or drmtap_close();
  * do not call drmtap_frame_release() on it. drmtap_set_output_buffer() and
  * DRMTAP_SKIP_UNCHANGED apply as they do to drmtap_convert_dmabuf().
  * frame->fb_id of a composed frame is the primary plane's and does not track the
  * content (a window on another plane can change while it stays the same): do not
  * use it as a content key. After a composed convert, drmtap_plane_rotation() on
- * this context answers ROTATE_0. After a convert that fell back to the primary
- * layer alone (below), it answers the rotation of that plane as the exporter read
- * it, since that buffer is not turned. The exporter's own answer after
+ * this context answers ROTATE_0. After a convert of ONE layer (a one-layer packet,
+ * or the one-layer fallback below) it answers the rotation of that plane as the
+ * exporter read it, since that buffer is not turned. The exporter's own answer after
  * drmtap_grab_packet() assumes the packet will be composed, so a consumer that
  * turns frames by the rotation asks the converting context, after each convert.
  *
@@ -887,9 +889,11 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
  * so the frame is already the CRTC raster, like a framebuffer the compositor
  * rotated in software, and the consumer turns it by the output transform. This
  * also answers on a drmtap_open_render() context after such a convert (it answers
- * -ENOTSUP there otherwise). When drmtap_convert_packet() could not compose a packet
- * of several layers and converted its primary layer alone, the answer is that plane's
+ * -ENOTSUP there otherwise). When drmtap_convert_packet() converted ONE layer (a
+ * one-layer packet, or a packet it could not compose), the answer is that plane's
  * rotation as carried in the packet (the buffer is unrotated), on any context.
+ * drmtap_convert_dmabuf() clears both answers: after it, a drmtap_open_render()
+ * context answers -ENOTSUP again.
  *
  * @param ctx      Capture context from drmtap_open()
  * @param rotation Set to the DRM rotation bitmask: DRM_MODE_ROTATE_0 (0x1),

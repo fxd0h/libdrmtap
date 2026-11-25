@@ -401,10 +401,10 @@ static int drmtap_plane_rotation_impl(drmtap_ctx *ctx, uint32_t *rotation) {
      * rotation applied, so it is in screen orientation, like a framebuffer the
      * compositor rotated in software. Answer ROTATE_0 for it, whichever plane it
      * came from and on a render-only context too (convert_packet). */
-    if (ctx->last_frame_composed == DRMTAP_FRAME_PRIMARY_ALONE) {
-        /* convert_packet fell back to the primary layer: that buffer is unrotated,
-         * so the answer is its plane's rotation, which the packet carries (the
-         * exporter's own answer after grab_packet assumed a composed frame). */
+    if (ctx->last_frame_composed == DRMTAP_FRAME_ONE_LAYER) {
+        /* convert_packet converted one layer as its buffer, unrotated: the answer is
+         * that plane's rotation, which the packet carries (also on a render-only
+         * context, and where the exporter assumed a composed frame). */
         *rotation = ctx->packet_rotation;
         return 0;
     }
@@ -3205,6 +3205,9 @@ static int drmtap_convert_dmabuf_impl(drmtap_ctx *ctx, const drmtap_dmabuf_desc 
     if (!ctx || !desc || !frame) {
         return -EINVAL;
     }
+    /* One buffer as it is: what plane_rotation answered for an earlier composed or
+     * packet frame no longer applies (convert_packet sets it again after this). */
+    ctx->last_frame_composed = 0;
 
     uint32_t num_planes = desc->num_planes ? desc->num_planes : 1;
     if (num_planes > 4 || desc->width == 0) {
@@ -3508,6 +3511,12 @@ static int packet_from_desc(drmtap_ctx *ctx, drmtap_packet *pkt) {
         return r;
     }
     drmtap_frame_release(ctx, &f);
+    /* The plane's real rotation, so the converter can report it (grab_desc just
+     * named the plane; a driver without the property is ROTATE_0). */
+    uint32_t rot = DRMTAP_ROT_0;
+    if (drmtap_plane_rotation(ctx, &rot) != 0 || !drmtap_rotation_valid(rot)) {
+        rot = DRMTAP_ROT_0;
+    }
     drmtap_layer *l = &s.layers[0];
     s.count = 1;
     s.lit = 1;
@@ -3536,7 +3545,7 @@ static int packet_from_desc(drmtap_ctx *ctx, drmtap_packet *pkt) {
     l->crtc_h = d.height;
     l->alpha = 0xffffu;
     l->blend = DRMTAP_BLEND_PREMULTI;
-    l->rotation = DRMTAP_ROT_0;
+    l->rotation = rot;
     l->flags = DRMTAP_LAYER_FLAG_PRIMARY;
     return packet_fill(ctx, pkt, &s);
 }
@@ -3648,19 +3657,13 @@ static int drmtap_grab_packet_impl(drmtap_ctx *ctx, drmtap_packet *pkt) {
 
 /* One layer through the single-buffer convert, exactly as drmtap_grab_desc() +
  * drmtap_convert_dmabuf() would handle that buffer, including the padded-scanout
- * width. A layer whose planes live in several buffer objects cannot be one
- * descriptor; it is composed on its own instead. */
+ * width: the buffer as it is, unrotated, at its own size. A layer whose planes live
+ * in several buffer objects cannot be one descriptor; the GPU composer reads it,
+ * with the same result: the w x h buffer as it is (rotation 0, opaque, no scaling,
+ * no placement), so the caller's rotation answer applies to it the same way. */
 static int convert_one_layer(drmtap_ctx *ctx, const drmtap_layer_set *s, uint32_t i,
                              drmtap_frame_info *frame) {
     const drmtap_layer *l = &s->layers[i];
-    for (uint32_t p = 1; p < l->num_planes; p++) {
-        if (l->fd_index[p] != l->fd_index[0]) {
-            drmtap_layer_set one = *s;
-            one.layers[0] = *l;
-            one.count = 1;
-            return compose_layers(ctx, &one, frame);
-        }
-    }
     uint32_t w = l->fb_width;
     if (s->crtc_w > 0 && s->crtc_w < l->fb_width) {
         drmtap_plane_rect rect;
@@ -3669,6 +3672,29 @@ static int convert_one_layer(drmtap_ctx *ctx, const drmtap_layer_set *s, uint32_
         int linear = (l->modifier == DRM_FORMAT_MOD_LINEAR ||
                       l->modifier == DRM_FORMAT_MOD_INVALID);
         w = drmtap_scanout_width_of(l->fb_width, &rect, linear, NULL);
+    }
+    for (uint32_t p = 1; p < l->num_planes; p++) {
+        if (l->fd_index[p] != l->fd_index[0]) {
+            drmtap_layer_set one = *s;
+            drmtap_layer *o = &one.layers[0];
+            *o = *l;
+            one.count = 1;
+            one.lit = 1;
+            one.crtc_w = w;
+            one.crtc_h = l->fb_height;
+            o->src_x = 0;
+            o->src_y = 0;
+            o->src_w = w << 16;
+            o->src_h = l->fb_height << 16;
+            o->crtc_x = 0;
+            o->crtc_y = 0;
+            o->crtc_w = w;
+            o->crtc_h = l->fb_height;
+            o->rotation = DRMTAP_ROT_0;
+            o->alpha = 0xffffu;
+            o->blend = DRMTAP_BLEND_NONE;
+            return compose_layers(ctx, &one, frame);
+        }
     }
     drmtap_dmabuf_desc d;
     memset(&d, 0, sizeof(d));
@@ -3727,7 +3753,12 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
     ctx->cur_hdr_max_nits = s.hdr_max_nits;
     ctx->last_frame_composed = 0;
     if (s.count == 1) {
-        return convert_one_layer(ctx, &s, 0, frame);
+        r = convert_one_layer(ctx, &s, 0, frame);
+        if (r == 0) {
+            ctx->packet_rotation = s.layers[0].rotation;
+            ctx->last_frame_composed = DRMTAP_FRAME_ONE_LAYER;
+        }
+        return r;
     }
     r = compose_layers(ctx, &s, frame);
     if (r == 0) {
@@ -3747,7 +3778,7 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
     r = convert_one_layer(ctx, &s, one, frame);
     if (r == 0) {
         ctx->packet_rotation = s.layers[one].rotation;
-        ctx->last_frame_composed = DRMTAP_FRAME_PRIMARY_ALONE;
+        ctx->last_frame_composed = DRMTAP_FRAME_ONE_LAYER;
     }
     return r;
 }

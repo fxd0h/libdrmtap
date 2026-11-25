@@ -685,6 +685,27 @@ static void test_convert_packet(void) {
         check(r < 0 && drmtap_error(ctx) != NULL,
               "with no covering layer the fallback fails, and says why");
     }
+    /* A one-layer packet: the converter reports the plane's rotation (the buffer is
+     * converted unrotated), and a later convert_dmabuf forgets it again. */
+    {
+        drmtap_layer_set o = s;
+        o.count = 1; o.lit = 1; o.nfds = 1;
+        o.layers[0].rotation = DRMTAP_ROT_180;
+        rot = 0;
+        r = convert(ctx, &o, &f, NULL, 0);
+        int rr = drmtap_plane_rotation(ctx, &rot);
+        check(r == 0 && f.width == W && rr == 0 && rot == DRMTAP_ROT_180,
+              "after a one-layer packet the converter answers that plane's rotation");
+        r = convert(ctx, &s, &f, NULL, 0);   /* composed (CPU): ROTATE_0 */
+        drmtap_dmabuf_desc d;
+        memset(&d, 0, sizeof(d));
+        d.dma_buf_fd = s.fds[0]; d.width = W; d.height = H; d.format = FMT_XR24;
+        d.modifier = MOD_LINEAR; d.num_planes = 1; d.pitches[0] = W * 4;
+        int c = drmtap_convert_dmabuf(ctx, &d, &f);
+        rr = drmtap_plane_rotation(ctx, &rot);
+        check(r == 0 && c == 0 && rr == -ENOTSUP,
+              "convert_dmabuf after a composed convert: the render ctx answers -ENOTSUP again");
+    }
     unsetenv("DRMTAP_NO_EGL");
 
     /* the same layers on the GPU */
@@ -746,6 +767,48 @@ static void test_convert_packet(void) {
             close(rb);
         }
 
+        /* One NV12 layer with luma and chroma in separate fds, rotate-180, placed at
+         * +16+8 of a 64x48 CRTC: converted as its buffer (32x16, unrotated: white
+         * left half, black right half) and the rotation is the converter's answer. */
+        {
+            enum { YW = 32, YH = 16 };
+            uint8_t *yb = malloc(4096), *cb = malloc(4096);
+            memset(yb, 0, 4096);
+            memset(cb, 128, 4096);
+            for (int y = 0; y < YH; y++) {
+                for (int x = 0; x < YW; x++) {
+                    yb[y * YW + x] = x < YW / 2 ? 235 : 16;
+                }
+            }
+            int yfd = drmtap_udmabuf_wrap(ctrl, yb, 4096);
+            int cfd = drmtap_udmabuf_wrap(ctrl, cb, 4096);
+            free(yb);
+            free(cb);
+            if (yfd >= 0 && cfd >= 0) {
+                drmtap_layer_set n;
+                memset(&n, 0, sizeof(n));
+                n.crtc_w = W; n.crtc_h = H; n.count = 1; n.lit = 1; n.nfds = 2;
+                n.fds[0] = yfd; n.fds[1] = cfd;
+                n.layers[0] = mk_layer(10, YW, YH, 16, 8, YW, YH, 0);
+                n.layers[0].format = 0x3231564eu;   /* NV12 */
+                n.layers[0].num_planes = 2;
+                n.layers[0].pitches[0] = YW;
+                n.layers[0].pitches[1] = YW;
+                n.layers[0].fd_index[1] = 1;
+                n.layers[0].rotation = DRMTAP_ROT_180;
+                n.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+                static uint8_t one[YW * YH * 4];
+                uint32_t rot = 0;
+                r = convert(ctx, &n, &f, one, sizeof(one));
+                int rr = drmtap_plane_rotation(ctx, &rot);
+                check(r == 0 && f.width == YW && f.height == YH && rr == 0 &&
+                      rot == DRMTAP_ROT_180 && one[(8 * YW + 2) * 4 + 1] > 200 &&
+                      one[(8 * YW + 29) * 4 + 1] < 40,
+                      "a one-layer packet in two fds converts as its buffer, unrotated");
+            }
+            if (yfd >= 0) close(yfd);
+            if (cfd >= 0) close(cfd);
+        }
         /* Import-cache pinning: a later layer must never release the texture an
          * earlier layer of the same frame already picked. Fill the 12 slots, then
          * a frame whose bottom layer hits and whose top layer misses (eviction),
