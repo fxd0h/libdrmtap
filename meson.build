@@ -451,7 +451,10 @@ test_planecap = executable('test_planecap',
     dependencies: [libdrmtap_test_dep, libdrm_dep],
     include_directories: lib_include,
 )
-test('planecap', test_planecap, suite: 'integration')
+test('planecap', test_planecap, suite: 'integration',
+    env: integration_env,
+    is_parallel: false,
+)
 test('capture', test_capture, suite: 'integration',
     env: integration_env,
     is_parallel: false,
