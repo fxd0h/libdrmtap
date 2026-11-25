@@ -292,6 +292,16 @@ A self-contained example of the crate-based backend, which does link
 [`contrib/integrations/rustdesk/`](contrib/integrations/rustdesk/README.md).
 **Tested and verified** on Ubuntu 24.04 with `cargo build` (zero errors).
 
+### ABI level
+The release version and the ABI are counted separately. `drmtap_abi(&current, &oldest)`
+gives the range of ABI levels the loaded library serves, and `DRMTAP_ABI_LEVEL` is the
+level of the header a consumer was built with. A consumer accepts the library when
+`oldest <= DRMTAP_ABI_LEVEL <= current` and enables features by level: level 1 is the
+0.5.x API (a library without `drmtap_abi` is level 1), level 2 (0.6.0) adds the packet
+API. A consumer that `dlopen()`s the library can therefore accept a newer minor without
+an update, as long as the level range still covers it. The level is the library's own
+claim, not an integrity check: load it from a trusted absolute path.
+
 ### Run tests
 
 ```bash
@@ -387,7 +397,7 @@ Every existing project is either a complete application, a plugin, or PipeWire-b
 │      (RustDesk, Sunshine, VNC, custom)          │
 ├─────────────────────────────────────────────────┤
 │              libdrmtap.h                        │
-│          Public API — 27 functions              │
+│          Public API — 32 functions              │
 ├─────────────────────────────────────────────────┤
 │                                                 │
 │  ┌────────────┐  ┌─────────┐  ┌──────────────┐  │
