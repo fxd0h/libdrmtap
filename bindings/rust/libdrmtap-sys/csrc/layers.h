@@ -168,6 +168,24 @@ static inline int drmtap_layers_primary(const drmtap_layer_set *s) {
     return -1;
 }
 
+/* The one layer that stands for the screen when the layers cannot be composed:
+ * the primary when it covers the w x h CRTC; otherwise the topmost layer that
+ * covers it (in an underlay the primary is the window, and the covering layer is
+ * the desktop with the window's hole, the grab_desc rule); -1 when no layer covers
+ * the CRTC, so no single buffer is the screen. */
+static inline int drmtap_layers_stand_in(const drmtap_layer_set *s, uint32_t w, uint32_t h) {
+    int pi = drmtap_layers_primary(s);
+    if (pi >= 0 && drmtap_layer_covers(&s->layers[pi], w, h)) {
+        return pi;
+    }
+    for (int i = (int)s->count - 1; i >= 0; i--) {
+        if (drmtap_layer_covers(&s->layers[i], w, h)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* Key of everything that decides the composed image apart from the pixels: the
  * buffers, the rectangles and the blend state of every layer, and the CRTC size.
  * Two frames with the same key and the same buffer contents compose the same.

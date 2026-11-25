@@ -1423,7 +1423,8 @@ static void log_layer_fallback(drmtap_ctx *ctx, int lit, int err) {
     const char *why = drmtap_error(ctx);
     drmtap_debug_log(ctx,
         "a frame of %d planes on crtc %u could not be composed (%s: %s); "
-        "capturing the primary plane alone, so windows on the other planes are missing. "
+        "capturing one plane alone (the primary, or the plane that covers the screen when "
+        "the primary is a window under it), so windows on the other planes are missing. "
         "Said once per context",
         lit, ctx->crtc_id, err == -E2BIG ? "more lit planes than a frame carries"
                                          : strerror(-err),
@@ -1508,6 +1509,19 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
                 return r;
             }
             log_layer_fallback(ctx, nl, r);
+            /* One plane alone stands for the screen: never the window of an underlay. */
+            uint32_t cw = 0, ch = 0;
+            int si = drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0
+                     ? drmtap_layers_stand_in(&ls, cw, ch) : -1;
+            if (si < 0) {
+                drmtap_set_error(ctx, "crtc %u: %d planes could not be composed (%s) and no "
+                                 "single plane covers the screen: no frame", ctx->crtc_id,
+                                 nl, strerror(-r));
+                return r;
+            }
+            if (si != pi) {
+                cover = si;   /* the covering layer, also through the helper */
+            }
         }
         int pick = cover >= 0 ? cover : (pi >= 0 ? pi : 0);
         plane_id = ls.layers[pick].plane_id;
@@ -2658,7 +2672,8 @@ static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *fram
      * that this entry point has no helper fallback. Answer immediately and quietly:
      * the caller has the reason in drmtap_error() from the first failure, and a
      * capture loop calling this at frame rate must not produce a line per frame. */
-    ctx->sw_override_on = 0;   /* only do_grab's covering-layer frame narrows from another rect */
+    ctx->sw_override_on = 0;   /* only a covering-layer frame narrows from another rect */
+    int stand_in = 0;          /* the layer a fallback captures (nl > 1) */
     if (ctx->fast_no_privilege) {
         drmtap_set_error(ctx,
             "drmtap_grab_mapped_fast needs CAP_SYS_ADMIN in this process and has no "
@@ -2696,13 +2711,28 @@ static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *fram
             return r;
         }
         log_layer_fallback(ctx, nl, r);
+        /* One plane alone stands for the screen: never the window of an underlay. */
+        uint32_t cw = 0, ch = 0;
+        stand_in = drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0
+                   ? drmtap_layers_stand_in(&ls, cw, ch) : -1;
+        if (stand_in < 0) {
+            drmtap_set_error(ctx, "crtc %u: %d planes could not be composed (%s) and no "
+                             "single plane covers the screen: no frame", ctx->crtc_id, nl,
+                             strerror(-r));
+            return r;
+        }
     }
     uint32_t fb_id = 0;
     if (nl >= 1) {
         int pick = 0;
         if (nl > 1) {
             int pi = drmtap_layers_primary(&ls);
-            pick = pi >= 0 ? pi : 0;
+            pick = stand_in;
+            if (pick != pi) {
+                /* the covering layer: narrow the padded width from its own rect */
+                drmtap_layer_plane_rect(&ls.layers[pick], &ctx->sw_override);
+                ctx->sw_override_on = 1;
+            }
         }
         if (!ctx->fast_initialized) {
             read_hdr_for_current_crtc(ctx);
@@ -3576,11 +3606,21 @@ static int drmtap_grab_packet_impl(drmtap_ctx *ctx, drmtap_packet *pkt) {
         if (!ctx->logged_layer_overflow) {
             ctx->logged_layer_overflow = 1;
             drmtap_debug_log(ctx, "crtc %u has %u lit planes, more than the %d a packet "
-                             "carries: sending the primary plane alone. Said once per "
-                             "context", ctx->crtc_id, s.lit, DRMTAP_MAX_LAYERS);
+                             "carries: sending one plane alone (the primary, or the plane "
+                             "that covers the screen when the primary is a window under "
+                             "it). Said once per context", ctx->crtc_id, s.lit,
+                             DRMTAP_MAX_LAYERS);
         }
-        int pi = drmtap_layers_primary(&s);
-        s.layers[0] = s.layers[pi >= 0 ? pi : 0];
+        uint32_t cw = 0, ch = 0;
+        int si = drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0
+                 ? drmtap_layers_stand_in(&s, cw, ch) : -1;
+        if (si < 0) {
+            drmtap_set_error(ctx, "crtc %u has %u lit planes, more than a packet carries, "
+                             "and none of the kept ones covers the screen: no frame",
+                             ctx->crtc_id, s.lit);
+            return -E2BIG;
+        }
+        s.layers[0] = s.layers[si];
         s.count = 1;
         s.lit = 1;
         int r = drmtap_kms_export_layers(ctx->drm_fd, &s);
@@ -3588,7 +3628,7 @@ static int drmtap_grab_packet_impl(drmtap_ctx *ctx, drmtap_packet *pkt) {
             return packet_from_desc(ctx, pkt);
         }
         if (r < 0) {
-            drmtap_set_error(ctx, "exporting the primary plane: %s", strerror(-r));
+            drmtap_set_error(ctx, "exporting plane %u: %s", s.layers[0].plane_id, strerror(-r));
             return r;
         }
     }
@@ -3697,8 +3737,13 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
         return r;
     }
     log_layer_fallback(ctx, (int)s.count, r);
-    int pi = drmtap_layers_primary(&s);
-    uint32_t one = (uint32_t)(pi >= 0 ? pi : 0);
+    int si = drmtap_layers_stand_in(&s, s.crtc_w, s.crtc_h);
+    if (si < 0) {
+        drmtap_set_error(ctx, "convert_packet: %u layers could not be composed (%s) and no "
+                         "single layer covers the CRTC: no frame", s.count, strerror(-r));
+        return r;
+    }
+    uint32_t one = (uint32_t)si;
     r = convert_one_layer(ctx, &s, one, frame);
     if (r == 0) {
         ctx->packet_rotation = s.layers[one].rotation;
