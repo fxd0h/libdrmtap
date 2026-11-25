@@ -260,7 +260,8 @@ static inline int drmtap_layers_same(const drmtap_layer_set *a, const drmtap_lay
             x->crtc_x != y->crtc_x || x->crtc_y != y->crtc_y ||
             x->crtc_w != y->crtc_w || x->crtc_h != y->crtc_h ||
             x->zpos != y->zpos || x->alpha != y->alpha ||
-            x->blend != y->blend || x->rotation != y->rotation) {
+            x->blend != y->blend || x->rotation != y->rotation ||
+            x->color_encoding != y->color_encoding || x->color_range != y->color_range) {
             return 0;
         }
     }
@@ -424,10 +425,16 @@ static inline uint64_t drmtap_pkt_get64(const uint8_t *p) {
 /* Write `s` (layers and fd count; the fds themselves travel out of band) into
  * buf. Returns the byte length, or -EINVAL when the set itself is out of range
  * (so a producer bug fails here, not at the far end), -ENOSPC when cap is short. */
+static inline int drmtap_layer_valid(const drmtap_layer *l, uint32_t nfds);
 static inline int drmtap_packet_encode(const drmtap_layer_set *s, uint8_t *buf, size_t cap) {
     if (!s || !buf || s->count == 0 || s->count > DRMTAP_MAX_LAYERS ||
-        s->nfds > DRMTAP_LAYERS_MAX_FDS) {
+        s->nfds == 0 || s->nfds > DRMTAP_LAYERS_MAX_FDS) {
         return -EINVAL;
+    }
+    for (uint32_t i = 0; i < s->count; i++) {
+        if (!drmtap_layer_valid(&s->layers[i], s->nfds)) {
+            return -EINVAL;
+        }
     }
     size_t len = DRMTAP_PKT_HDR_LEN + (size_t)s->count * DRMTAP_PKT_LAYER_LEN;
     if (cap < len) {

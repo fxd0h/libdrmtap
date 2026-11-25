@@ -212,9 +212,21 @@ static int run_exporter(int sock, int frames) {
         }
         /* Forward without looking inside: bytes as the message, fds alongside. */
         int sent = send_msg(sock, pkt.bytes, pkt.len, pkt.fds, pkt.nfds);
+        int send_err = errno;
         uint32_t len = pkt.len, nfds = pkt.nfds;
         drmtap_packet_release(&pkt);
         if (sent != 0) {
+            /* A converter with no render node answers and exits at once, so the
+             * send can fail on a closed peer: its queued answer is still readable. */
+            conv_result_t early;
+            int efds[DRMTAP_PACKET_MAX_FDS];
+            size_t nefds = 0;
+            if ((send_err == EPIPE || send_err == ECONNRESET) &&
+                recv_msg(sock, &early, sizeof(early), efds, &nefds) == (ssize_t)sizeof(early) &&
+                early.ok < 0) {
+                printf("  SKIP: the converter has no render node\n");
+                break;
+            }
             printf("  FAIL: send\n");
             failures++;
             break;

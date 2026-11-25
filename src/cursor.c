@@ -373,7 +373,8 @@ static int drmtap_cursor_hotspot_valid_impl(const drmtap_cursor_info *cursor, in
 /* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_cursor_hotspot_valid(const drmtap_cursor_info *cursor, int *valid) {
     unsigned mark = drmtap_error_mark(NULL);
-    return drmtap_error_ensure(NULL, mark, drmtap_cursor_hotspot_valid_impl(cursor, valid), "drmtap_cursor_hotspot_valid");
+    return drmtap_error_ensure(NULL, mark,
+                               drmtap_cursor_hotspot_valid_impl(cursor, valid), "drmtap_cursor_hotspot_valid");
 }
 static int drmtap_cursor_hotspot_valid_impl(const drmtap_cursor_info *cursor, int *valid) {
     if (!cursor || !valid) {

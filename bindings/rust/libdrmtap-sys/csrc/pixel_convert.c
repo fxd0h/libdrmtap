@@ -251,7 +251,10 @@ int drmtap_deswizzle(const void *src, void *dst,
                      uint32_t src_stride, uint32_t dst_stride,
                      uint64_t modifier, size_t src_size) {
     unsigned mark = drmtap_error_mark(NULL);
-    return drmtap_error_ensure(NULL, mark, drmtap_deswizzle_impl(src, dst, width, height, src_stride, dst_stride, modifier, src_size), "drmtap_deswizzle");
+    return drmtap_error_ensure(NULL, mark,
+                               drmtap_deswizzle_impl(src, dst, width, height, src_stride,
+                                                     dst_stride, modifier, src_size),
+                               "drmtap_deswizzle");
 }
 static int drmtap_deswizzle_impl(const void *src, void *dst,
                      uint32_t width, uint32_t height,
@@ -521,7 +524,10 @@ int drmtap_tonemap_hdr10(const void *src, void *dst,
                          uint32_t src_stride, uint32_t dst_stride,
                          uint32_t src_format, uint32_t max_nits) {
     unsigned mark = drmtap_error_mark(NULL);
-    return drmtap_error_ensure(NULL, mark, drmtap_tonemap_hdr10_impl(src, dst, width, height, src_stride, dst_stride, src_format, max_nits), "drmtap_tonemap_hdr10");
+    return drmtap_error_ensure(NULL, mark,
+                               drmtap_tonemap_hdr10_impl(src, dst, width, height, src_stride,
+                                                         dst_stride, src_format, max_nits),
+                               "drmtap_tonemap_hdr10");
 }
 static int drmtap_tonemap_hdr10_impl(const void *src, void *dst,
                          uint32_t width, uint32_t height,
@@ -711,7 +717,10 @@ int drmtap_convert_format(const void *src, void *dst,
                           uint32_t src_stride, uint32_t dst_stride,
                           uint32_t src_format, uint32_t dst_format) {
     unsigned mark = drmtap_error_mark(NULL);
-    return drmtap_error_ensure(NULL, mark, drmtap_convert_format_impl(src, dst, width, height, src_stride, dst_stride, src_format, dst_format), "drmtap_convert_format");
+    return drmtap_error_ensure(NULL, mark,
+                               drmtap_convert_format_impl(src, dst, width, height, src_stride,
+                                                          dst_stride, src_format, dst_format),
+                               "drmtap_convert_format");
 }
 static int drmtap_convert_format_impl(const void *src, void *dst,
                           uint32_t width, uint32_t height,
@@ -795,7 +804,10 @@ int drmtap_diff_frames(const void *frame_a, const void *frame_b,
                        drmtap_rect *rects_out, int max_rects,
                        int tile_size) {
     unsigned mark = drmtap_error_mark(NULL);
-    return drmtap_error_ensure(NULL, mark, drmtap_diff_frames_impl(frame_a, frame_b, width, height, stride, rects_out, max_rects, tile_size), "drmtap_diff_frames");
+    return drmtap_error_ensure(NULL, mark,
+                               drmtap_diff_frames_impl(frame_a, frame_b, width, height, stride,
+                                                       rects_out, max_rects, tile_size),
+                               "drmtap_diff_frames");
 }
 static int drmtap_diff_frames_impl(const void *frame_a, const void *frame_b,
                        uint32_t width, uint32_t height, uint32_t stride,
@@ -852,7 +864,8 @@ static int drmtap_diff_frames_impl(const void *frame_a, const void *frame_b,
  * -Degl=disabled build, a host without libEGL, or a setuid process that does not
  * load GL). Only the layers a CPU can read as they are: one linear 8-bit RGB
  * plane, no rotation. Tiled or compressed layers need the GPU; the callers fall
- * back to the primary plane alone for those and say so. Nearest-neighbour when
+ * back to one plane alone for those (the primary if it covers the CRTC, else the
+ * topmost plane that does) and say so. Nearest-neighbour when
  * a plane scales: the point is a correct picture of what is on screen, not a
  * filtered one, and a scaling plane is rare outside video overlays.
  */

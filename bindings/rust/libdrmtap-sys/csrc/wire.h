@@ -211,7 +211,10 @@ static inline int wire_recv_fd(int sock, void *meta_buf, size_t meta_len, int *o
     msg.msg_control = cmsg_buf.buf;
     msg.msg_controllen = sizeof(cmsg_buf.buf);
 
-    ssize_t n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+    ssize_t n;
+    do {
+        n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+    } while (n < 0 && errno == EINTR);
     if (n <= 0) {
         return -1;
     }
@@ -335,7 +338,10 @@ static inline int wire_recv_fds(int sock, void *meta_buf, size_t meta_len,
     msg.msg_control = cmsg_buf.buf;
     msg.msg_controllen = sizeof(cmsg_buf.buf);
 
-    ssize_t r = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+    ssize_t r;
+    do {
+        r = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+    } while (r < 0 && errno == EINTR);
     if (r <= 0) {
         return -1;
     }

@@ -236,7 +236,7 @@ struct drmtap_ctx {
     /* Lit non-cursor planes of the CRTC at the last grab (diagnostics). */
     uint32_t last_layer_count;
     /* Said once per context, not per frame: more lit planes than a frame carries,
-     * and a composed frame that had to fall back to the primary plane alone. */
+     * and a composed frame that had to fall back to one plane alone. */
     int      logged_layer_overflow;
     int      logged_layer_fallback;
     /* The CMD_GRAB_LAYERS latches, with the same meaning as the cursor2 ones above:
