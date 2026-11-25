@@ -1049,6 +1049,34 @@ static uint32_t layer_plane_rows(uint32_t fourcc, uint32_t p, uint32_t height) {
     }
 }
 
+/* The narrowest row of plane p >= 1 of a known YUV layout `width` pixels wide, in
+ * bytes; 1 for any other plane (a compression or clear-colour aux plane, whose
+ * width is format-specific): a used plane has at least one byte per row. */
+static uint32_t layer_plane_min_pitch(uint32_t fourcc, uint32_t p, uint32_t width) {
+    uint64_t half = ((uint64_t)width + 1) / 2;
+    uint64_t v = 1;
+    switch (fourcc) {
+    case DRM_FORMAT_NV12: case DRM_FORMAT_NV21: case DRM_FORMAT_NV16: case DRM_FORMAT_NV61:
+        v = p == 1 ? half * 2 : 1;
+        break;
+    case DRM_FORMAT_NV24: case DRM_FORMAT_NV42:
+        v = p == 1 ? (uint64_t)width * 2 : 1;
+        break;
+    case DRM_FORMAT_P010: case DRM_FORMAT_P012: case DRM_FORMAT_P016:
+        v = p == 1 ? half * 4 : 1;
+        break;
+    case DRM_FORMAT_YUV420: case DRM_FORMAT_YVU420: case DRM_FORMAT_YUV422: case DRM_FORMAT_YVU422:
+        v = (p == 1 || p == 2) ? half : 1;
+        break;
+    case DRM_FORMAT_YUV444: case DRM_FORMAT_YVU444:
+        v = (p == 1 || p == 2) ? width : 1;
+        break;
+    default:
+        break;
+    }
+    return v > 0xffffffffu ? 0xffffffffu : (uint32_t)v;
+}
+
 /* The fds of a set that crossed a process boundary (a packet, or the helper's
  * reply). Each must be a genuine DMA-BUF -- immutable in size, so the bound cannot
  * be raced by a peer that shrinks it -- and large enough for every plane that
@@ -1086,11 +1114,17 @@ static int validate_layer_fds(drmtap_ctx *ctx, const drmtap_layer_set *s) {
         const drmtap_layer *l = &s->layers[i];
         if ((uint64_t)l->fb_width * layer_min_bpp(l->format) > l->pitches[0]) {
             drmtap_set_error(ctx, "layers: layer %u stride %u too small for width %u "
-                             "(fourcc %.4s)", i, l->pitches[0], l->fb_width,
-                             (const char *)&l->format);
+                             "(fourcc %s)", i, l->pitches[0], l->fb_width,
+                             drmtap_fourcc_str(l->format, (char[11]){0}));
             return -EINVAL;
         }
         for (uint32_t p = 0; p < l->num_planes && p < 4; p++) {
+            if (p > 0 && l->pitches[p] < layer_plane_min_pitch(l->format, p, l->fb_width)) {
+                drmtap_set_error(ctx, "layers: layer %u plane %u stride %u too small for "
+                                 "width %u (fourcc %s)", i, p, l->pitches[p], l->fb_width,
+                                 drmtap_fourcc_str(l->format, (char[11]){0}));
+                return -EINVAL;
+            }
             uint32_t rows = (p == 0) ? l->fb_height
                                      : layer_plane_rows(l->format, p, l->fb_height);
             if (rows == 0) {
@@ -1114,9 +1148,9 @@ static int compose_layers_cpu(drmtap_ctx *ctx, const drmtap_layer_set *s, void *
     for (uint32_t i = 0; i < s->count; i++) {
         const drmtap_layer *l = &s->layers[i];
         if (!drmtap_compose_cpu_supported(l, invalid_is_linear)) {
-            drmtap_set_error(ctx, "layer %u (fourcc %.4s, modifier 0x%llx, rotation 0x%x) "
+            drmtap_set_error(ctx, "layer %u (fourcc %s, modifier 0x%llx, rotation 0x%x) "
                              "needs the GPU to compose and the EGL backend is unavailable "
-                             "or failed", i, (const char *)&l->format,
+                             "or failed", i, drmtap_fourcc_str(l->format, (char[11]){0}),
                              (unsigned long long)l->modifier, l->rotation);
             return -ENOTSUP;
         }
@@ -1318,10 +1352,10 @@ static int helper_restage_fb(drmtap_ctx *ctx, const drmModeFB2 *asked, uint32_t 
     }
     if (f->width != asked->width || f->height != asked->height ||
         f->pixel_format != asked->pixel_format || f->modifier != asked->modifier) {
-        drmtap_set_error(ctx, "the helper sent fb %u (%ux%u %.4s), not a flip of the "
-                         "fb %u asked for (%ux%u %.4s): frame skipped", fb_id, f->width,
-                         f->height, (const char *)&f->pixel_format, asked->fb_id,
-                         asked->width, asked->height, (const char *)&asked->pixel_format);
+        drmtap_set_error(ctx, "the helper sent fb %u (%ux%u %s), not a flip of the "
+                         "fb %u asked for (%ux%u %s): frame skipped", fb_id, f->width,
+                         f->height, drmtap_fourcc_str(f->pixel_format, (char[11]){0}), asked->fb_id,
+                         asked->width, asked->height, drmtap_fourcc_str(asked->pixel_format, (char[11]){0}));
         for (int p = 0; p < 4; p++) {
             int seen = 0;
             for (int q = 0; q < p; q++) {
@@ -1565,9 +1599,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
         return ret;
     }
 
-    drmtap_debug_log(ctx, "FB2: %ux%u fmt=%.4s modifier=0x%lx",
+    drmtap_debug_log(ctx, "FB2: %ux%u fmt=%s modifier=0x%lx",
                      fb2->width, fb2->height,
-                     (const char *)&fb2->pixel_format,
+                     drmtap_fourcc_str(fb2->pixel_format, (char[11]){0}),
                      (unsigned long)fb2->modifier);
 
     /* drmModeGetFB2 minted a handle somebody has to close (see drmtap_gem_close).
@@ -1746,8 +1780,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
              * the same check to its IPC descriptor; the two trust boundaries must be
              * bounded alike, and this one was not. */
             drmtap_set_error(ctx, "helper sent stride %u too small for width %u "
-                             "(fourcc %.4s)", frame->stride, frame->width,
-                             (const char *)&frame->format);
+                             "(fourcc %s)", frame->stride, frame->width,
+                             drmtap_fourcc_str(frame->format, (char[11]){0}));
             ret = -EINVAL;
         }
         if (ret != 0) {
@@ -3233,8 +3267,8 @@ static int drmtap_convert_dmabuf_impl(drmtap_ctx *ctx, const drmtap_dmabuf_desc 
      * (and the EGL import) cannot be driven past the buffer. */
     if ((uint64_t)desc->width * format_min_bpp(desc->format) > desc->pitches[0]) {
         drmtap_set_error(ctx, "convert: stride %u too small for width %u "
-                         "(fourcc %.4s)", desc->pitches[0], desc->width,
-                         (const char *)&desc->format);
+                         "(fourcc %s)", desc->pitches[0], desc->width,
+                         drmtap_fourcc_str(desc->format, (char[11]){0}));
         return -EINVAL;
     }
 

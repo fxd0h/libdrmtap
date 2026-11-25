@@ -1089,8 +1089,8 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
         drmtap_debug_log(ctx, "EGL: eglCreateImage FAILED: err=0x%x fourcc=0x%x mod=0x%lx",
                 first_err, fourcc, (unsigned long)modifier);
         drmtap_debug_log(ctx, "egl: eglCreateImage failed: 0x%x "
-                         "(fourcc=%.4s modifier=0x%lx)",
-                         first_err, (const char *)&fourcc,
+                         "(fourcc=%s modifier=0x%lx)",
+                         first_err, drmtap_fourcc_str(fourcc, (char[11]){0}),
                          (unsigned long)modifier);
 
         /* The XRGB8888 retries below reinterpret the buffer as a single 8-bit RGB
@@ -1109,10 +1109,10 @@ static EGLImageKHR egl_import_dmabuf(drmtap_ctx *ctx, int dma_buf_fd,
                          (fourcc == DRM_FORMAT_XRGB8888 ||
                           fourcc == DRM_FORMAT_ARGB8888);
         if (!retry_safe) {
-            drmtap_debug_log(ctx, "egl: no XRGB8888 retry for fourcc %.4s "
+            drmtap_debug_log(ctx, "egl: no XRGB8888 retry for fourcc %s "
                              "planes=%d modifier=0x%lx (would corrupt); failing "
                              "import so the caller falls back",
-                             (const char *)&fourcc, ctx->fb2_num_planes,
+                             drmtap_fourcc_str(fourcc, (char[11]){0}), ctx->fb2_num_planes,
                              (unsigned long)modifier);
             return EGL_NO_IMAGE_KHR;
         }
@@ -1799,9 +1799,9 @@ static EGLImageKHR egl_import_layer(drmtap_ctx *ctx, const drmtap_layer_set *set
                                               EGL_LINUX_DMA_BUF_EXT, NULL, a);
     if (image == EGL_NO_IMAGE_KHR) {
         drmtap_debug_log(ctx, "egl: layer plane=%u fb=%u import failed: 0x%x "
-                         "(fourcc=%.4s modifier=0x%llx planes=%u)",
+                         "(fourcc=%s modifier=0x%llx planes=%u)",
                          l->plane_id, l->fb_id, eglGetError(),
-                         (const char *)&l->format, (unsigned long long)l->modifier, np);
+                         drmtap_fourcc_str(l->format, (char[11]){0}), (unsigned long long)l->modifier, np);
     }
     return image;
 }
@@ -1990,8 +1990,8 @@ static int egl_compose_impl(drmtap_ctx *ctx, const drmtap_layer_set *set,
         }
         if (ret != 0) {
             drmtap_set_error(ctx, "egl: could not import layer %u (plane %u, fb %u, "
-                             "fourcc %.4s, modifier 0x%llx)", i, set->layers[i].plane_id,
-                             set->layers[i].fb_id, (const char *)&set->layers[i].format,
+                             "fourcc %s, modifier 0x%llx)", i, set->layers[i].plane_id,
+                             set->layers[i].fb_id, drmtap_fourcc_str(set->layers[i].format, (char[11]){0}),
                              (unsigned long long)set->layers[i].modifier);
             goto cleanup;
         }

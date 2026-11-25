@@ -158,6 +158,32 @@ static inline int drmtap_layer_covers(const drmtap_layer *l, uint32_t w, uint32_
            (int64_t)l->crtc_y + (int64_t)l->crtc_h >= (int64_t)h;
 }
 
+/* A fourcc for a message: its four characters when all are printable ASCII, else
+ * 0x%08x. The value can come from a hostile packet, so no control byte (ESC, CR)
+ * reaches drmtap_error() or a log. `buf` needs 11 bytes; returns it. */
+static inline const char *drmtap_fourcc_str(uint32_t f, char *buf) {
+    int ok = 1;
+    for (int i = 0; i < 4; i++) {
+        unsigned char c = (unsigned char)(f >> (8 * i));
+        ok = ok && c >= 0x20 && c < 0x7f;
+    }
+    if (ok) {
+        for (int i = 0; i < 4; i++) {
+            buf[i] = (char)(f >> (8 * i));
+        }
+        buf[4] = 0;
+    } else {
+        static const char hx[] = "0123456789abcdef";
+        buf[0] = '0';
+        buf[1] = 'x';
+        for (int i = 0; i < 8; i++) {
+            buf[2 + i] = hx[(f >> (28 - 4 * i)) & 0xf];
+        }
+        buf[10] = 0;
+    }
+    return buf;
+}
+
 /* Index of the PRIMARY plane's layer, or -1. */
 static inline int drmtap_layers_primary(const drmtap_layer_set *s) {
     for (uint32_t i = 0; i < s->count; i++) {
@@ -470,8 +496,9 @@ static inline int drmtap_layer_valid(const drmtap_layer *l, uint32_t nfds) {
             if (l->fd_index[p] >= nfds) {
                 return 0;
             }
-            /* EGL takes offsets and pitches as EGLint. */
-            if (l->offsets[p] > 0x7fffffffu || l->pitches[p] > 0x7fffffffu) {
+            /* EGL takes offsets and pitches as EGLint; a used plane has a row. */
+            if (l->offsets[p] > 0x7fffffffu || l->pitches[p] > 0x7fffffffu ||
+                l->pitches[p] == 0) {
                 return 0;
             }
         } else if (l->fd_index[p] != DRMTAP_PKT_NO_FD || l->offsets[p] || l->pitches[p]) {
