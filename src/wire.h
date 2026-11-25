@@ -424,4 +424,51 @@ _Static_assert(sizeof(helper_cursor_wire_t) == 32,
 _Static_assert(sizeof(helper_cursor_wire2_t) == 36,
                "the CMD_GET_CURSOR2 reply layout changed: add another command");
 
+/* The helper's backoff after a failed CMD_GRAB_LAYERS is per CRTC: a CRTC that
+ * cannot export its layers (a bad id, more lit planes than a packet carries) must
+ * not stop the others, a second monitor included. A fixed table, no allocation; a
+ * new CRTC takes its own slot, else a free or expired one, else the one that ends
+ * first (a peer cycling through bad ids only makes the helper read planes again,
+ * which hands out no fd on failure). */
+#define WIRE_BACKOFF_SLOTS 8
+typedef struct {
+    uint32_t crtc_id;
+    uint64_t until_ms;   /* 0 = free */
+} wire_backoff_t;
+
+static inline int wire_backoff_active(const wire_backoff_t *t, uint32_t crtc_id,
+                                      uint64_t now_ms) {
+    for (int i = 0; i < WIRE_BACKOFF_SLOTS; i++) {
+        if (t[i].until_ms > now_ms && t[i].crtc_id == crtc_id) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline void wire_backoff_set(wire_backoff_t *t, uint32_t crtc_id, uint64_t now_ms,
+                                    uint64_t until_ms) {
+    int pick = -1;
+    for (int i = 0; i < WIRE_BACKOFF_SLOTS && pick < 0; i++) {
+        if (t[i].until_ms && t[i].crtc_id == crtc_id) {
+            pick = i;
+        }
+    }
+    for (int i = 0; i < WIRE_BACKOFF_SLOTS && pick < 0; i++) {
+        if (t[i].until_ms <= now_ms) {
+            pick = i;
+        }
+    }
+    if (pick < 0) {
+        pick = 0;
+        for (int i = 1; i < WIRE_BACKOFF_SLOTS; i++) {
+            if (t[i].until_ms < t[pick].until_ms) {
+                pick = i;
+            }
+        }
+    }
+    t[pick].crtc_id = crtc_id;
+    t[pick].until_ms = until_ms;
+}
+
 #endif /* DRMTAP_WIRE_H */

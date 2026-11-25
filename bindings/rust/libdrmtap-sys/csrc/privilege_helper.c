@@ -466,7 +466,8 @@ int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t 
     if (ctx->helper_no_layers) {
         return -ENOTSUP;
     }
-    if (ctx->helper_layers_backoff_ms && mono_ms() < ctx->helper_layers_backoff_ms) {
+    if (ctx->helper_layers_backoff_ms && ctx->helper_layers_backoff_crtc == ctx->crtc_id &&
+        mono_ms() < ctx->helper_layers_backoff_ms) {
         drmtap_set_error(ctx, "helper could not export the layers of crtc %u a moment "
                          "ago; not asking again yet", ctx->crtc_id);
         return -EIO;
@@ -522,6 +523,7 @@ int drmtap_helper_grab_layers(drmtap_ctx *ctx, uint8_t *buf, size_t cap, size_t 
             close(got[i]);
         }
         ctx->helper_layers_backoff_ms = mono_ms() + HELPER_LAYERS_BACKOFF_MS;
+        ctx->helper_layers_backoff_crtc = ctx->crtc_id;
         drmtap_set_error(ctx, "helper could not export the layers of crtc %u",
                          ctx->crtc_id);
         return -EIO;
