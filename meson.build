@@ -445,6 +445,13 @@ test('enumerate', test_enumerate, suite: 'integration',
     is_parallel: false,
 )
 
+# More non-cursor planes than the plane cache holds: the legacy lookup, not -ENODEV.
+test_planecap = executable('test_planecap',
+    'tests/test_planecap.c',
+    dependencies: [libdrmtap_test_dep, libdrm_dep],
+    include_directories: lib_include,
+)
+test('planecap', test_planecap, suite: 'integration')
 test('capture', test_capture, suite: 'integration',
     env: integration_env,
     is_parallel: false,
