@@ -29,6 +29,7 @@ docs/
 | Coexistence with NoMachine | `05_api_and_architecture.md` → Coexistence section |
 | Cursor capture API | `05_api_and_architecture.md` → Proposed API |
 | HDR10 → SDR tone-mapping (implemented; PQ/BT.2020, AR30/XR30 + 16-bit) | `05_api_and_architecture.md` |
+| Multi-plane scanout (layers, EGL compose, packet API, 0.6.0) | `05_api_and_architecture.md` → Multi-plane scanout |
 | Security model | `../SECURITY.md` (project root) |
 | Gotcha checklist | `06_github_issues_analysis.md` → bottom of file |
 | Integration targets | `07_potential_adopters.md` |

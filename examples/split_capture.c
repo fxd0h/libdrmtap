@@ -21,6 +21,12 @@
  * unlike drmtap_grab(), captures the CCS aux planes + HDR state a compressed
  * scanout needs) -> SCM_RIGHTS -> drmtap_open_render() + drmtap_convert_dmabuf().
  *
+ * drmtap_grab_desc() describes ONE buffer. When a compositor scans a window out of
+ * its own plane (KWin 6.8 on Intel with one output) that buffer is not the whole
+ * screen: grab_desc() then returns -EAGAIN for up to ~2 s and after that the plane
+ * that covers the screen, without the window on top. To capture every plane across
+ * a process boundary use the packet API instead: see packet_capture.c.
+ *
  * Run it on a box with an active scanout. It SKIPs cleanly (exit 0) when no
  * capture device / render node is present.
  *
@@ -29,6 +35,7 @@
  */
 
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -168,6 +175,13 @@ static int run_exporter(int sock, pid_t child) {
     drmtap_dmabuf_desc desc;
     drmtap_frame_info frame;
     int gret = drmtap_grab_desc(ctx, &desc, &frame);
+    for (int tries = 0; gret == -EAGAIN && tries < 300; tries++) {
+        /* -EAGAIN is "no frame this time", not a failure: the scanout is changing,
+         * or the primary plane does not cover the screen (an underlay). A real
+         * consumer keeps showing its last frame; here we wait, up to ~3 s. */
+        usleep(10000);
+        gret = drmtap_grab_desc(ctx, &desc, &frame);
+    }
     if (gret != 0) {
         printf("  SKIP: grab_desc failed (%d): %s\n", gret,
                drmtap_error(ctx) ? drmtap_error(ctx) : "");

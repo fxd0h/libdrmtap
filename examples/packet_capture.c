@@ -263,6 +263,21 @@ int main(int argc, char **argv) {
     }
     printf("packet_capture: privileged packet export + unprivileged compose, %d frame%s\n",
            frames, frames == 1 ? "" : "s");
+
+    /* A consumer that loads libdrmtap at run time (dlopen) cannot trust the version it
+     * was built against. drmtap_abi() says which ABI levels the loaded library serves;
+     * the packet API needs level 2. A library without drmtap_abi() is level 1 (0.5.x):
+     * a dlopen consumer treats a missing symbol the same way and stays on
+     * drmtap_grab_desc() / drmtap_convert_dmabuf(). */
+    uint32_t abi_cur = 0, abi_old = 0;
+    drmtap_abi(&abi_cur, &abi_old);
+    if (abi_old > DRMTAP_ABI_LEVEL || abi_cur < 2) {
+        printf("  SKIP: library ABI levels %u..%u do not serve the packet API "
+               "(built for level %d)\n", abi_old, abi_cur, DRMTAP_ABI_LEVEL);
+        return 0;
+    }
+    printf("  library ABI levels %u..%u, built for %d\n", abi_old, abi_cur, DRMTAP_ABI_LEVEL);
+
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) != 0) {
         perror("socketpair");

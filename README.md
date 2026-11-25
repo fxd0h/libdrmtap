@@ -261,6 +261,17 @@ sudo ./build/screenshot > screenshot.ppm
 ./build/screenshot > screenshot.ppm
 ```
 
+### Examples
+All of them are built with the library (`build/<name>`):
+
+| Example | What it shows |
+|---|---|
+| [`screenshot.c`](examples/screenshot.c) | One frame to a PPM file with `drmtap_grab_mapped()`. Several planes are composed for you. |
+| [`stream.c`](examples/stream.c) | Continuous capture at a target frame rate. |
+| [`split_capture.c`](examples/split_capture.c) | The privilege split with one buffer: `drmtap_grab_desc()` in a privileged process, the DMA-BUF fd over a unix socket, `drmtap_convert_dmabuf()` in an unprivileged one. |
+| [`packet_capture.c`](examples/packet_capture.c) | The same split for a screen of several planes (0.6.0): `drmtap_grab_packet()` / `drmtap_convert_packet()`, the consumer only forwards bytes and fds. Starts with the `drmtap_abi()` check. |
+| [`vnc_server.c`](examples/vnc_server.c) | A VNC server with mouse and keyboard (needs libvncserver). |
+
 ### VNC server demo (full remote desktop)
 
 The included VNC server example captures the screen and serves it over VNC
@@ -413,7 +424,8 @@ Every existing project is either a complete application, a plugin, or PipeWire-b
 │  │ enumerate  │  │  grab   │  │ pixel_convert│  │
 │  │ Planes     │  │ GetFB2  │  │ Deswizzle    │  │
 │  │ CRTCs      │  │ Prime   │  │ Format cvt   │  │
-│  │ Connectors │  │ DMA-BUF │  │ Diff frames  │  │
+│  │ Connectors │  │ Layers  │  │ Compose (EGL)│  │
+│  │            │  │ Packet  │  │ Diff frames  │  │
 │  └────────────┘  └─────────┘  └──────────────┘  │
 │                                                 │
 │  ┌────────────┐  ┌────────────────────────────┐ │
