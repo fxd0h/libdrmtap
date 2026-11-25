@@ -143,7 +143,13 @@ int drmtap_cursor_needs_helper(int fb2_ok, int err, int had_handle) {
     return had_handle == 0;
 }
 
+static int drmtap_get_cursor_impl(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
+    unsigned mark = drmtap_error_mark(ctx);
+    return drmtap_error_ensure(ctx, mark, drmtap_get_cursor_impl(ctx, cursor), "drmtap_get_cursor");
+}
+static int drmtap_get_cursor_impl(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     if (!ctx || !cursor) {
         return -EINVAL;
     }
@@ -363,7 +369,13 @@ void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     cursor->_priv = NULL;
 }
 
+static int drmtap_cursor_hotspot_valid_impl(const drmtap_cursor_info *cursor, int *valid);
+/* Public entry: see drmtap_error_ensure (every error return leaves a message). */
 int drmtap_cursor_hotspot_valid(const drmtap_cursor_info *cursor, int *valid) {
+    unsigned mark = drmtap_error_mark(NULL);
+    return drmtap_error_ensure(NULL, mark, drmtap_cursor_hotspot_valid_impl(cursor, valid), "drmtap_cursor_hotspot_valid");
+}
+static int drmtap_cursor_hotspot_valid_impl(const drmtap_cursor_info *cursor, int *valid) {
     if (!cursor || !valid) {
         return -EINVAL;
     }

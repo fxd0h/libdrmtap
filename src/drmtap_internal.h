@@ -77,6 +77,7 @@ struct drmtap_ctx {
 
     /* Error handling */
     char error_msg[512];
+    unsigned error_seq;     /* bumped by every drmtap_set_error on this ctx */
 
     /* Debug */
     int debug;
@@ -272,6 +273,12 @@ struct drmtap_ctx {
 
 // Set error message on context (or global static if ctx is NULL)
 void drmtap_set_error(drmtap_ctx *ctx, const char *fmt, ...);
+/* Every error return of the public API leaves a message (drmtap_error). The
+ * public entry points take a mark on entry and, on a negative return that set
+ * no message of its own during the call, write "<function>: <strerror>".
+ * ctx NULL = the calling thread's static message. */
+unsigned drmtap_error_mark(const drmtap_ctx *ctx);
+int drmtap_error_ensure(drmtap_ctx *ctx, unsigned mark, int ret, const char *fn);
 
 /* Debug log to stderr, only when ctx->debug is set. Takes a CONST ctx so a
  * read-only helper can still report -- gpu_egl.c used to pass NULL from twenty
