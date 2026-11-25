@@ -1014,6 +1014,8 @@ static uint32_t layer_min_bpp(uint32_t fourcc) {
     case DRM_FORMAT_YUV420: case DRM_FORMAT_YVU420: case DRM_FORMAT_YUV422:
     case DRM_FORMAT_YVU422: case DRM_FORMAT_YUV444: case DRM_FORMAT_YVU444:
         return 1;
+    case DRM_FORMAT_RGB888: case DRM_FORMAT_BGR888:
+        return 3;
     case DRM_FORMAT_P010: case DRM_FORMAT_P012: case DRM_FORMAT_P016:
     case DRM_FORMAT_YUYV: case DRM_FORMAT_YVYU: case DRM_FORMAT_UYVY:
     case DRM_FORMAT_VYUY: case DRM_FORMAT_RGB565: case DRM_FORMAT_BGR565:

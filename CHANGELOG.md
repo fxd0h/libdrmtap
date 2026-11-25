@@ -102,7 +102,8 @@ The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchang
 
 ### Fixed before release (review of aaffcb3)
 - A one-layer packet of NV12 (or another YUV or 16-bit format) with all its planes in one fd,
-  the usual layout, failed in `drmtap_convert_packet()` with `-EINVAL`. It now converts.
+  the usual layout, failed in `drmtap_convert_packet()` with `-EINVAL`. It now converts through the EGL
+  composer (`-ENOTSUP` without EGL).
 - `drmtap_grab_mapped_fast()` could keep failing with `-EIO` after it switched from a plane
   that is not CPU-mappable to one that is.
 - A signal during a receive from the helper (`EINTR`) or during a dma-buf sync no longer fails

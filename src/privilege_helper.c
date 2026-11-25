@@ -422,8 +422,9 @@ int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
             char drn[4096];
             while (rem > 0) {
                 size_t c = rem < sizeof(drn) ? rem : sizeof(drn);
-                if (recv(ctx->helper_fd, drn, c, 0) <= 0) break;
-                rem -= c;
+                ssize_t got = recv(ctx->helper_fd, drn, c, 0);
+                if (got <= 0) break;
+                rem -= (size_t)got;
             }
             cursor->visible = 0;
             return 0;
