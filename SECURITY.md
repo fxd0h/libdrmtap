@@ -238,6 +238,19 @@ Do not read the above as more locked down than it is:
   but the fd argument itself is not filtered, and the other allowed syscalls have
   no per-argument narrowing at all. It otherwise blocks whole syscall classes
   (including `open`/`openat` entirely).
+- **Within the DRM type, every command is allowed, including the ones that
+  change display state** (`SETCRTC`, `SETPLANE`, atomic commit, cursor, property
+  writes, `SET_MASTER`, leases). The helper never issues them, but the filter does
+  not forbid them. This is deliberate: DRM drivers add their own read ioctls
+  (virtio-gpu transfers, dumb-buffer maps, and so on), and an allow-list of
+  individual commands would kill the helper on a driver or libdrm version we did not
+  test. We chose to keep capture working everywhere over a tighter filter. What
+  limits the impact: those commands need DRM master, and while a compositor is
+  running it holds master, so the kernel rejects them even from a compromised
+  helper. On a host with no compositor on that GPU (bare console), a memory bug in
+  the helper could reach a modeset. A possible future hardening is a short
+  deny-list of the core state-changing commands (stable numbers, driver
+  independent) that keeps `DROP_MASTER`, which the helper uses; it is not in 0.6.0.
 - **A world-executable setcap helper on a multi-user host is a real
   consideration.** Anyone who can execute the binary gets a process holding
   `CAP_SYS_ADMIN` (confined by seccomp, and the `SO_PEERCRED` check stops them
