@@ -905,6 +905,27 @@ static void test_convert_packet(void) {
             n.fds[1] = uv_big;
             check(convert(ctx, &n, &f, NULL, 0) != -EINVAL,
                   "and accepted when its fd is big enough");
+            n.layers[0].pitches[1] = 0;
+            check(convert(ctx, &n, &f, NULL, 0) == -EINVAL, "NV12 chroma stride 0 is refused");
+            n.layers[0].pitches[1] = 1;
+            check(convert(ctx, &n, &f, NULL, 0) == -EINVAL,
+                  "NV12 chroma stride narrower than the row (1 < 64) is refused");
+            n.layers[0].pitches[1] = 64;
+            check(convert(ctx, &n, &f, NULL, 0) != -EINVAL, "NV12 chroma stride 64 is accepted");
+            /* a hostile fourcc never puts control bytes into the message */
+            n.layers[0].format = 0x0d1b4141u;   /* 'A' 'A' ESC CR */
+            n.layers[0].num_planes = 1;
+            n.layers[0].fd_index[1] = DRMTAP_PKT_NO_FD;
+            n.layers[0].pitches[1] = 0;
+            n.layers[0].pitches[0] = 8;          /* < 64 * 4: refused, with the fourcc */
+            n.nfds = 1;
+            int rc = convert(ctx, &n, &f, NULL, 0);
+            const char *e = drmtap_error(ctx);
+            int clean = e != NULL && strstr(e, "0x0d1b4141") != NULL;
+            for (const char *c = e; c && *c; c++) {
+                clean = clean && (unsigned char)*c >= 0x20 && (unsigned char)*c < 0x7f;
+            }
+            check(rc == -EINVAL && clean, "a hostile fourcc is printed as hex, no control bytes");
         }
         if (y >= 0) close(y);
         if (uv_small >= 0) close(uv_small);
