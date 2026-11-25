@@ -246,9 +246,11 @@ Do not read the above as more locked down than it is:
   individual commands would kill the helper on a driver or libdrm version we did not
   test. We chose to keep capture working everywhere over a tighter filter. What
   limits the impact: those commands need DRM master, and while a compositor is
-  running it holds master, so the kernel rejects them even from a compromised
-  helper. On a host with no compositor on that GPU (bare console), a memory bug in
-  the helper could reach a modeset. A possible future hardening is a short
+  active it holds master, so the kernel rejects them even from a compromised
+  helper. There are windows with no master: a switch to a text console, a
+  compositor restart, or a host with no compositor on that GPU. In those windows a
+  helper compromised through a memory bug could take master (it holds
+  CAP_SYS_ADMIN) and reach a modeset. A possible future hardening is a short
   deny-list of the core state-changing commands (stable numbers, driver
   independent) that keeps `DROP_MASTER`, which the helper uses; it is not in 0.6.0.
 - **A world-executable setcap helper on a multi-user host is a real

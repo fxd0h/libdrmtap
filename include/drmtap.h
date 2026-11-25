@@ -283,9 +283,14 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * drmtap_grab_packet()) the frame is composed the way the display shows it: the
  * CRTC size, every plane at its place, bottom to top, with its blend mode and
  * alpha, XRGB8888 in context-owned memory. Through drmtap-helper this needs a
- * 0.6.0 helper; an older one gives the primary plane only. Composition needs the
- * EGL backend, except for linear 8-bit RGB planes the CPU can compose; otherwise
- * the frame is the primary plane alone, said once in the debug log.
+ * 0.6.0 helper. Composition needs the EGL backend, except for linear 8-bit RGB
+ * planes the CPU can compose. When it cannot compose (no EGL, an older helper,
+ * more than four lit planes) the frame is ONE plane that covers the whole CRTC:
+ * the primary plane when it does, else the topmost plane that does (the desktop
+ * of an underlay, with a hole where the window is); if no plane covers the CRTC
+ * the call fails with a message instead of returning a window-sized frame.
+ * Through a helper older than 0.6.0 an underlay gives -EAGAIN while it lasts.
+ * The debug log says which fallback ran, once per context.
  * A composed frame's fb_id is the PRIMARY plane's: it names no buffer holding
  * these pixels and does not change when only a window on another plane does, so
  * it is not a content key (compare pixels, or use DRMTAP_SKIP_UNCHANGED).
@@ -683,10 +688,12 @@ typedef struct {
  * of one layer, which converts exactly like drmtap_grab_desc() +
  * drmtap_convert_dmabuf().
  *
- * More than four lit planes: the packet carries the primary plane alone (the
- * debug log says so once per context). Without CAP_SYS_ADMIN the planes come from
- * drmtap-helper; a helper older than 0.6.0 can only give the primary plane, and the
- * packet then holds that one, like drmtap_grab_desc() (including its -EAGAIN).
+ * More than four lit planes: the packet carries one plane that covers the CRTC
+ * (the primary plane when it does, else the topmost covering plane), or the call
+ * fails with -E2BIG when none covers it (the debug log says so once per context).
+ * Without CAP_SYS_ADMIN the planes come from drmtap-helper; a helper older than
+ * 0.6.0 cannot export layers, and the packet then follows drmtap_grab_desc()
+ * (covering plane, or -EAGAIN while an underlay lasts).
  *
  * The packet owns its fds: call drmtap_packet_release() once they are sent (also
  * after a failed send). No GPU library is loaded by this call.
@@ -695,6 +702,7 @@ typedef struct {
  * @param pkt Output, caller-owned
  * @return 0 on success, negative errno on error (pkt then owns no fd)
  * @retval -ENODEV No plane is scanning out on the CRTC
+ * @retval -E2BIG More than four lit planes and none of them covers the CRTC
  * @retval -ENOTSUP Render-only context
  */
 int drmtap_grab_packet(drmtap_ctx *ctx, drmtap_packet *pkt);
@@ -740,8 +748,10 @@ void drmtap_packet_release(drmtap_packet *pkt);
  *
  * Composition needs the EGL backend. Without it (a -Degl=disabled build, no
  * libEGL, a setuid or file-capability process) the CPU composes layers that are
- * linear 8-bit RGB with no rotation; a packet with any other layer converts its
- * primary plane alone, and the debug log says so once per context.
+ * linear 8-bit RGB with no rotation; a packet with any other layer converts the
+ * one plane that covers the CRTC (the primary plane when it does, else the topmost
+ * covering plane), or fails with a message when none covers it; the debug log says
+ * which, once per context.
  *
  * @param ctx   Context from drmtap_open_render() (or any context with EGL)
  * @param bytes Packet bytes as received
