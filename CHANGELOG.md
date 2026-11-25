@@ -40,7 +40,7 @@ gains one documented return value (below).
 `drmtap_grab_packet()` on the exporter fills a `drmtap_packet` (opaque versioned bytes plus
 up to 16 DMA-BUF fds, a frozen struct); the caller moves bytes and fds to the converter
 without looking inside, and `drmtap_convert_packet()` composes them there.
-`drmtap_packet_release()` closes the exporter's fds. The converter treats the packet as
+`drmtap_packet_release()` closes the fds of the exporter. The converter treats the packet as
 hostile: every length, count, index, rectangle and enum is checked, and every fd must be a
 DMA-BUF large enough for the planes that use it (a chroma plane of a known YUV layout by
 its whole extent, against its own fd), before anything is imported or mapped. A
@@ -57,11 +57,11 @@ one-plane packet converts exactly like `drmtap_grab_desc()` + `drmtap_convert_dm
   0.5 calls changed behaviour only inside what 0.5 documented, which is why oldest stays 1:
   `drmtap_grab_desc()` can return -EAGAIN and then the covering plane (underlay, below),
   `drmtap_grab()` returns composed pixels with no fd on a frame of several planes, and a
-  composed frame's `fb_id` is not a content key.
+  `fb_id` of a composed frame is not a content key.
 - The values are constants of the loaded library (no state, no environment). They are a
   compatibility hint, not a trust check: load the library from a trusted path.
 - `libdrmtap_sys::DRMTAP_ABI_LEVEL`, `libdrmtap_sys::drmtap_abi` and `libdrmtap::abi()`.
-- `tools/check-version.sh` fails when the header level, the library's own constant, the
+- `tools/check-version.sh` fails when the header level, the constant inside the library, the
   crate copy or the Rust constant disagree; the `abi` unit test checks the exported call
   through the shared library, and `abi_symbols` checks that the `.so` exports exactly the
   `libdrmtap.map` list, each declared in the header.
@@ -74,8 +74,8 @@ it returns `-EAGAIN` and no frame for the first 2 seconds of a continuous underl
 of a frame of the wrong size: keep the last frame. KWin 6.8 kept its underlays for 1.1 to
 1.4 s here. After 2 seconds, so that a consumer that gives up after a few seconds of
 `-EAGAIN` (rustdesk does at about 5) keeps its stream, it returns the topmost lit plane that
-covers the whole CRTC, the desktop: screen-sized, with the window below it showing as that
-plane's transparent hole, until the underlay ends. With no such plane, `-EAGAIN` goes on.
+covers the whole CRTC, the desktop: screen-sized, with the window below it showing through the
+transparent hole of that plane, until the underlay ends. With no such plane, `-EAGAIN` goes on.
 The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchanged.
 
 ### Fixed before release (review of 3061a28)
@@ -83,7 +83,7 @@ The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchang
   `drmtap_grab_mapped_fast()`, `drmtap_grab_packet()` with more than four lit planes) takes the
   `grab_desc` rule: the primary when it covers the screen, else the topmost plane that covers
   it, else no frame. It used to take the primary, which in an underlay is the window alone.
-- `drmtap_plane_rotation()` on the converting context answers the plane's rotation after any
+- `drmtap_plane_rotation()` on the converting context answers the rotation of the plane after any
   one-layer convert (it answered `-ENOTSUP` after a one-layer packet), and
   `drmtap_convert_dmabuf()` clears the composed/packet answer. A one-layer packet whose planes
   are in separate fds converts as its buffer (size, unrotated), not at the CRTC size rotated.
@@ -101,7 +101,7 @@ The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchang
 
 ### Fixed: `drmtap_grab_desc()` through the helper after a long underlay
 - After 2 s of underlay `drmtap_grab_desc()` returns the covering plane. Through the
-  unprivileged helper it took that plane's layout but the helper's CMD_GRAB buffer, which
+  unprivileged helper it took the layout of that plane but the CMD_GRAB buffer of the helper, which
   is the primary plane (the window), and every convert failed with "descriptor exceeds
   dma-buf size". The covering plane now comes from CMD_GRAB_LAYERS with its own buffer and
   layout; if the helper cannot give it, the answer stays -EAGAIN. A descriptor never pairs
@@ -126,9 +126,9 @@ The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchang
   every plane was drawn with its own rotation, so the frame is already in screen
   orientation and the consumer turns it by the output transform. When
   `drmtap_convert_packet()` cannot compose a packet and converts its primary plane alone,
-  it answers that plane's rotation instead (that buffer is not turned), so a consumer asks
+  it answers the rotation of that plane instead (that buffer is not turned), so a consumer asks
   the converting context after each convert, not the exporter.
-- A composed frame's `fb_id` is the primary plane's. It does not change when only a window
+- The `fb_id` of a composed frame is that of the primary plane. It does not change when only a window
   on another plane does, so it is not a content key.
 
 ### Helper
