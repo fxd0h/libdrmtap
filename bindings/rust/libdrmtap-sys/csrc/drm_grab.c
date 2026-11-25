@@ -3727,7 +3727,10 @@ static int convert_one_layer(drmtap_ctx *ctx, const drmtap_layer_set *s, uint32_
                       l->modifier == DRM_FORMAT_MOD_INVALID);
         w = drmtap_scanout_width_of(l->fb_width, &rect, linear, NULL);
     }
-    int gpu = layer_min_bpp(l->format) < 4;
+    /* Below 4 bytes per pixel, or YUV at 4 (AYUV, XYUV8888): the descriptor path
+     * carries no YCbCr encoding or range, the composer does. */
+    int gpu = layer_min_bpp(l->format) < 4 || l->format == DRM_FORMAT_AYUV ||
+              l->format == DRM_FORMAT_XYUV8888;
     for (uint32_t p = 1; !gpu && p < l->num_planes; p++) {
         gpu = l->fd_index[p] != l->fd_index[0];
     }
