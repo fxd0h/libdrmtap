@@ -287,7 +287,8 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * planes the CPU can compose. When it cannot compose (no EGL, an older helper,
  * more than four lit planes) the frame is ONE plane that covers the whole CRTC:
  * the primary plane when it does, else the topmost plane that does (the desktop
- * of an underlay, with a hole where the window is); if no plane covers the CRTC
+ * of an underlay, with a hole where the window is); if none of the four planes
+ * it keeps (the primary and the first overlays in plane order) covers the CRTC
  * the call fails with a message instead of returning a window-sized frame.
  * Through a helper older than 0.6.0 an underlay gives -EAGAIN while it lasts.
  * The debug log says which fallback ran, once per context.
@@ -477,7 +478,8 @@ typedef struct {
  *     it returns the topmost lit plane that covers the whole CRTC (the desktop):
  *     same size as the screen, with the window under it showing as that plane's
  *     transparent hole, and keeps doing so until the underlay ends. When no lit
- *     plane covers the CRTC it keeps returning -EAGAIN.
+ *     plane covers the CRTC it keeps returning -EAGAIN. Through drmtap-helper,
+ *     an underlay with more than four lit planes gives -EAGAIN while it lasts.
  * Only the packet API (drmtap_grab_packet() + drmtap_convert_packet()) captures
  * those frames whole.
  *
@@ -643,14 +645,15 @@ int drmtap_convert_dmabuf(drmtap_ctx *ctx, const drmtap_dmabuf_desc *desc,
  * The packet carries every lit plane of the CRTC: an opaque, versioned byte string
  * plus an array of DMA-BUF fds. The exporter fills it with drmtap_grab_packet(),
  * the caller moves the bytes and the fds to the converter (one sendmsg with
- * SCM_RIGHTS is enough) without looking inside, and the converter turns them into
+ * SCM_RIGHTS on a SOCK_SEQPACKET socket is enough; on SOCK_STREAM, frame the
+ * bytes yourself) without looking inside, and the converter turns them into
  * one CRTC-sized XRGB8888 frame with drmtap_convert_packet(). A later change to
  * what a frame is made of stays inside libdrmtap, on both ends.
  *
  *   exporter:  drmtap_grab_packet(ctx, &pkt);
  *              sendmsg(bytes = pkt.bytes[0..pkt.len), SCM_RIGHTS = pkt.fds[0..pkt.nfds));
  *              drmtap_packet_release(&pkt);
- *   converter: recvmsg(...);
+ *   converter: recvmsg(...);   (reject MSG_TRUNC / MSG_CTRUNC)
  *              drmtap_convert_packet(rctx, bytes, len, fds, nfds, &frame);
  *              close the received fds.
  *
@@ -683,17 +686,21 @@ typedef struct {
  * Reads the lit non-cursor planes of the context's CRTC (framebuffer, source and
  * destination rectangles, zpos, alpha, blend mode, rotation, YCbCr encoding and
  * range), exports each framebuffer as a read-only DMA-BUF, and reads the planes
- * again: if the compositor flipped in between, it does it once more, so the
- * buffers in a packet belong to one frame. A single-plane scanout makes a packet
- * of one layer, which converts exactly like drmtap_grab_desc() +
+ * again: if the compositor flipped in between, it reads and exports them once
+ * more and uses that second result, so a packet is one frame unless the
+ * compositor flipped again during that second export. A single-plane scanout
+ * makes a packet of one layer, which converts exactly like drmtap_grab_desc() +
  * drmtap_convert_dmabuf().
  *
  * More than four lit planes: the packet carries one plane that covers the CRTC
  * (the primary plane when it does, else the topmost covering plane), or the call
- * fails with -E2BIG when none covers it (the debug log says so once per context).
- * Without CAP_SYS_ADMIN the planes come from drmtap-helper; a helper older than
- * 0.6.0 cannot export layers, and the packet then follows drmtap_grab_desc()
- * (covering plane, or -EAGAIN while an underlay lasts).
+ * fails with -E2BIG when none of the four planes it keeps (the primary and the
+ * first overlays in plane order) covers it (the debug log says so once per
+ * context). Without CAP_SYS_ADMIN the planes come from drmtap-helper; a helper
+ * older than 0.6.0 cannot export layers, and the packet then follows
+ * drmtap_grab_desc() (covering plane, or -EAGAIN while an underlay lasts). The
+ * same holds through a 0.6.0 helper when more than four planes are lit, so an
+ * underlay with more than four lit planes gives -EAGAIN while it lasts.
  *
  * The packet owns its fds: call drmtap_packet_release() once they are sent (also
  * after a failed send). No GPU library is loaded by this call.
@@ -702,7 +709,7 @@ typedef struct {
  * @param pkt Output, caller-owned
  * @return 0 on success, negative errno on error (pkt then owns no fd)
  * @retval -ENODEV No plane is scanning out on the CRTC
- * @retval -E2BIG More than four lit planes and none of them covers the CRTC
+ * @retval -E2BIG More than four lit planes and none of the four kept covers the CRTC
  * @retval -ENOTSUP Render-only context
  */
 int drmtap_grab_packet(drmtap_ctx *ctx, drmtap_packet *pkt);

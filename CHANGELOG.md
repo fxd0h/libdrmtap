@@ -33,7 +33,8 @@ gains one documented return value (below).
   using. Without that, with three windows on planes and more than 12 buffers in rotation,
   about one composed frame in ten came out mostly black.
 - Without EGL, linear 8-bit RGB planes are composed on the CPU. Anything else falls back to
-  the primary plane alone and the debug log says so once.
+  one plane alone (the primary if it covers the screen, else the topmost plane that does;
+  with none, no frame) and the debug log says so once.
 
 ### Added: the packet, split capture for a frame of several planes
 
@@ -99,6 +100,13 @@ The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchang
 - `fuzz/build.sh` builds into `build-fuzz/` by default, not `/tmp`; `packet_capture` retries a
   `-EAGAIN`.
 
+### Fixed before release (review of aaffcb3)
+- A one-layer packet of NV12 (or another YUV or 16-bit format) with all its planes in one fd,
+  the usual layout, failed in `drmtap_convert_packet()` with `-EINVAL`. It now converts.
+- `drmtap_grab_mapped_fast()` could keep failing with `-EIO` after it switched from a plane
+  that is not CPU-mappable to one that is.
+- A signal during a receive from the helper (`EINTR`) or during a dma-buf sync no longer fails
+  the call.
 ### Fixed: `drmtap_grab_desc()` through the helper after a long underlay
 - After 2 s of underlay `drmtap_grab_desc()` returns the covering plane. Through the
   unprivileged helper it took the layout of that plane but the CMD_GRAB buffer of the helper, which
@@ -125,8 +133,8 @@ The packet API captures those frames whole. `drmtap_convert_dmabuf()` is unchang
   through `drmtap_convert_packet()`, and on the exporter after a packet of several layers):
   every plane was drawn with its own rotation, so the frame is already in screen
   orientation and the consumer turns it by the output transform. When
-  `drmtap_convert_packet()` cannot compose a packet and converts its primary plane alone,
-  it answers the rotation of that plane instead (that buffer is not turned), so a consumer asks
+  `drmtap_convert_packet()` cannot compose a packet and converts one plane alone (the same
+  choice), it answers the rotation of that plane instead (that buffer is not turned), so a consumer asks
   the converting context after each convert, not the exporter.
 - The `fb_id` of a composed frame is that of the primary plane. It does not change when only a window
   on another plane does, so it is not a content key.

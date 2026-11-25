@@ -96,12 +96,15 @@ by `src/layers_kms.h` with the property ids looked up once per device). One
 layer takes the single-buffer path above unchanged. Several are composed by
 `drmtap_gpu_egl_compose()`: a CRTC-sized target cleared to black, every layer
 drawn bottom to top with the kernel's blend formula, then the same hash and
-readback as the single-buffer convert. Across a process boundary a layer list
+readback as the single-buffer convert (or on the CPU without EGL, linear RGB
+layers only; when neither can, one covering plane stands in, or there is no
+frame). Across a process boundary a layer list
 travels as a libdrmtap packet: versioned bytes plus the fds
 (`drmtap_grab_packet()` / `drmtap_convert_packet()`), and the helper answers
 `CMD_GRAB_LAYERS` with the same packet. `drmtap_grab_desc()` keeps describing
-one buffer and returns `-EAGAIN` when that buffer is not the screen (an
-underlay).
+one buffer: in an underlay it returns `-EAGAIN` for 2 s, then the plane that
+covers the CRTC (the window shows as its hole), or `-EAGAIN` again if none
+does.
 
 ### Proposed API (headers)
 
