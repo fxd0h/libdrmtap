@@ -47,7 +47,15 @@ int drmtap_version(void);
  *
  * Levels: 1 = the 0.5.x API (a library without drmtap_abi() is level 1).
  * 2 = 0.6.0: adds the packet API (drmtap_grab_packet(), drmtap_packet_release(),
- * drmtap_convert_packet()); every level-1 struct and call is unchanged.
+ * drmtap_convert_packet()). Every level-1 struct and signature is unchanged, and the
+ * level-1 calls changed BEHAVIOUR only inside what 0.5.x already documented (a
+ * negative errno, a frame without a dma-buf fd), so oldest stays 1. The changes a
+ * level-1 caller sees on a screen of several planes: drmtap_grab_desc() can return
+ * -EAGAIN (an underlay, or a buffer that is not the fb it described) and then the
+ * plane that covers the screen instead of the primary; drmtap_grab() returns
+ * composed pixels with dma_buf_fd -1; a composed frame's fb_id is the primary
+ * plane's and no longer tracks the content (not a content key). A caller that
+ * handles errors and a -1 fd as 0.5.x documented keeps working.
  */
 #define DRMTAP_ABI_LEVEL 2
 /**

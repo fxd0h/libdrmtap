@@ -68,9 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Features
 
 - **`DrmTap::open()`** — auto-detect GPU and display
-- **`grab()`** — zero-copy DMA-BUF fd (for hardware encoders). Through the helper, a
-  linear scanout on a GPU other than virtio-gpu comes back as copied pixels instead, with no
-  fd: `data()` has them, raw and unconverted
+- **`grab()`** — usually a zero-copy DMA-BUF fd (for hardware encoders). Not always: on a
+  screen of several planes (0.6.0) the planes are composed and the frame holds pixels with no
+  fd, and through the helper a linear scanout on a GPU other than virtio-gpu comes back as
+  copied pixels, raw and unconverted, with no fd
+- The multi-plane split (`drmtap_grab_packet()` / `drmtap_convert_packet()`, 0.6.0) has no safe
+  API in this crate yet; it is reachable only through the raw `libdrmtap-sys` FFI
 - **`grab_desc()`** (since 0.5.7) — the same zero-copy grab plus a `DmabufDesc`: the plane layout
   (`num_planes`/`offsets`/`pitches`) and HDR state that a `Frame` does not carry. Without them a
   compressed (Intel CCS) or HDR scanout cannot be imported at all, because you hold the fd and no

@@ -70,7 +70,9 @@ println!("{}x{} pixels captured", frame.width(), frame.height());
 > `DmabufDesc` carrying the plane layout and HDR state, and the frame hands out its DMA-BUF as a
 > `BorrowedFd` (or an owned dup via `try_clone_fd()`). The descriptor deliberately carries no file
 > descriptor, so it is safe to serialize and the fd travels out of band, exactly as the C header
-> prescribes. Needs Rust 1.66.
+> prescribes. Needs Rust 1.66. That is the single-buffer split: the multi-plane packet API
+> (`drmtap_grab_packet()` / `drmtap_convert_packet()`) has no safe Rust API yet and is reachable
+> only through the raw `libdrmtap-sys` FFI.
 
 ## Features
 
@@ -302,6 +304,13 @@ API. A consumer that `dlopen()`s the library can therefore accept a newer minor 
 an update, as long as the level range still covers it. The level is the library's own
 claim, not an integrity check: load it from a trusted absolute path.
 
+0.6.0 serves level 1 too (oldest = 1) because no 0.5 struct or signature changed and the
+0.5 calls changed only within what 0.5 documented. On a screen of several planes a level-1
+caller sees: `drmtap_grab_desc()` returning `-EAGAIN` and then the covering plane (an
+underlay), `drmtap_grab()` returning composed pixels with no fd, and a composed frame's
+`fb_id` that is not a content key. A caller that handles errors and a `-1` fd as 0.5
+documented keeps working.
+
 ### Run tests
 
 ```bash
@@ -457,8 +466,11 @@ libdrmtap uses a **dual-path** approach for GPU-tiled framebuffers:
 - **Multi-plane scanout needs the packet API in a split, and EGL to compose.** A compositor can scan a window out of its own plane, above the desktop (an overlay) or below a desktop with a transparent hole (an underlay). KWin 6.8 does this on Intel when one output is enabled ([rustdesk/rustdesk#17187](https://github.com/rustdesk/rustdesk/issues/17187)). Since 0.6.0 `drmtap_grab()`, `drmtap_grab_mapped()` and `drmtap_grab_mapped_fast()` compose such a frame the way the display does, and `drmtap_grab_packet()` + `drmtap_convert_packet()` carry it across a process boundary. What is left:
   - `drmtap_grab_desc()` describes one buffer. When the primary plane covers the screen it returns it as before, without the window on the overlay. On an underlay it returns `-EAGAIN` (no frame, keep the last one) for 2 seconds, then the topmost plane that covers the screen (the desktop, with the window showing as its transparent hole) until the underlay ends. With KWin 6.8.2 the underlay lasted 1.1 to 1.4 s while a window opened.
   - A composed frame is in screen orientation (`drmtap_plane_rotation()` answers `ROTATE_0` for it), and its `fb_id` is the primary plane's, not a content key.
-  - Composing needs the EGL backend. Without it (`-Degl=disabled`, no libEGL, or a setuid or file-capability process) only linear 8-bit RGB planes are composed on the CPU, and anything else is captured from the primary plane alone, said once in the debug log. The same happens through a `drmtap-helper` older than 0.6.0.
-  - Up to four planes per frame; with more, the primary plane alone. HDR (PQ) comes from the connector and applies to every plane, there is no per-plane colour pipeline here. Plane rotation and YUV planes follow the kernel definitions and are unit-tested on the GPU, but no compositor here put one on screen (KWin used `rotate-0` RGB planes).
+  - Composing needs the EGL backend. Without it (`-Degl=disabled`, no libEGL, or a setuid or file-capability process) the CPU composes only linear 8-bit RGB planes with no rotation.
+  - When a frame cannot be composed (no EGL and a plane the CPU cannot read, an import the driver refuses, more than four lit planes, a `drmtap-helper` older than 0.6.0) it is captured from **one plane**, said once in the debug log: the primary plane when it covers the screen (windows on other planes are missing), or, when the primary is a window under the desktop (an underlay), the topmost plane that covers the screen (the desktop, the window shows as its transparent hole). If no plane covers the screen there is no frame: the call returns its error with a message. What each call then returns: `drmtap_grab()`, `drmtap_grab_mapped()` and `drmtap_grab_mapped_fast()` that plane's buffer at its own size; `drmtap_grab_packet()` with more than four lit planes a one-layer packet of it; `drmtap_convert_packet()` that layer at its buffer size, unrotated, with its rotation answered by `drmtap_plane_rotation()` on the converting context. Through the helper the covering plane of an underlay needs `CMD_GRAB_LAYERS`, so with a helper older than 0.6.0, or more than four lit planes, those calls return `-EAGAIN` for as long as the underlay lasts.
+  - Up to four planes per frame. HDR (PQ) comes from the connector and applies to every plane, there is no per-plane colour pipeline here. Plane rotation and YUV planes follow the kernel definitions and are tested on the GPU with synthetic buffers, but no compositor here put one on screen (KWin used `rotate-0` RGB planes, and decoded NV12/P010 video stayed composited).
+  - A split capture of several planes needs 0.6.0 on both ends: a 0.5 converter cannot read a packet (use `drmtap_grab_desc()` there). The rotation of a converted frame is the converting context's answer, after each convert.
+  - Multi-plane capture was measured on Intel (i915) with KWin 6.8.2 only; amdgpu, nvidia, mutter and wlroots overlay use are not measured.
 - **No cursor on drivers without a cursor plane.** libdrmtap reads the cursor from a `DRM_PLANE_TYPE_CURSOR` plane. A driver that registers its CRTCs with `drm_crtc_init()` exposes only a primary plane and sets the cursor through the legacy cursor ioctl, which has no read-back, so there is no cursor to capture. The known case is `radeon`, the driver for older Radeon GPUs (an integrated CAICOS was reported in rustdesk discussion #10016).
   On GNOME the workaround is to make mutter draw the cursor into the frame: add `MUTTER_DEBUG_DISABLE_HW_CURSORS=1` to `/etc/environment` and reboot (restarting gdm alone is not enough, the old environment stays in `systemd --user`). Measured on mutter 46 with `virtio-gpu`: the cursor plane goes unused and the cursor shows up in the captured frame. Not tested on `radeon`.
 
