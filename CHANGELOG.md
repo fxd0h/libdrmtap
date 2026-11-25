@@ -47,6 +47,21 @@ its whole extent, against its own fd), before anything is imported or mapped. A
 one-plane packet converts exactly like `drmtap_grab_desc()` + `drmtap_convert_dmabuf()`.
 `examples/packet_capture.c` runs both sides in two processes over `SOCK_SEQPACKET`.
 
+### Added: an ABI level, separate from the version
+- `drmtap_abi(&current, &oldest)` and `DRMTAP_ABI_LEVEL` in `drmtap.h`. Adding functions or
+  behaviour bumps current; an incompatible change to a caller-visible struct, signature or
+  contract bumps oldest. A consumer built against level X accepts the library when
+  `oldest <= X <= current` and turns features on by level, instead of matching the minor
+  version. A library without the `drmtap_abi` symbol is level 1 (0.5.x). 0.6.0 is
+  current 2 (the packet API), oldest 1: every 0.5 struct and call is unchanged.
+- The values are constants of the loaded library (no state, no environment). They are a
+  compatibility hint, not a trust check: load the library from a trusted path.
+- `libdrmtap_sys::DRMTAP_ABI_LEVEL`, `libdrmtap_sys::drmtap_abi` and `libdrmtap::abi()`.
+- `tools/check-version.sh` fails when the header level, the library's own constant, the
+  crate copy or the Rust constant disagree; the `abi` unit test checks the exported call
+  through the shared library, and `abi_symbols` checks that the `.so` exports exactly the
+  `libdrmtap.map` list, each declared in the header.
+
 ### Changed: `drmtap_grab_desc()` on a multi-plane frame
 
 It still describes one buffer. When the primary plane covers the CRTC it returns it as

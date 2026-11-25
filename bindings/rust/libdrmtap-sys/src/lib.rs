@@ -116,6 +116,9 @@ pub struct drmtap_dmabuf_desc {
     pub hdr_max_nits: u32,
 }
 
+/// ABI level of the bundled C library (`DRMTAP_ABI_LEVEL` in drmtap.h): 1 = the
+/// 0.5.x API, 2 = 0.6.0 (adds the packet API). See `drmtap_abi()`.
+pub const DRMTAP_ABI_LEVEL: u32 = 2;
 /// Largest libdrmtap packet in bytes (multi-plane split capture, 0.6.0).
 pub const DRMTAP_PACKET_MAX_BYTES: usize = 1024;
 /// Most DMA-BUF fds a packet carries.
@@ -136,6 +139,9 @@ pub struct drmtap_packet {
 extern "C" {
     // Version
     pub fn drmtap_version() -> c_int;
+    /// The ABI levels the library serves, oldest..current (0.6.0: 1..2).
+    /// Either pointer may be null.
+    pub fn drmtap_abi(current: *mut u32, oldest: *mut u32);
 
     // Context lifecycle
     pub fn drmtap_open(config: *const drmtap_config) -> *mut drmtap_ctx;
@@ -287,6 +293,13 @@ mod tests {
         assert_eq!(v, expected);
     }
 
+    #[test]
+    fn test_abi_level() {
+        let (mut cur, mut old) = (0u32, 0u32);
+        unsafe { drmtap_abi(&mut cur, &mut old) };
+        assert_eq!(cur, DRMTAP_ABI_LEVEL);
+        assert!(old >= 1 && old <= cur);
+    }
     #[test]
     fn test_config_size() {
         // Verify struct sizes are reasonable

@@ -255,6 +255,18 @@ static void detect_driver(drmtap_ctx *ctx) {
 /* Public API                                                                */
 /* ========================================================================= */
 
+/* The library's ABI range. Kept apart from DRMTAP_ABI_LEVEL in the header on
+ * purpose: test_abi and tools/check-version.sh fail when the two disagree. */
+#define DRMTAP_ABI_CURRENT_LIB 2u
+#define DRMTAP_ABI_OLDEST_LIB  1u
+void drmtap_abi(uint32_t *current, uint32_t *oldest) {
+    if (current) {
+        *current = DRMTAP_ABI_CURRENT_LIB;
+    }
+    if (oldest) {
+        *oldest = DRMTAP_ABI_OLDEST_LIB;
+    }
+}
 int drmtap_version(void) {
     return (DRMTAP_VERSION_MAJOR << 16) |
            (DRMTAP_VERSION_MINOR << 8) |

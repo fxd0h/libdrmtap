@@ -407,6 +407,18 @@ test('hashskip', test_hashskip, suite: 'unit',
 )
 test('connector_names', test_connector_names, suite: 'unit')
 test('refresh', test_refresh, suite: 'unit')
+# Through the SHARED library: the export of drmtap_abi is part of what it tests.
+test_abi = executable('test_abi',
+    'tests/test_abi.c',
+    dependencies: [libdrmtap_dep],
+)
+test('abi', test_abi, suite: 'unit')
+nm_prog = find_program('nm', required: false)
+if nm_prog.found()
+    test('abi_symbols', find_program('tools/check-abi-symbols.sh'),
+        args: [libdrmtap.full_path(), meson.current_source_dir()],
+        depends: libdrmtap, suite: 'unit')
+endif
 # Builds an EGL context when a render node is there: same LSan suppression.
 test('layers', test_layers, suite: 'unit',
     env: ['LSAN_OPTIONS=suppressions=' + meson.project_source_root() / 'tests' / 'lsan.supp'],

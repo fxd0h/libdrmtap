@@ -820,9 +820,23 @@ pub fn version() -> (u8, u8, u8) {
     ((v >> 16) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)
 }
 
+/// The ABI levels the C library serves, as `(current, oldest)`, from `drmtap_abi()`.
+/// Level 1 is the 0.5.x API, level 2 (0.6.0) adds the packet API. A caller built
+/// against level X can use the library when `oldest <= X <= current`.
+pub fn abi() -> (u32, u32) {
+    let (mut cur, mut old) = (0u32, 0u32);
+    unsafe { ffi::drmtap_abi(&mut cur, &mut old) };
+    (cur, old)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn abi_matches_the_header_level() {
+        let (cur, old) = abi();
+        assert_eq!(cur, ffi::DRMTAP_ABI_LEVEL);
+        assert!(old >= 1 && old <= cur);
+    }
 
     // Needs a DRM device the process may capture from, so `--ignored`. On a tiled scanout both
     // frames are converted, and they used to share the context's conversion buffer.

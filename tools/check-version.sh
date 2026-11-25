@@ -26,6 +26,17 @@ check() {  # $1 = description, $2 = actual, $3 = expected
 }
 
 csh="$root/bindings/rust/libdrmtap-sys/csrc/drmtap.h"
+# ABI level (0.6.0): the header's DRMTAP_ABI_LEVEL must be what drmtap_abi()
+# returns as current (src/drmtap.c keeps its own constant on purpose), and the
+# Rust -sys constant must say the same.
+abi=$(grep -E '^#define DRMTAP_ABI_LEVEL ' "$h" | awk '{print $3}')
+echo "canonical ABI level (include/drmtap.h) = $abi"
+check "drmtap_abi() current (src/drmtap.c)" \
+    "$(grep -E '^#define DRMTAP_ABI_CURRENT_LIB ' "$root/src/drmtap.c" | awk '{print $3}' | tr -d u)" "$abi"
+check "csrc/drmtap.h DRMTAP_ABI_LEVEL" \
+    "$(grep -E '^#define DRMTAP_ABI_LEVEL ' "$csh" | awk '{print $3}')" "$abi"
+check "libdrmtap-sys DRMTAP_ABI_LEVEL" \
+    "$(grep -oE '^pub const DRMTAP_ABI_LEVEL: u32 = [0-9]+;' "$root/bindings/rust/libdrmtap-sys/src/lib.rs" | grep -oE '[0-9]+;' | tr -d ';')" "$abi"
 check "csrc/drmtap.h macros" \
     "$(hv MAJOR "$csh").$(hv MINOR "$csh").$(hv PATCH "$csh")" "$ver"
 

@@ -38,6 +38,41 @@ extern "C" {
  * @return (major << 16) | (minor << 8) | patch
  */
 int drmtap_version(void);
+/**
+ * ABI level of this header. The ABI level counts what a caller can rely on,
+ * independently of the release version: adding functions or documented behaviour
+ * bumps the library's CURRENT level; any incompatible change to a caller-visible
+ * struct, function signature or documented contract bumps its OLDEST level (the
+ * oldest level whose callers it still serves unchanged).
+ *
+ * Levels: 1 = the 0.5.x API (a library without drmtap_abi() is level 1).
+ * 2 = 0.6.0: adds the packet API (drmtap_grab_packet(), drmtap_packet_release(),
+ * drmtap_convert_packet()); every level-1 struct and call is unchanged.
+ */
+#define DRMTAP_ABI_LEVEL 2
+/**
+ * @brief The range of ABI levels this library serves, oldest..current.
+ *
+ * A consumer built against level X (DRMTAP_ABI_LEVEL of its header) accepts the
+ * library if and only if oldest <= X <= current, and turns features on by level
+ * (level 2: the packet API). A consumer that dlopen()s the library and finds no
+ * `drmtap_abi` symbol has a level-1 library (0.5.x): current = oldest = 1.
+ * 0.6.0 answers current = 2, oldest = 1.
+ *
+ * The values are compile-time constants of the loaded library: the call keeps no
+ * state, takes no lock, allocates nothing, reads no environment or configuration,
+ * and is safe before any drmtap_open(), without a context, from any thread. Nothing
+ * changes the level it reports.
+ *
+ * The level is a compatibility hint that the loaded library reports about itself.
+ * It is NOT a trust or integrity check: any library can answer any level. A
+ * consumer still loads libdrmtap from a trusted absolute path.
+ *
+ * @param current Set to the newest level served; may be NULL
+ * @param oldest  Set to the oldest level served; may be NULL
+ * Added in 0.6.0 (level 2).
+ */
+void drmtap_abi(uint32_t *current, uint32_t *oldest);
 
 /* ========================================================================= */
 /* Configuration                                                             */
