@@ -1501,9 +1501,16 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
         int pi = drmtap_layers_primary(&ls);
         if (one_buffer) {
             uint32_t cw = 0, ch = 0;
-            int have_size = drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0;
-            int underlay = pi < 0 || !have_size || !drmtap_layer_covers(&ls.layers[pi], cw, ch);
-            if (underlay && have_size) {
+            int sr = drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch);
+            if (sr != 0) {
+                /* Not an underlay: without the mode nothing can be decided, and a
+                 * -EAGAIN here would never end. A modeset in flight answers this. */
+                drmtap_set_error(ctx, "crtc %u blends %d planes and its mode cannot be read "
+                                 "(%s): no frame", ctx->crtc_id, nl, strerror(-sr));
+                return sr < 0 ? sr : -ENODEV;
+            }
+            int underlay = pi < 0 || !drmtap_layer_covers(&ls.layers[pi], cw, ch);
+            if (underlay) {
                 /* the topmost layer that covers the CRTC (the desktop with its hole) */
                 for (int i = (int)ls.count - 1; i >= 0 && cover < 0; i--) {
                     if (drmtap_layer_covers(&ls.layers[i], cw, ch)) {

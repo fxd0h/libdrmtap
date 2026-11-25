@@ -277,9 +277,11 @@ static pthread_mutex_t g_egl_display_lock = PTHREAD_MUTEX_INITIALIZER;
  * the biggest per-frame EGL cost. The cached EGLImage aliases the live
  * scanout memory, so sampling it always reads the current frame content.
  * Geometry is stored to detect a recycled fb_id (same id, new framebuffer)
- * and re-import. An EGLImage keeps its underlying buffer alive, so at most
- * DRMTAP_EGL_IMAGE_SLOTS scanout buffers are pinned per thread — the same
- * order of pinning the fast-grab mmap slots already do.
+ * and re-import. An EGLImage keeps its underlying buffer alive, so up to
+ * DRMTAP_EGL_IMAGE_SLOTS (12) scanout buffers stay pinned per thread until their
+ * slot is reused or the context closes: three times the fast-grab mmap slots
+ * (DRMTAP_FAST_SLOTS, 4), and retired buffers of a compositor that reallocates
+ * are among them.
  *
  * Twelve since 0.6.0: a composed frame imports every layer, and two or three
  * layers each cycling two or three buffers no longer fit in four slots, which

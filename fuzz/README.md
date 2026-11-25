@@ -31,21 +31,21 @@ a FATAL line when it has neither, instead of running at no coverage. On a box
 where the user is not in the `render` group, run it as root or with the groups,
 for example `sudo setpriv --reuid=$(id -u) --regid=$(id -g) --groups=video,render,kvm ...`.
 
-    fuzz/build.sh /tmp/fuzz_packet packet
+    fuzz/build.sh build-fuzz/fuzz_packet packet
     mkdir -p corpus-packet
-    ASAN_OPTIONS=detect_leaks=0 /tmp/fuzz_packet -max_len=2048 -max_total_time=300 corpus-packet
+    ASAN_OPTIONS=detect_leaks=0 build-fuzz/fuzz_packet -max_len=2048 -max_total_time=300 corpus-packet
 
 ## Build and run
 
 Needs clang with libFuzzer (`clang -fsanitize=fuzzer,address`).
 
-    fuzz/build.sh /tmp/fuzz_convert
+    fuzz/build.sh build-fuzz/fuzz_convert
     mkdir -p corpus
-    ASAN_OPTIONS=detect_leaks=0 /tmp/fuzz_convert \
+    ASAN_OPTIONS=detect_leaks=0 build-fuzz/fuzz_convert \
         -max_len=65536 -rss_limit_mb=4096 -max_total_time=300 corpus
 
 A crash writes the reproducing input to `crash-<hash>`; replay it with
-`/tmp/fuzz_convert crash-<hash>`. `detect_leaks=0` suppresses the deliberate
+`build-fuzz/fuzz_convert crash-<hash>`. `detect_leaks=0` suppresses the deliberate
 process-lifetime EGL/Mesa allocation (same rationale as tests/lsan.supp).
 
 The target needs a DRM render node (or card) to open a context; it no-ops when

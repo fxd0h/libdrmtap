@@ -6,7 +6,10 @@ set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 target=${2:-convert}
-out=${1:-/tmp/fuzz_$target}
+# Default output inside the repo (build-fuzz/ is not tracked), never /tmp: a
+# temporary directory is wiped on reboot, with the binary and its crash repros.
+out=${1:-$here/build-fuzz/fuzz_$target}
+mkdir -p "$(dirname -- "$out")"
 
 clang -g -O1 -std=c11 \
     -fsanitize=fuzzer,address \
