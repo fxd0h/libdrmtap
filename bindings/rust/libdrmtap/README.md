@@ -69,8 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - **`DrmTap::open()`** — auto-detect GPU and display
 - **`grab()`** — usually a zero-copy DMA-BUF fd (for hardware encoders). Not always: on a
-  screen of several planes (0.6.0), or of one plane stretched to the screen or smaller than it
-  (0.6.1), the planes are composed to the screen size and the frame holds pixels with no
+  screen of several planes (0.6.0) the planes are composed and the frame holds pixels with no
   fd, and through the helper a linear scanout on a GPU other than virtio-gpu comes back as
   copied pixels, raw and unconverted, with no fd
 - The multi-plane split (`drmtap_grab_packet()` / `drmtap_convert_packet()`, 0.6.0) has no safe

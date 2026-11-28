@@ -12,8 +12,8 @@ A screen of ONE plane that is not the screen as it is came out the size of its b
 
 ### Fixed: one plane stretched to the screen, or smaller than it
 
-- With one lit non-cursor plane, `drmtap_convert_packet()`, `drmtap_grab_mapped()`,
-  `drmtap_grab_mapped_fast()` and `drmtap_grab()` returned the buffer of that plane at its own size,
+- With one lit non-cursor plane, `drmtap_convert_packet()`, `drmtap_grab_mapped()` and
+  `drmtap_grab_mapped_fast()` returned the buffer of that plane at its own size,
   whatever its place on the screen. A 40x40 buffer stretched to a 1920x1080 CRTC gave a 40x40
   frame (rustdesk/rustdesk#17187 shows the same jump, `2560x1600 -> 40x40`, and the consumer
   rebuilt its stream). Measured on i915 with a plane lit that way: 40x40 from all three paths,
@@ -21,8 +21,7 @@ A screen of ONE plane that is not the screen as it is came out the size of its b
 - Such a plane is now composed to the CRTC size like a frame of several planes: black around
   it, scaled from its source rectangle into its destination rectangle, rotated as its plane is.
   The rotation answer for that frame is `ROTATE_0`, on the exporter (after
-  `drmtap_grab_packet()`) and on the converter. `drmtap_grab()` returns pixels for it
-  (`dma_buf_fd = -1`). Measured: 1920x1080 from the packet and mapped paths, with and without
+  `drmtap_grab_packet()`) and on the converter. Measured: 1920x1080 from the packet and mapped paths, with and without
   EGL (the CPU composes a linear RGB plane).
 - A plane that IS the screen (it covers the CRTC and is not scaled) takes exactly the path it
   took before, also when the hardware rotates it: measured on amdgpu at rotate 0, 90, 180 and
@@ -30,11 +29,12 @@ A screen of ONE plane that is not the screen as it is came out the size of its b
 - When the plane cannot be composed (no EGL and a layout the CPU cannot read), the frame is its
   buffer at its own size, as before.
 
-### Unchanged: the descriptor
+### Unchanged: the zero-copy calls
 
-- `drmtap_grab_desc()` carries one buffer and cannot scale or place it: for such a plane the
-  descriptor is still that buffer at its own size. A consumer that needs the screen size uses
-  the packet API.
+- `drmtap_grab()` and `drmtap_grab_desc()` hand out one buffer (an fd) and cannot scale or
+  place it: for such a plane they still return that buffer at its own size, so a zero-copy
+  consumer sees no change. A consumer that needs the screen size uses `drmtap_grab_mapped()`
+  or the packet API.
 
 ## [0.6.0] - 2026-11-25
 

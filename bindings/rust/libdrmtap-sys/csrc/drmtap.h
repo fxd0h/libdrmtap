@@ -253,9 +253,11 @@ typedef struct {
  * there is no single buffer to hand out. This call then composes the planes like
  * drmtap_grab_mapped() does and returns PIXELS: dma_buf_fd = -1, frame->data the
  * CRTC-sized XRGB8888 frame, valid until the next grab or drmtap_close(). A
- * consumer that needs an fd to pass on uses drmtap_grab_packet() instead. Since
- * 0.6.1 the same holds for ONE lit plane stretched to the CRTC, or smaller than it:
- * it is composed to the CRTC size and returned as pixels.
+ * consumer that needs an fd to pass on uses drmtap_grab_packet() instead. ONE lit
+ * plane is always returned as its buffer (an fd), also when it is stretched to the
+ * CRTC or smaller than it: frame->width/height are then the buffer size, not the
+ * CRTC mode (drmtap_grab_mapped() and drmtap_convert_packet() compose such a plane
+ * to the CRTC size since 0.6.1).
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)
