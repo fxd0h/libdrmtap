@@ -1579,6 +1579,22 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
             ctx->sw_override_on = 1;
         }
     } else if (nl == 1) {
+        uint32_t cw = 0, ch = 0;
+        if (!one_buffer &&
+            drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0 &&
+            !drmtap_layer_is_screen(&ls.layers[0], cw, ch)) {
+            /* One plane that is not the screen as it is (stretched, or smaller):
+             * compose it to the CRTC size like several planes, else the frame is the
+             * size of its buffer. When that cannot be done, its buffer as before. */
+            int r = grab_composed(ctx, frame, 1);
+            if (r == 0) {
+                return 0;
+            }
+            if (!layer_fallback_ok(r)) {
+                return r;
+            }
+            log_layer_fallback(ctx, nl, r);
+        }
         plane_id = ls.layers[0].plane_id;
         fb_id = ls.layers[0].fb_id;
     } else if (nl == 0) {
@@ -3812,7 +3828,7 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
     ctx->cur_hdr_eotf = s.hdr_eotf;
     ctx->cur_hdr_max_nits = s.hdr_max_nits;
     ctx->last_frame_composed = 0;
-    if (s.count == 1) {
+    if (s.count == 1 && drmtap_layer_is_screen(&s.layers[0], s.crtc_w, s.crtc_h)) {
         r = convert_one_layer(ctx, &s, 0, frame);
         if (r == 0) {
             ctx->packet_rotation = s.layers[0].rotation;
@@ -3828,7 +3844,8 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
         return r;
     }
     log_layer_fallback(ctx, (int)s.count, r);
-    int si = drmtap_layers_stand_in(&s, s.crtc_w, s.crtc_h);
+    /* One layer that could not be composed to the screen: its buffer, as before. */
+    int si = s.count == 1 ? 0 : drmtap_layers_stand_in(&s, s.crtc_w, s.crtc_h);
     if (si < 0) {
         drmtap_set_error(ctx, "convert_packet: %u layers could not be composed (%s) and no "
                          "single layer covers the CRTC: no frame", s.count, strerror(-r));
