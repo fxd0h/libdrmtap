@@ -158,6 +158,22 @@ static inline int drmtap_layer_covers(const drmtap_layer *l, uint32_t w, uint32_
            (int64_t)l->crtc_y + (int64_t)l->crtc_h >= (int64_t)h;
 }
 
+/* Whether one layer alone IS the w x h screen as its buffer: it covers the CRTC and
+ * is not scaled (its source rectangle has the size of its CRTC rectangle). Only such
+ * a layer can be returned as its buffer; any other one (stretched, or smaller than
+ * the screen) has to be composed to w x h, or the frame comes out the size of the
+ * buffer (a 40x40 plane stretched to the screen). Both orientations of the source
+ * count: a 90/270 plane read from KMS has it transposed, and the one-layer packet
+ * built from a descriptor (packet_from_desc, also in 0.6.0 exporters) gives its CRTC
+ * rectangle the buffer size whatever the rotation. */
+static inline int drmtap_layer_is_screen(const drmtap_layer *l, uint32_t w, uint32_t h) {
+    if (!drmtap_layer_covers(l, w, h)) {
+        return 0;
+    }
+    uint32_t sw = l->src_w >> 16, sh = l->src_h >> 16;
+    return (sw == l->crtc_w && sh == l->crtc_h) || (sh == l->crtc_w && sw == l->crtc_h);
+}
+
 /* A fourcc for a message: its four characters when all are printable ASCII, else
  * 0x%08x. The value can come from a hostile packet, so no control byte (ESC, CR)
  * reaches drmtap_error() or a log. `buf` needs 11 bytes; returns it. */

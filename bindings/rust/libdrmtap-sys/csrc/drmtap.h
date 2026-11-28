@@ -31,7 +31,7 @@ extern "C" {
  * site. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 6
-#define DRMTAP_VERSION_PATCH 0
+#define DRMTAP_VERSION_PATCH 1
 
 /**
  * @brief Get the library version as a packed integer.
@@ -253,7 +253,9 @@ typedef struct {
  * there is no single buffer to hand out. This call then composes the planes like
  * drmtap_grab_mapped() does and returns PIXELS: dma_buf_fd = -1, frame->data the
  * CRTC-sized XRGB8888 frame, valid until the next grab or drmtap_close(). A
- * consumer that needs an fd to pass on uses drmtap_grab_packet() instead.
+ * consumer that needs an fd to pass on uses drmtap_grab_packet() instead. Since
+ * 0.6.1 the same holds for ONE lit plane stretched to the CRTC, or smaller than it:
+ * it is composed to the CRTC size and returned as pixels.
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated)
@@ -291,7 +293,10 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * it keeps (the primary and the first overlays in plane order) covers the CRTC
  * the call fails with a message instead of returning a window-sized frame.
  * Through a helper older than 0.6.0 an underlay gives -EAGAIN while it lasts.
- * The debug log says which fallback ran, once per context.
+ * The debug log says which fallback ran, once per context. One lit plane that is
+ * stretched to the CRTC, or smaller than it, is composed to the CRTC size the same
+ * way (0.6.1); when it cannot be composed the frame is that plane's buffer, at its
+ * own size.
  * A composed frame's fb_id is the PRIMARY plane's: it names no buffer holding
  * these pixels and does not change when only a window on another plane does, so
  * it is not a content key (compare pixels, or use DRMTAP_SKIP_UNCHANGED).
@@ -479,7 +484,10 @@ typedef struct {
  *     same size as the screen, with the window under it showing as that plane's
  *     transparent hole, and keeps doing so until the underlay ends. When no lit
  *     plane covers the CRTC it keeps returning -EAGAIN. Through drmtap-helper,
- *     an underlay with more than four lit planes gives -EAGAIN while it lasts.
+ *     an underlay with more than four lit planes gives -EAGAIN while it lasts;
+ *   - ONE lit plane stretched to the CRTC, or smaller than it: the descriptor is
+ *     that buffer, at its own size (the packet and mapped paths compose it to the
+ *     CRTC size since 0.6.1; one descriptor cannot scale or place).
  * Only the packet API (drmtap_grab_packet() + drmtap_convert_packet()) captures
  * those frames whole.
  *
@@ -689,9 +697,12 @@ typedef struct {
  * again: if the compositor flipped in between, it reads and exports them once
  * more and uses that second result, so a packet is one frame unless the
  * compositor flipped again during that second export. A single-plane scanout
- * makes a packet of one layer. An RGB layer of 32 or 64 bits per pixel converts
+ * makes a packet of one layer. When that layer is the screen as it is (it covers
+ * the CRTC and is not scaled), an RGB layer of 32 or 64 bits per pixel converts
  * exactly like drmtap_grab_desc() + drmtap_convert_dmabuf(); a YUV, 16-bit or
- * 24-bit layer goes through the EGL composer (-ENOTSUP without EGL).
+ * 24-bit layer goes through the EGL composer (-ENOTSUP without EGL). A single
+ * layer stretched to the CRTC, or smaller than it, is composed to the CRTC size
+ * (0.6.1; before, the frame was the size of its buffer).
  *
  * More than four lit planes: the packet carries one plane that covers the CRTC
  * (the primary plane when it does, else the topmost covering plane), or the call
@@ -729,18 +740,21 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * the plane's pixel blend mode and alpha. frame->width/height are the CRTC mode,
  * and the pixels are XRGB8888 at stride width*4 (read frame->format and
  * ->stride anyway, as with drmtap_convert_dmabuf()). A one-layer RGB packet of 32
- * or 64 bits per pixel converts as drmtap_convert_dmabuf() does with the descriptor of
- * that buffer: the buffer at its own size, unrotated. A one-layer YUV, 16-bit or
- * 24-bit packet, or a layer whose planes are in separate buffers, gives the same
- * picture through the GPU, and needs EGL.
+ * or 64 bits per pixel whose layer is the screen as it is (it covers the CRTC and is
+ * not scaled) converts as drmtap_convert_dmabuf() does with the descriptor of that
+ * buffer: the buffer at its own size, unrotated. A one-layer YUV, 16-bit or 24-bit
+ * packet of such a layer, or a layer whose planes are in separate buffers, gives the
+ * same picture through the GPU, and needs EGL. Any other one-layer packet (a plane
+ * stretched to the CRTC, or smaller than it) is composed to the CRTC size like a
+ * packet of several layers (0.6.1; before, the frame was the size of its buffer).
  * frame->data is context-owned, valid until the next convert or drmtap_close();
  * do not call drmtap_frame_release() on it. drmtap_set_output_buffer() and
  * DRMTAP_SKIP_UNCHANGED apply as they do to drmtap_convert_dmabuf().
  * frame->fb_id of a composed frame is the primary plane's and does not track the
  * content (a window on another plane can change while it stays the same): do not
  * use it as a content key. After a composed convert, drmtap_plane_rotation() on
- * this context answers ROTATE_0. After a convert of ONE layer (a one-layer packet,
- * or the one-layer fallback below) it answers the rotation of that plane as the
+ * this context answers ROTATE_0. After a convert of ONE layer as its buffer (a
+ * one-layer packet whose layer is the screen, or the one-layer fallback below) it answers the rotation of that plane as the
  * exporter read it, since that buffer is not turned. The exporter's own answer after
  * drmtap_grab_packet() assumes the packet will be composed, so a consumer that
  * turns frames by the rotation asks the converting context, after each convert.
@@ -759,8 +773,9 @@ void drmtap_packet_release(drmtap_packet *pkt);
  * libEGL, a setuid or file-capability process) the CPU composes layers that are
  * linear 8-bit RGB with no rotation; a packet with any other layer converts the
  * one plane that covers the CRTC (the primary plane when it does, else the topmost
- * covering plane), or fails with a message when none covers it; the debug log says
- * which, once per context. A one-layer YUV, 16-bit or 24-bit packet has no such fallback:
+ * covering plane), or fails with a message when none covers it; a one-layer packet
+ * that cannot be composed converts its layer as its buffer, at its own size; the
+ * debug log says which, once per context. A one-layer YUV, 16-bit or 24-bit packet has no such fallback:
  * it fails with -ENOTSUP without EGL.
  *
  * @param ctx   Context from drmtap_open_render() (or any context with EGL)

@@ -6,6 +6,36 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.6.1] - 2026-11-28
+
+A screen of ONE plane that is not the screen as it is came out the size of its buffer.
+
+### Fixed: one plane stretched to the screen, or smaller than it
+
+- With one lit non-cursor plane, `drmtap_convert_packet()`, `drmtap_grab_mapped()`,
+  `drmtap_grab_mapped_fast()` and `drmtap_grab()` returned the buffer of that plane at its own size,
+  whatever its place on the screen. A 40x40 buffer stretched to a 1920x1080 CRTC gave a 40x40
+  frame (rustdesk/rustdesk#17187 shows the same jump, `2560x1600 -> 40x40`, and the consumer
+  rebuilt its stream). Measured on i915 with a plane lit that way: 40x40 from all three paths,
+  and from 0.5.12 too.
+- Such a plane is now composed to the CRTC size like a frame of several planes: black around
+  it, scaled from its source rectangle into its destination rectangle, rotated as its plane is.
+  The rotation answer for that frame is `ROTATE_0`, on the exporter (after
+  `drmtap_grab_packet()`) and on the converter. `drmtap_grab()` returns pixels for it
+  (`dma_buf_fd = -1`). Measured: 1920x1080 from the packet and mapped paths, with and without
+  EGL (the CPU composes a linear RGB plane).
+- A plane that IS the screen (it covers the CRTC and is not scaled) takes exactly the path it
+  took before, also when the hardware rotates it: measured on amdgpu at rotate 0, 90, 180 and
+  270, frames identical to 0.6.0.
+- When the plane cannot be composed (no EGL and a layout the CPU cannot read), the frame is its
+  buffer at its own size, as before.
+
+### Unchanged: the descriptor
+
+- `drmtap_grab_desc()` carries one buffer and cannot scale or place it: for such a plane the
+  descriptor is still that buffer at its own size. A consumer that needs the screen size uses
+  the packet API.
+
 ## [0.6.0] - 2026-11-25
 
 Capture of a screen made of several KMS planes. Until now libdrmtap read the primary plane
@@ -1330,6 +1360,7 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
+[0.6.1]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.6.1
 [0.6.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.6.0
 [0.5.14]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.14
 [0.5.13]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.13
