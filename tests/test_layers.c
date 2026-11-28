@@ -775,10 +775,12 @@ static void test_convert_packet(void) {
             close(rb);
         }
 
-        /* One NV12 layer, rotate-180, placed at +16+8 of a 64x48 CRTC: converted as
-         * its buffer (32x16, unrotated: white left half, black right half) and the
-         * rotation is the converter's answer. Twice: luma and chroma in separate
-         * fds, then both in one fd (the usual NV12 layout, chroma at YW*YH). */
+        /* One NV12 layer, rotate-180 (white left half, black right half). When it is
+         * the whole CRTC it converts as its buffer (32x16, unrotated) and the rotation
+         * is the converter's answer. Placed at +16+8 of a 64x48 CRTC it is composed to
+         * 64x48, turned in place, and the answer is ROTATE_0 (0.6.1: before, that frame
+         * came out 32x16). Twice: luma and chroma in separate fds, then both in one fd
+         * (the usual NV12 layout, chroma at YW*YH). */
         for (int onefd = 0; onefd < 2; onefd++) {
             enum { YW = 32, YH = 16 };
             uint8_t *yb = malloc(4096), *cb = malloc(4096);
@@ -799,9 +801,9 @@ static void test_convert_packet(void) {
             if (yfd >= 0 && (onefd || cfd >= 0)) {
                 drmtap_layer_set n;
                 memset(&n, 0, sizeof(n));
-                n.crtc_w = W; n.crtc_h = H; n.count = 1; n.lit = 1; n.nfds = onefd ? 1 : 2;
+                n.crtc_w = YW; n.crtc_h = YH; n.count = 1; n.lit = 1; n.nfds = onefd ? 1 : 2;
                 n.fds[0] = yfd; n.fds[1] = cfd;
-                n.layers[0] = mk_layer(10, YW, YH, 16, 8, YW, YH, 0);
+                n.layers[0] = mk_layer(10, YW, YH, 0, 0, YW, YH, 0);
                 n.layers[0].format = 0x3231564eu;   /* NV12 */
                 n.layers[0].num_planes = 2;
                 n.layers[0].pitches[0] = YW;
@@ -819,6 +821,20 @@ static void test_convert_packet(void) {
                       one[(8 * YW + 29) * 4 + 1] < 40,
                       onefd ? "a one-layer NV12 packet in one fd converts as its buffer, unrotated"
                             : "a one-layer packet in two fds converts as its buffer, unrotated");
+                /* the same layer, placed: composed to the CRTC, the white half lands
+                 * on the right of the rectangle, black around it */
+                n.crtc_w = W; n.crtc_h = H;
+                n.layers[0].crtc_x = 16; n.layers[0].crtc_y = 8;
+                static uint8_t placed[W * H * 4];
+                rot = 0;
+                r = convert(ctx, &n, &f, placed, sizeof(placed));
+                rr = drmtap_plane_rotation(ctx, &rot);
+                check(r == 0 && f.width == W && f.height == H && rr == 0 &&
+                      rot == DRMTAP_ROT_0 && placed[(16 * W + 45) * 4 + 1] > 200 &&
+                      placed[(16 * W + 18) * 4 + 1] < 40 && placed[(16 * W + 2) * 4 + 1] < 40 &&
+                      placed[(40 * W + 32) * 4 + 1] < 40,
+                      onefd ? "a placed one-layer NV12 packet in one fd is composed to the CRTC"
+                            : "a placed one-layer packet in two fds is composed to the CRTC");
             }
             if (yfd >= 0) close(yfd);
             if (cfd >= 0) close(cfd);
