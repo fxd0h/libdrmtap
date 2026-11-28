@@ -1490,7 +1490,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
     ctx->sw_override_on = 0;
 
     /* Step 1: which planes are lit (0.6.0). One lit plane is the single-buffer
-     * capture below, unless it is stretched or smaller than the CRTC (composed, 0.6.1). Several are composed, unless the caller needs ONE
+     * capture below, unless it is stretched or smaller than the CRTC and the caller
+     * wants pixels (composed, 0.6.1). Several are composed, unless the caller needs ONE
      * buffer. Without the plane properties (no atomic cap) the legacy primary
      * lookup runs, as before 0.6.0. The fb_id comes from the same read: never
      * cached across frames. */
@@ -1580,12 +1581,14 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
         }
     } else if (nl == 1) {
         uint32_t cw = 0, ch = 0;
-        if (!one_buffer &&
+        if (do_mmap &&
             drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0 &&
             !drmtap_layer_is_screen(&ls.layers[0], cw, ch)) {
-            /* One plane that is not the screen as it is (stretched, or smaller):
-             * compose it to the CRTC size like several planes, else the frame is the
-             * size of its buffer. When that cannot be done, its buffer as before. */
+            /* One plane that is not the screen as it is (stretched, or smaller), on a
+             * path that returns pixels: compose it to the CRTC size like several
+             * planes, else the frame is the size of its buffer. When that cannot be
+             * done, its buffer as before. The zero-copy paths (drmtap_grab,
+             * drmtap_grab_desc) keep returning the buffer: their contract is an fd. */
             int r = grab_composed(ctx, frame, 1);
             if (r == 0) {
                 return 0;
