@@ -28,8 +28,9 @@ A screen of ONE plane that is not the screen as it is came out the size of its b
   amdgpu at rotate 0, 90, 180 and 270, frames identical to 0.6.0. A plane larger than the CRTC
   (hanging off an edge) is not the screen and is composed to the CRTC size; 0.6.0 returned the
   whole buffer.
-- When the plane cannot be composed, whatever the error, the frame is its buffer at its own
-  size, as before, and the debug log says so once. When the reason is the plane itself (no
+- When the plane cannot be composed, the frame is its buffer at its own size, as before, and
+  the debug log says so once. The one exception is a caller buffer too small for the
+  CRTC-sized frame: that is -ENOSPC, as for several planes. When the reason is the plane itself (no
   composer for its layout, an import the driver refused) composing is not tried again for 2 s
   while its shape stays the same, so the buffer is not exported twice per frame (measured: 101
   exports for 100 frames instead of 200).
