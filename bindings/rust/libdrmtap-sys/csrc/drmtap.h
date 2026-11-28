@@ -346,7 +346,8 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * Multi-plane scanout (0.6.0): a frame of several planes is composed as in
  * drmtap_grab_mapped() and nothing is cached for it (the GPU import cache still
  * avoids re-importing the buffers). A single-plane frame takes the cached path as
- * before; finding out which costs one property read per plane that can drive the
+ * before, unless its plane is stretched to the CRTC or smaller than it: that one is
+ * composed to the CRTC size the same way (0.6.1); finding out which costs one property read per plane that can drive the
  * CRTC (five on an Intel pipe), which replaced the per-frame drmModeGetPlane.
  *
  * @param ctx   Capture context
