@@ -669,6 +669,48 @@ static void test_convert_packet(void) {
         check(r == 0 && f.width == W && f.height == H && rr == 0 && rot == DRMTAP_ROT_180,
               "a primary-alone fallback answers the primary rotation, not ROTATE_0");
     }
+    /* One 16x16 layer stretched to W x H at rotate-180: the CPU composer refuses it,
+     * so the frame is its buffer, and the shape is remembered (0.6.1) so the next
+     * frame does not try again. A composable shape that succeeds meanwhile does not
+     * clear that memo. */
+    {
+        int sq = make_buf(ctrl, 16, 16, 0xff00ff00u, 0);
+        if (sq >= 0) {
+            drmtap_layer_set m;
+            memset(&m, 0, sizeof(m));
+            m.count = 1; m.lit = 1; m.nfds = 1; m.fds[0] = sq;
+            m.crtc_w = W; m.crtc_h = H;
+            m.layers[0] = mk_layer(40, 16, 16, 0, 0, W, H, 0);
+            m.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+            m.layers[0].rotation = DRMTAP_ROT_180;
+            ctx->one_nocompose_key = 0;
+            r = convert(ctx, &m, &f, NULL, 0);
+            uint64_t key = ctx->one_nocompose_key;
+            int64_t until = ctx->one_nocompose_until_ms;
+            check(r == 0 && f.width == 16 && f.height == 16 && key != 0,
+                  "a single layer the CPU cannot compose falls back to its buffer, remembered");
+            drmtap_layer_set ok = m;
+            ok.layers[0].rotation = DRMTAP_ROT_0;
+            r = convert(ctx, &ok, &f, NULL, 0);
+            check(r == 0 && f.width == W && f.height == H && ctx->one_nocompose_key == key,
+                  "a composable single layer composes, the other shape keeps its memo");
+            /* a retry would renew the deadline to now + 2 s: park it far ahead first */
+            ctx->one_nocompose_until_ms = until + 1000000;
+            r = convert(ctx, &m, &f, NULL, 0);
+            check(r == 0 && f.width == 16 && ctx->one_nocompose_until_ms == until + 1000000,
+                  "the remembered shape is not composed again (memo not renewed)");
+            /* a caller buffer too small for the CRTC-sized frame: -ENOSPC, no fallback */
+            static uint8_t tiny[16 * 16 * 4];
+            check(drmtap_set_output_buffer(ctx, tiny, sizeof(tiny)) == 0, "small output buffer set");
+            uint8_t pkt[DRMTAP_PKT_MAX_LEN];
+            int plen = drmtap_packet_encode(&ok, pkt, sizeof(pkt));
+            r = plen < 0 ? plen : drmtap_convert_packet(ctx, pkt, (size_t)plen, ok.fds, ok.nfds, &f);
+            check(r == -ENOSPC, "a single layer composed into a too small caller buffer is -ENOSPC");
+            drmtap_set_output_buffer(ctx, NULL, 0);
+            ctx->one_nocompose_key = 0;
+            close(sq);
+        }
+    }
     /* Underlay: the primary is a 16x16 window under a covering 64x48 layer that the
      * CPU cannot compose. The fallback is the covering layer (the screen with the
      * window's hole), never the window as the screen. */

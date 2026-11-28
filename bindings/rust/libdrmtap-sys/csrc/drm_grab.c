@@ -1461,18 +1461,27 @@ static int64_t mono_ms(void) {
  * not see. Any other error is retried on the next frame. */
 #define DRMTAP_ONE_NOCOMPOSE_MS 2000
 static int one_layer_should_compose(drmtap_ctx *ctx, const drmtap_layer *l,
-                                    uint32_t w, uint32_t h) {
-    return ctx->one_nocompose_key != drmtap_layer_shape_key(l, w, h) ||
+                                    uint32_t crtc, uint32_t w, uint32_t h) {
+    return ctx->one_nocompose_key != drmtap_layer_shape_key(l, crtc, w, h) ||
            mono_ms() >= ctx->one_nocompose_until_ms;
 }
-static void one_layer_composed(drmtap_ctx *ctx, const drmtap_layer *l, uint32_t w,
-                               uint32_t h, int err) {
+static void one_layer_composed(drmtap_ctx *ctx, const drmtap_layer *l, uint32_t crtc,
+                               uint32_t w, uint32_t h, int err) {
+    uint64_t k = drmtap_layer_shape_key(l, crtc, w, h);
     if (err == 0) {
-        ctx->one_nocompose_key = 0;
+        if (ctx->one_nocompose_key == k) {   /* another shape keeps its memo */
+            ctx->one_nocompose_key = 0;
+        }
     } else if (err == -ENOTSUP || err == -EIO || err == -EPROTO) {
-        ctx->one_nocompose_key = drmtap_layer_shape_key(l, w, h);
+        ctx->one_nocompose_key = k;
         ctx->one_nocompose_until_ms = mono_ms() + DRMTAP_ONE_NOCOMPOSE_MS;
     }
+}
+/* The compose errors of one plane that are the caller's to see, not a reason to fall
+ * back to its buffer: a caller output buffer too small (drmtap_set_output_buffer
+ * promises -ENOSPC rather than a frame of another size). */
+static int one_layer_error_is_final(int err) {
+    return err == -ENOSPC;
 }
 
 /* A single plane that is not the screen could not be composed: its buffer is
@@ -1624,7 +1633,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
         if (do_mmap &&
             drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0 &&
             !drmtap_layer_is_screen(&ls.layers[0], cw, ch) &&
-            one_layer_should_compose(ctx, &ls.layers[0], cw, ch)) {
+            one_layer_should_compose(ctx, &ls.layers[0], ctx->crtc_id, cw, ch)) {
             /* One plane that is not the screen as it is (stretched, or smaller), on a
              * path that returns pixels: compose it to the CRTC size like several
              * planes, else the frame is the size of its buffer. When that cannot be
@@ -1632,9 +1641,9 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
              * drmtap_grab_desc) keep returning the buffer: their contract is an fd.
              * Any compose error falls back: a frame of the old size beats no frame. */
             int r = grab_composed(ctx, frame, 1);
-            one_layer_composed(ctx, &ls.layers[0], cw, ch, r);
-            if (r == 0) {
-                return 0;
+            one_layer_composed(ctx, &ls.layers[0], ctx->crtc_id, cw, ch, r);
+            if (r == 0 || one_layer_error_is_final(r)) {
+                return r;
             }
             log_one_layer_fallback(ctx, r);
         }
@@ -2837,15 +2846,15 @@ static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *fram
         uint32_t cw = 0, ch = 0;
         if (drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0 &&
             !drmtap_layer_is_screen(&ls.layers[0], cw, ch) &&
-            one_layer_should_compose(ctx, &ls.layers[0], cw, ch)) {
+            one_layer_should_compose(ctx, &ls.layers[0], ctx->crtc_id, cw, ch)) {
             if (!ctx->fast_initialized) {
                 read_hdr_for_current_crtc(ctx);
             }
             fast_sync_close(ctx);
             int r = grab_composed(ctx, frame, 0);
-            one_layer_composed(ctx, &ls.layers[0], cw, ch, r);
-            if (r == 0) {
-                return 0;
+            one_layer_composed(ctx, &ls.layers[0], ctx->crtc_id, cw, ch, r);
+            if (r == 0 || one_layer_error_is_final(r)) {
+                return r;
             }
             if (r == -EACCES) {
                 ctx->fast_no_privilege = 1;
@@ -3902,7 +3911,8 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
     ctx->cur_hdr_max_nits = s.hdr_max_nits;
     ctx->last_frame_composed = 0;
     if (s.count == 1 && (drmtap_layer_is_screen(&s.layers[0], s.crtc_w, s.crtc_h) ||
-                         !one_layer_should_compose(ctx, &s.layers[0], s.crtc_w, s.crtc_h))) {
+                         !one_layer_should_compose(ctx, &s.layers[0], s.crtc_id, s.crtc_w,
+                                                   s.crtc_h))) {
         r = convert_one_layer(ctx, &s, 0, frame);
         if (r == 0) {
             ctx->packet_rotation = s.layers[0].rotation;
@@ -3915,9 +3925,10 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
         ctx->last_frame_composed = 1;
     }
     if (s.count == 1) {
-        one_layer_composed(ctx, &s.layers[0], s.crtc_w, s.crtc_h, r);
+        one_layer_composed(ctx, &s.layers[0], s.crtc_id, s.crtc_w, s.crtc_h, r);
     }
-    if (r == 0 || (s.count > 1 && !layer_fallback_ok(r))) {
+    if (r == 0 || (s.count > 1 && !layer_fallback_ok(r)) ||
+        (s.count == 1 && one_layer_error_is_final(r))) {
         return r;
     }
     /* One layer that could not be composed to the screen, whatever the error: its
