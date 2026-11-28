@@ -2856,13 +2856,9 @@ static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *fram
             if (r == 0 || one_layer_error_is_final(r)) {
                 return r;
             }
-            if (r == -EACCES) {
-                ctx->fast_no_privilege = 1;
-                drmtap_set_error(ctx,
-                    "drmtap_grab_mapped_fast needs CAP_SYS_ADMIN in this process and has no "
-                    "helper fallback; use drmtap_grab_mapped()");
-                return -EACCES;
-            }
+            /* -EACCES included: a compose mmap can fail with it too, so it is not
+             * proof of a missing CAP_SYS_ADMIN. The buffer path below latches
+             * fast_no_privilege on the real sign (GEM handles zeroed by GETFB2). */
             log_one_layer_fallback(ctx, r);
         }
     }
