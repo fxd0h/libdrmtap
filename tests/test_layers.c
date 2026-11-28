@@ -839,6 +839,30 @@ static void test_convert_packet(void) {
             if (yfd >= 0) close(yfd);
             if (cfd >= 0) close(cfd);
         }
+        /* One RGB layer at rotate-90 that is the screen: as read from KMS (portrait
+         * 16x32 buffer, landscape 32x16 CRTC rectangle) and as packet_from_desc builds
+         * it (CRTC rectangle = buffer size). Both convert as their buffer, answer 0x2,
+         * never composed (0.6.1 composes only a layer that is not the screen). */
+        int port = make_buf(ctrl, 16, 32, 0xff00ff00u, 0);
+        if (port >= 0) {
+            for (int desc = 0; desc < 2; desc++) {
+                drmtap_layer_set q;
+                memset(&q, 0, sizeof(q));
+                q.count = 1; q.lit = 1; q.nfds = 1; q.fds[0] = port;
+                q.crtc_w = desc ? 16 : 32; q.crtc_h = desc ? 32 : 16;
+                q.layers[0] = mk_layer(30, 16, 32, 0, 0, q.crtc_w, q.crtc_h, 0);
+                q.layers[0].src_w = 16u << 16; q.layers[0].src_h = 32u << 16;
+                q.layers[0].rotation = DRMTAP_ROT_90;
+                q.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+                uint32_t rot = 0;
+                r = convert(ctx, &q, &f, NULL, 0);
+                int rr = drmtap_plane_rotation(ctx, &rot);
+                check(r == 0 && f.width == 16 && f.height == 32 && rr == 0 && rot == DRMTAP_ROT_90,
+                      desc ? "a rotate-90 layer from a descriptor converts as its buffer"
+                           : "a rotate-90 layer read from KMS converts as its buffer");
+            }
+            close(port);
+        }
         /* Import-cache pinning: a later layer must never release the texture an
          * earlier layer of the same frame already picked. Fill the 12 slots, then
          * a frame whose bottom layer hits and whose top layer misses (eviction),

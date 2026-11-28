@@ -352,7 +352,8 @@ impl DrmTap {
 
     /// Capture a frame: usually zero-copy, a DMA-BUF fd and no conversion.
     ///
-    /// Not always: on a screen of several planes (0.6.0) the planes are composed and the frame
+    /// Not always: on a screen of several planes (0.6.0), or of one plane stretched to the screen
+    /// or smaller than it (0.6.1), the planes are composed to the screen size and the frame
     /// holds converted pixels with no fd; through the privileged helper, a linear scanout on a
     /// GPU other than virtio-gpu is not exported, and `data()` holds a copy of its raw,
     /// unconverted pixels with no fd. Check [`Frame::dma_buf_borrowed_fd`] before using one.
