@@ -240,6 +240,8 @@ struct drmtap_ctx {
     int      logged_layer_overflow;
     int      logged_layer_fallback;
     int      logged_one_layer_fallback;   /* 0.6.1: a single plane not composed */
+    uint64_t one_nocompose_key;           /* 0.6.1: shape of a single plane that could */
+    int64_t  one_nocompose_until_ms;      /*   not be composed, and until when to skip */
     /* The CMD_GRAB_LAYERS latches, with the same meaning as the cursor2 ones above:
      * a helper that does not know the command (older than 0.6.0), a helper that has
      * answered it, and the one retry on a fresh helper before concluding it is old. */

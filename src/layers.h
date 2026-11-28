@@ -158,8 +158,8 @@ static inline int drmtap_layer_covers(const drmtap_layer *l, uint32_t w, uint32_
            (int64_t)l->crtc_y + (int64_t)l->crtc_h >= (int64_t)h;
 }
 
-/* Whether one layer alone IS the w x h screen as its buffer: it covers the CRTC and
- * is not scaled (its source rectangle has the size of its CRTC rectangle). Only such
+/* Whether one layer alone IS the w x h screen as its buffer: its CRTC rectangle is
+ * exactly the CRTC and it is not scaled (its source rectangle has that size). Only such
  * a layer can be returned as its buffer; any other one (stretched, or smaller than
  * the screen) has to be composed to w x h, or the frame comes out the size of the
  * buffer (a 40x40 plane stretched to the screen). A 90/270 plane read from KMS has
@@ -167,7 +167,8 @@ static inline int drmtap_layer_covers(const drmtap_layer *l, uint32_t w, uint32_
  * a descriptor (packet_from_desc, also in 0.6.0 exporters) gives its CRTC rectangle
  * the source size at any rotation, and matches the first test. */
 static inline int drmtap_layer_is_screen(const drmtap_layer *l, uint32_t w, uint32_t h) {
-    if (!drmtap_layer_covers(l, w, h)) {
+    /* exactly the CRTC: a plane hanging off an edge (larger than the screen) is not */
+    if (l->crtc_x != 0 || l->crtc_y != 0 || l->crtc_w != w || l->crtc_h != h) {
         return 0;
     }
     uint32_t sw = l->src_w >> 16, sh = l->src_h >> 16;
@@ -229,6 +230,22 @@ static inline int drmtap_layers_stand_in(const drmtap_layer_set *s, uint32_t w, 
         }
     }
     return -1;
+}
+
+/* The shape of one layer on a w x h CRTC, without its framebuffer: what decides
+ * whether it can be composed apart from its format (0.6.1, see one_nocompose_key). */
+static inline uint64_t drmtap_layer_shape_key(const drmtap_layer *l, uint32_t w, uint32_t h) {
+    uint64_t k = 0xcbf29ce484222325ull;
+    const uint32_t v[12] = { l->plane_id, l->src_x, l->src_y, l->src_w, l->src_h,
+                             (uint32_t)l->crtc_x, (uint32_t)l->crtc_y, l->crtc_w, l->crtc_h,
+                             l->rotation, w, h };
+    for (int i = 0; i < 12; i++) {
+        for (int b = 0; b < 4; b++) {
+            k ^= (v[i] >> (b * 8)) & 0xffu;
+            k *= 0x100000001b3ull;
+        }
+    }
+    return k | 1u;   /* never 0: 0 means no shape is remembered */
 }
 
 /* Key of everything that decides the composed image apart from the pixels: the

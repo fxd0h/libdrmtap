@@ -298,7 +298,8 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * The debug log says which fallback ran, once per context. One lit plane that is
  * stretched to the CRTC, or smaller than it, is composed to the CRTC size the same
  * way (0.6.1); when it cannot be composed the frame is that plane's buffer, at its
- * own size.
+ * own size, and composing it is not tried again for 2 s while its shape stays the
+ * same.
  * A composed frame's fb_id is the PRIMARY plane's: it names no buffer holding
  * these pixels and does not change when only a window on another plane does, so
  * it is not a content key (compare pixels, or use DRMTAP_SKIP_UNCHANGED).

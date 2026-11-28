@@ -23,11 +23,16 @@ A screen of ONE plane that is not the screen as it is came out the size of its b
   The rotation answer for that frame is `ROTATE_0`, on the exporter (after
   `drmtap_grab_packet()`) and on the converter. Measured: 1920x1080 from the packet and mapped paths, with and without
   EGL (the CPU composes a linear RGB plane).
-- A plane that IS the screen (it covers the CRTC and is not scaled) takes exactly the path it
-  took before, also when the hardware rotates it: measured on amdgpu at rotate 0, 90, 180 and
-  270, frames identical to 0.6.0.
-- When the plane cannot be composed (no EGL and a layout the CPU cannot read), the frame is its
-  buffer at its own size, as before.
+- A plane that IS the screen (its destination rectangle is exactly the CRTC and it is not
+  scaled) takes exactly the path it took before, also when the hardware rotates it: measured on
+  amdgpu at rotate 0, 90, 180 and 270, frames identical to 0.6.0. A plane larger than the CRTC
+  (hanging off an edge) is not the screen and is composed to the CRTC size; 0.6.0 returned the
+  whole buffer.
+- When the plane cannot be composed, whatever the error, the frame is its buffer at its own
+  size, as before, and the debug log says so once. When the reason is the plane itself (no
+  composer for its layout, an import the driver refused) composing is not tried again for 2 s
+  while its shape stays the same, so the buffer is not exported twice per frame (measured: 101
+  exports for 100 frames instead of 200).
 
 ### Unchanged: the zero-copy calls
 

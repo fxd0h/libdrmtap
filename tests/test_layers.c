@@ -839,6 +839,22 @@ static void test_convert_packet(void) {
             if (yfd >= 0) close(yfd);
             if (cfd >= 0) close(cfd);
         }
+        /* One layer larger than the CRTC, hanging off the left edge, not scaled: it
+         * covers the screen but is not the screen, so it is composed to W x H (0.6.1;
+         * 0.6.0 returned the whole W+16 buffer). */
+        int wide = make_buf(ctrl, W + 16, H, 0xffff0000u, 0);
+        if (wide >= 0) {
+            drmtap_layer_set o;
+            memset(&o, 0, sizeof(o));
+            o.count = 1; o.lit = 1; o.nfds = 1; o.fds[0] = wide;
+            o.crtc_w = W; o.crtc_h = H;
+            o.layers[0] = mk_layer(31, W + 16, H, -8, 0, W + 16, H, 0);
+            o.layers[0].flags = DRMTAP_LAYER_FLAG_PRIMARY;
+            r = convert(ctx, &o, &f, NULL, 0);
+            check(r == 0 && f.width == W && f.height == H,
+                  "a layer larger than the CRTC is composed to the CRTC size");
+            close(wide);
+        }
         /* One RGB layer at rotate-90 that is the screen: as read from KMS (portrait
          * 16x32 buffer, landscape 32x16 CRTC rectangle) and as packet_from_desc builds
          * it (CRTC rectangle = buffer size). Both convert as their buffer, answer 0x2,

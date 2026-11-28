@@ -1448,6 +1448,33 @@ static int grab_composed(drmtap_ctx *ctx, drmtap_frame_info *frame, int allow_he
     return ret;
 }
 
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A single plane that could not be composed for a reason of its own (no composer for
+ * its layout, an import the driver refused) is not tried again for 2 s while its
+ * shape stays the same: without that every frame exported it twice, as layers and
+ * then as one buffer. The 2 s also cover a format or modifier change the shape does
+ * not see. Any other error is retried on the next frame. */
+#define DRMTAP_ONE_NOCOMPOSE_MS 2000
+static int one_layer_should_compose(drmtap_ctx *ctx, const drmtap_layer *l,
+                                    uint32_t w, uint32_t h) {
+    return ctx->one_nocompose_key != drmtap_layer_shape_key(l, w, h) ||
+           mono_ms() >= ctx->one_nocompose_until_ms;
+}
+static void one_layer_composed(drmtap_ctx *ctx, const drmtap_layer *l, uint32_t w,
+                               uint32_t h, int err) {
+    if (err == 0) {
+        ctx->one_nocompose_key = 0;
+    } else if (err == -ENOTSUP || err == -EIO || err == -EPROTO) {
+        ctx->one_nocompose_key = drmtap_layer_shape_key(l, w, h);
+        ctx->one_nocompose_until_ms = mono_ms() + DRMTAP_ONE_NOCOMPOSE_MS;
+    }
+}
+
 /* A single plane that is not the screen could not be composed: its buffer is
  * returned at its own size, as before 0.6.1. Said once per context. */
 static void log_one_layer_fallback(drmtap_ctx *ctx, int err) {
@@ -1596,7 +1623,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
         uint32_t cw = 0, ch = 0;
         if (do_mmap &&
             drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0 &&
-            !drmtap_layer_is_screen(&ls.layers[0], cw, ch)) {
+            !drmtap_layer_is_screen(&ls.layers[0], cw, ch) &&
+            one_layer_should_compose(ctx, &ls.layers[0], cw, ch)) {
             /* One plane that is not the screen as it is (stretched, or smaller), on a
              * path that returns pixels: compose it to the CRTC size like several
              * planes, else the frame is the size of its buffer. When that cannot be
@@ -1604,6 +1632,7 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap, int o
              * drmtap_grab_desc) keep returning the buffer: their contract is an fd.
              * Any compose error falls back: a frame of the old size beats no frame. */
             int r = grab_composed(ctx, frame, 1);
+            one_layer_composed(ctx, &ls.layers[0], cw, ch, r);
             if (r == 0) {
                 return 0;
             }
@@ -2807,12 +2836,14 @@ static int drmtap_grab_mapped_fast_impl(drmtap_ctx *ctx, drmtap_frame_info *fram
          * cached single-buffer path below (no helper here, as for nl > 1). */
         uint32_t cw = 0, ch = 0;
         if (drmtap_kms_crtc_size(ctx->drm_fd, ctx->crtc_id, &cw, &ch) == 0 &&
-            !drmtap_layer_is_screen(&ls.layers[0], cw, ch)) {
+            !drmtap_layer_is_screen(&ls.layers[0], cw, ch) &&
+            one_layer_should_compose(ctx, &ls.layers[0], cw, ch)) {
             if (!ctx->fast_initialized) {
                 read_hdr_for_current_crtc(ctx);
             }
             fast_sync_close(ctx);
             int r = grab_composed(ctx, frame, 0);
+            one_layer_composed(ctx, &ls.layers[0], cw, ch, r);
             if (r == 0) {
                 return 0;
             }
@@ -3870,7 +3901,8 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
     ctx->cur_hdr_eotf = s.hdr_eotf;
     ctx->cur_hdr_max_nits = s.hdr_max_nits;
     ctx->last_frame_composed = 0;
-    if (s.count == 1 && drmtap_layer_is_screen(&s.layers[0], s.crtc_w, s.crtc_h)) {
+    if (s.count == 1 && (drmtap_layer_is_screen(&s.layers[0], s.crtc_w, s.crtc_h) ||
+                         !one_layer_should_compose(ctx, &s.layers[0], s.crtc_w, s.crtc_h))) {
         r = convert_one_layer(ctx, &s, 0, frame);
         if (r == 0) {
             ctx->packet_rotation = s.layers[0].rotation;
@@ -3881,6 +3913,9 @@ static int drmtap_convert_packet_impl(drmtap_ctx *ctx, const void *bytes, size_t
     r = compose_layers(ctx, &s, frame);
     if (r == 0) {
         ctx->last_frame_composed = 1;
+    }
+    if (s.count == 1) {
+        one_layer_composed(ctx, &s.layers[0], s.crtc_w, s.crtc_h, r);
     }
     if (r == 0 || (s.count > 1 && !layer_fallback_ok(r))) {
         return r;
