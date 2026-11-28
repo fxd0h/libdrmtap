@@ -234,12 +234,13 @@ static inline int drmtap_layers_stand_in(const drmtap_layer_set *s, uint32_t w, 
 
 /* The shape of one layer on a w x h CRTC, without its framebuffer: what decides
  * whether it can be composed apart from its format (0.6.1, see one_nocompose_key). */
-static inline uint64_t drmtap_layer_shape_key(const drmtap_layer *l, uint32_t w, uint32_t h) {
+static inline uint64_t drmtap_layer_shape_key(const drmtap_layer *l, uint32_t crtc,
+                                              uint32_t w, uint32_t h) {
     uint64_t k = 0xcbf29ce484222325ull;
-    const uint32_t v[12] = { l->plane_id, l->src_x, l->src_y, l->src_w, l->src_h,
+    const uint32_t v[13] = { crtc, l->plane_id, l->src_x, l->src_y, l->src_w, l->src_h,
                              (uint32_t)l->crtc_x, (uint32_t)l->crtc_y, l->crtc_w, l->crtc_h,
                              l->rotation, w, h };
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 13; i++) {
         for (int b = 0; b < 4; b++) {
             k ^= (v[i] >> (b * 8)) & 0xffu;
             k *= 0x100000001b3ull;

@@ -299,7 +299,8 @@ int drmtap_grab(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * stretched to the CRTC, or smaller than it, is composed to the CRTC size the same
  * way (0.6.1); when it cannot be composed the frame is that plane's buffer, at its
  * own size, and composing it is not tried again for 2 s while its shape stays the
- * same.
+ * same. A caller output buffer too small for the CRTC-sized frame is -ENOSPC, as
+ * drmtap_set_output_buffer() says, not a fallback.
  * A composed frame's fb_id is the PRIMARY plane's: it names no buffer holding
  * these pixels and does not change when only a window on another plane does, so
  * it is not a content key (compare pixels, or use DRMTAP_SKIP_UNCHANGED).
@@ -348,8 +349,10 @@ int drmtap_grab_mapped(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * drmtap_grab_mapped() and nothing is cached for it (the GPU import cache still
  * avoids re-importing the buffers). A single-plane frame takes the cached path as
  * before, unless its plane is stretched to the CRTC or smaller than it: that one is
- * composed to the CRTC size the same way (0.6.1); finding out which costs one property read per plane that can drive the
- * CRTC (five on an Intel pipe), which replaced the per-frame drmModeGetPlane.
+ * composed to the CRTC size the same way (0.6.1). Finding out which costs one
+ * property read per plane that can drive the CRTC (five on an Intel pipe), plus one
+ * CRTC read when a single plane is lit (0.6.1), which replaced the per-frame
+ * drmModeGetPlane.
  *
  * @param ctx   Capture context
  * @param frame Output frame info (caller-allocated, reused between calls)
