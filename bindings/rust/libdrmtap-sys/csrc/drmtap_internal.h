@@ -239,6 +239,7 @@ struct drmtap_ctx {
      * and a composed frame that had to fall back to one plane alone. */
     int      logged_layer_overflow;
     int      logged_layer_fallback;
+    int      logged_one_layer_fallback;   /* 0.6.1: a single plane not composed */
     /* The CMD_GRAB_LAYERS latches, with the same meaning as the cursor2 ones above:
      * a helper that does not know the command (older than 0.6.0), a helper that has
      * answered it, and the one retry on a fresh helper before concluding it is old. */
